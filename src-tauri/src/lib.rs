@@ -32,6 +32,7 @@ use crate::commands::{
     remote_chat_via_openclaw, remote_check_openclaw_update,
     remote_save_config_baseline, remote_check_config_dirty, remote_discard_config_changes, remote_apply_pending_changes,
     run_openclaw_upgrade, remote_run_openclaw_upgrade,
+    remote_backup_before_upgrade, remote_list_backups, remote_restore_from_backup, remote_delete_backup,
     RemoteConfigBaselines,
 };
 use crate::ssh::SshConnectionPool;
@@ -149,6 +150,10 @@ pub fn run() {
             remote_apply_pending_changes,
             run_openclaw_upgrade,
             remote_run_openclaw_upgrade,
+            remote_backup_before_upgrade,
+            remote_list_backups,
+            remote_restore_from_backup,
+            remote_delete_backup,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run app");

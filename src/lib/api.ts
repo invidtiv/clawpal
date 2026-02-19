@@ -201,6 +201,16 @@ export const api = {
   remoteApplyPendingChanges: (hostId: string): Promise<boolean> =>
     invoke("remote_apply_pending_changes", { hostId }),
 
+  // Remote backup
+  remoteBackupBeforeUpgrade: (hostId: string): Promise<BackupInfo> =>
+    invoke("remote_backup_before_upgrade", { hostId }),
+  remoteListBackups: (hostId: string): Promise<BackupInfo[]> =>
+    invoke("remote_list_backups", { hostId }),
+  remoteRestoreFromBackup: (hostId: string, backupName: string): Promise<string> =>
+    invoke("remote_restore_from_backup", { hostId, backupName }),
+  remoteDeleteBackup: (hostId: string, backupName: string): Promise<boolean> =>
+    invoke("remote_delete_backup", { hostId, backupName }),
+
   // Upgrade
   runOpenclawUpgrade: (): Promise<string> =>
     invoke("run_openclaw_upgrade", {}),

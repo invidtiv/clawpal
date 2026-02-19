@@ -48,20 +48,17 @@ export function UpgradeDialog({
   };
 
   const startUpgrade = async () => {
-    if (isRemote) {
-      setStep("upgrading");
-      runUpgrade();
-    } else {
-      setStep("backup");
-      runBackup();
-    }
+    setStep("backup");
+    runBackup();
   };
 
   const runBackup = async () => {
     setLoading(true);
     setError("");
     try {
-      const info = await api.backupBeforeUpgrade();
+      const info = isRemote
+        ? await api.remoteBackupBeforeUpgrade(instanceId)
+        : await api.backupBeforeUpgrade();
       setBackupName(info.name);
       setLoading(false);
       setStep("upgrading");
@@ -112,9 +109,7 @@ export function UpgradeDialog({
               <code className="font-medium text-primary">{latestVersion}</code>
             </div>
             <p className="text-sm text-muted-foreground">
-              {isRemote
-                ? "This will upgrade OpenClaw on the remote instance."
-                : "This will back up your config and upgrade OpenClaw."}
+              This will back up your config and upgrade OpenClaw{isRemote ? " on the remote instance" : ""}.
             </p>
           </div>
         )}

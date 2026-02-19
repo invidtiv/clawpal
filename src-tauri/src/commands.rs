@@ -4017,6 +4017,148 @@ pub fn delete_backup(backup_name: String) -> Result<bool, String> {
     Ok(true)
 }
 
+// ---- Remote Backup / Restore (via SSH) ----
+
+#[tauri::command]
+pub async fn remote_backup_before_upgrade(
+    pool: State<'_, SshConnectionPool>,
+    host_id: String,
+) -> Result<BackupInfo, String> {
+    let now_secs = unix_timestamp_secs();
+    let now_dt = chrono::DateTime::<chrono::Utc>::from_timestamp(now_secs as i64, 0);
+    let name = now_dt
+        .map(|dt| dt.format("%Y-%m-%d_%H%M%S").to_string())
+        .unwrap_or_else(|| format!("{now_secs}"));
+
+    let cmd = format!(
+        concat!(
+            "set -e; ",
+            "BDIR=\"$HOME/.openclaw/.clawpal/backups/{name}\"; ",
+            "mkdir -p \"$BDIR\"; ",
+            "cp \"$HOME/.openclaw/openclaw.json\" \"$BDIR/\" 2>/dev/null || true; ",
+            "cp -r \"$HOME/.openclaw/agents\" \"$BDIR/\" 2>/dev/null || true; ",
+            "cp -r \"$HOME/.openclaw/memory\" \"$BDIR/\" 2>/dev/null || true; ",
+            "du -sk \"$BDIR\" 2>/dev/null | awk '{{print $1 * 1024}}' || echo 0"
+        ),
+        name = name
+    );
+
+    let result = pool.exec_login(&host_id, &cmd).await?;
+    if result.exit_code != 0 {
+        return Err(format!("Remote backup failed (exit {}): {}", result.exit_code, result.stderr));
+    }
+
+    let size_bytes: u64 = result.stdout.trim().lines().last()
+        .and_then(|l| l.trim().parse().ok())
+        .unwrap_or(0);
+
+    Ok(BackupInfo {
+        name,
+        path: String::new(),
+        created_at: format_timestamp_from_unix(now_secs),
+        size_bytes,
+    })
+}
+
+#[tauri::command]
+pub async fn remote_list_backups(
+    pool: State<'_, SshConnectionPool>,
+    host_id: String,
+) -> Result<Vec<BackupInfo>, String> {
+    // List backup directory names
+    let list_result = pool
+        .exec_login(&host_id, "ls -1d \"$HOME/.openclaw/.clawpal/backups\"/*/  2>/dev/null || true")
+        .await?;
+
+    let dirs: Vec<String> = list_result
+        .stdout
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| l.trim().trim_end_matches('/').to_string())
+        .collect();
+
+    if dirs.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Build a single command to get sizes for all backup dirs (du -sk is POSIX portable)
+    let du_parts: Vec<String> = dirs
+        .iter()
+        .map(|d| format!("du -sk '{}' 2>/dev/null || echo '0\t{}'", d, d))
+        .collect();
+    let du_cmd = du_parts.join("; ");
+    let du_result = pool.exec_login(&host_id, &du_cmd).await?;
+
+    let mut size_map = std::collections::HashMap::new();
+    for line in du_result.stdout.lines() {
+        let parts: Vec<&str> = line.splitn(2, '\t').collect();
+        if parts.len() == 2 {
+            let size_kb: u64 = parts[0].trim().parse().unwrap_or(0);
+            let path = parts[1].trim().trim_end_matches('/');
+            size_map.insert(path.to_string(), size_kb * 1024);
+        }
+    }
+
+    let mut backups: Vec<BackupInfo> = dirs
+        .iter()
+        .map(|d| {
+            let name = d.rsplit('/').next().unwrap_or(d).to_string();
+            let size_bytes = size_map.get(d.trim_end_matches('/')).copied().unwrap_or(0);
+            BackupInfo {
+                name: name.clone(),
+                path: String::new(),
+                created_at: name.clone(), // Name is the timestamp
+                size_bytes,
+            }
+        })
+        .collect();
+
+    backups.sort_by(|a, b| b.name.cmp(&a.name));
+    Ok(backups)
+}
+
+#[tauri::command]
+pub async fn remote_restore_from_backup(
+    pool: State<'_, SshConnectionPool>,
+    host_id: String,
+    backup_name: String,
+) -> Result<String, String> {
+    let cmd = format!(
+        concat!(
+            "set -e; ",
+            "BDIR=\"$HOME/.openclaw/.clawpal/backups/{name}\"; ",
+            "[ -d \"$BDIR\" ] || {{ echo 'Backup not found'; exit 1; }}; ",
+            "cp \"$BDIR/openclaw.json\" \"$HOME/.openclaw/openclaw.json\" 2>/dev/null || true; ",
+            "[ -d \"$BDIR/agents\" ] && cp -r \"$BDIR/agents\" \"$HOME/.openclaw/\" 2>/dev/null || true; ",
+            "[ -d \"$BDIR/memory\" ] && cp -r \"$BDIR/memory\" \"$HOME/.openclaw/\" 2>/dev/null || true; ",
+            "echo 'Restored from backup '\"'\"'{name}'\"'\"''"
+        ),
+        name = backup_name
+    );
+
+    let result = pool.exec_login(&host_id, &cmd).await?;
+    if result.exit_code != 0 {
+        return Err(format!("Remote restore failed: {}", result.stderr));
+    }
+
+    Ok(format!("Restored from backup '{}'", backup_name))
+}
+
+#[tauri::command]
+pub async fn remote_delete_backup(
+    pool: State<'_, SshConnectionPool>,
+    host_id: String,
+    backup_name: String,
+) -> Result<bool, String> {
+    let cmd = format!(
+        "BDIR=\"$HOME/.openclaw/.clawpal/backups/{name}\"; [ -d \"$BDIR\" ] && rm -rf \"$BDIR\" && echo 'deleted' || echo 'not_found'",
+        name = backup_name
+    );
+
+    let result = pool.exec_login(&host_id, &cmd).await?;
+    Ok(result.stdout.trim() == "deleted")
+}
+
 fn resolve_model_provider_base_url(cfg: &Value, provider: &str) -> Option<String> {
     let provider = provider.trim();
     if provider.is_empty() {

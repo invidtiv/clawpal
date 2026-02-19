@@ -139,11 +139,15 @@ export function Home({
   }, []);
 
   const refreshBackups = () => {
-    if (isRemote) { setBackups([]); return; }
-    api.listBackups().then(setBackups).catch((e) => console.error("Failed to load backups:", e));
+    if (isRemote) {
+      if (!isConnected) return;
+      api.remoteListBackups(instanceId).then(setBackups).catch((e) => console.error("Failed to load remote backups:", e));
+    } else {
+      api.listBackups().then(setBackups).catch((e) => console.error("Failed to load backups:", e));
+    }
   };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  useEffect(refreshBackups, [isRemote]);
+  useEffect(refreshBackups, [isRemote, isConnected, instanceId]);
 
   useEffect(() => {
     if (isRemote) {
@@ -477,123 +481,130 @@ export function Home({
         )}
 
         {/* Backups */}
-        {!isRemote && (
-          <>
-            <div className="flex items-center justify-between mt-6 mb-3">
-              <h3 className="text-lg font-semibold">Backups</h3>
-              <Button
-                size="sm"
-                variant="outline"
-                disabled={backingUp}
-                onClick={() => {
-                  setBackingUp(true);
-                  setBackupMessage("");
-                  api.backupBeforeUpgrade()
-                    .then((info) => {
-                      setBackupMessage(`Created backup: ${info.name}`);
-                      refreshBackups();
-                    })
-                    .catch((e) => setBackupMessage(`Backup failed: ${e}`))
-                    .finally(() => setBackingUp(false));
-                }}
-              >
-                {backingUp ? "Creating..." : "Create Backup"}
-              </Button>
-            </div>
-            {backupMessage && (
-              <p className="text-sm text-muted-foreground mb-2">{backupMessage}</p>
-            )}
-            {backups === null ? (
-              <div className="space-y-2">
-                <Skeleton className="h-16 w-full" />
-                <Skeleton className="h-16 w-full" />
-              </div>
-            ) : backups.length === 0 ? (
-              <p className="text-muted-foreground text-sm">No backups available.</p>
-            ) : (
-              <div className="space-y-2">
-                {backups.map((backup) => (
-                  <Card key={backup.name}>
-                    <CardContent className="flex items-center justify-between">
-                      <div>
-                        <div className="font-medium text-sm">{backup.name}</div>
-                        <div className="text-xs text-muted-foreground">
-                          {formatTime(backup.createdAt)} — {formatBytes(backup.sizeBytes)}
-                        </div>
-                      </div>
-                      <div className="flex gap-1.5">
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          onClick={() => api.openUrl(backup.path)}
-                        >
-                          Show
+        <div className="flex items-center justify-between mt-6 mb-3">
+          <h3 className="text-lg font-semibold">Backups</h3>
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={backingUp}
+            onClick={() => {
+              setBackingUp(true);
+              setBackupMessage("");
+              const backupPromise = isRemote
+                ? api.remoteBackupBeforeUpgrade(instanceId)
+                : api.backupBeforeUpgrade();
+              backupPromise
+                .then((info) => {
+                  setBackupMessage(`Created backup: ${info.name}`);
+                  refreshBackups();
+                })
+                .catch((e) => setBackupMessage(`Backup failed: ${e}`))
+                .finally(() => setBackingUp(false));
+            }}
+          >
+            {backingUp ? "Creating..." : "Create Backup"}
+          </Button>
+        </div>
+        {backupMessage && (
+          <p className="text-sm text-muted-foreground mb-2">{backupMessage}</p>
+        )}
+        {backups === null ? (
+          <div className="space-y-2">
+            <Skeleton className="h-16 w-full" />
+            <Skeleton className="h-16 w-full" />
+          </div>
+        ) : backups.length === 0 ? (
+          <p className="text-muted-foreground text-sm">No backups available.</p>
+        ) : (
+          <div className="space-y-2">
+            {backups.map((backup) => (
+              <Card key={backup.name}>
+                <CardContent className="flex items-center justify-between">
+                  <div>
+                    <div className="font-medium text-sm">{backup.name}</div>
+                    <div className="text-xs text-muted-foreground">
+                      {formatTime(backup.createdAt)} — {formatBytes(backup.sizeBytes)}
+                    </div>
+                  </div>
+                  <div className="flex gap-1.5">
+                    {!isRemote && (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => api.openUrl(backup.path)}
+                      >
+                        Show
+                      </Button>
+                    )}
+                    <AlertDialog>
+                      <AlertDialogTrigger asChild>
+                        <Button size="sm" variant="outline">
+                          Restore
                         </Button>
-                        <AlertDialog>
-                          <AlertDialogTrigger asChild>
-                            <Button size="sm" variant="outline">
-                              Restore
-                            </Button>
-                          </AlertDialogTrigger>
-                          <AlertDialogContent>
-                            <AlertDialogHeader>
-                              <AlertDialogTitle>Restore from backup?</AlertDialogTitle>
-                              <AlertDialogDescription>
-                                This will restore config and workspace files from backup "{backup.name}". Current files will be overwritten.
-                              </AlertDialogDescription>
-                            </AlertDialogHeader>
-                            <AlertDialogFooter>
-                              <AlertDialogCancel>Cancel</AlertDialogCancel>
-                              <AlertDialogAction
-                                onClick={() => {
-                                  api.restoreFromBackup(backup.name)
-                                    .then((msg) => setBackupMessage(msg))
-                                    .catch((e) => setBackupMessage(`Restore failed: ${e}`));
-                                }}
-                              >
-                                Restore
-                              </AlertDialogAction>
-                            </AlertDialogFooter>
-                          </AlertDialogContent>
-                        </AlertDialog>
-                        <AlertDialog>
-                          <AlertDialogTrigger asChild>
-                            <Button size="sm" variant="destructive">
-                              Delete
-                            </Button>
-                          </AlertDialogTrigger>
-                          <AlertDialogContent>
-                            <AlertDialogHeader>
-                              <AlertDialogTitle>Delete backup?</AlertDialogTitle>
-                              <AlertDialogDescription>
-                                This will permanently delete backup "{backup.name}". This action cannot be undone.
-                              </AlertDialogDescription>
-                            </AlertDialogHeader>
-                            <AlertDialogFooter>
-                              <AlertDialogCancel>Cancel</AlertDialogCancel>
-                              <AlertDialogAction
-                                className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
-                                onClick={() => {
-                                  api.deleteBackup(backup.name)
-                                    .then(() => {
-                                      setBackupMessage(`Deleted backup "${backup.name}"`);
-                                      refreshBackups();
-                                    })
-                                    .catch((e) => setBackupMessage(`Delete failed: ${e}`));
-                                }}
-                              >
-                                Delete
-                              </AlertDialogAction>
-                            </AlertDialogFooter>
-                          </AlertDialogContent>
-                        </AlertDialog>
-                      </div>
-                    </CardContent>
-                  </Card>
-                ))}
-              </div>
-            )}
-          </>
+                      </AlertDialogTrigger>
+                      <AlertDialogContent>
+                        <AlertDialogHeader>
+                          <AlertDialogTitle>Restore from backup?</AlertDialogTitle>
+                          <AlertDialogDescription>
+                            This will restore config and workspace files from backup "{backup.name}". Current files will be overwritten.
+                          </AlertDialogDescription>
+                        </AlertDialogHeader>
+                        <AlertDialogFooter>
+                          <AlertDialogCancel>Cancel</AlertDialogCancel>
+                          <AlertDialogAction
+                            onClick={() => {
+                              const restorePromise = isRemote
+                                ? api.remoteRestoreFromBackup(instanceId, backup.name)
+                                : api.restoreFromBackup(backup.name);
+                              restorePromise
+                                .then((msg) => setBackupMessage(msg))
+                                .catch((e) => setBackupMessage(`Restore failed: ${e}`));
+                            }}
+                          >
+                            Restore
+                          </AlertDialogAction>
+                        </AlertDialogFooter>
+                      </AlertDialogContent>
+                    </AlertDialog>
+                    <AlertDialog>
+                      <AlertDialogTrigger asChild>
+                        <Button size="sm" variant="destructive">
+                          Delete
+                        </Button>
+                      </AlertDialogTrigger>
+                      <AlertDialogContent>
+                        <AlertDialogHeader>
+                          <AlertDialogTitle>Delete backup?</AlertDialogTitle>
+                          <AlertDialogDescription>
+                            This will permanently delete backup "{backup.name}". This action cannot be undone.
+                          </AlertDialogDescription>
+                        </AlertDialogHeader>
+                        <AlertDialogFooter>
+                          <AlertDialogCancel>Cancel</AlertDialogCancel>
+                          <AlertDialogAction
+                            className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+                            onClick={() => {
+                              const deletePromise = isRemote
+                                ? api.remoteDeleteBackup(instanceId, backup.name)
+                                : api.deleteBackup(backup.name);
+                              deletePromise
+                                .then(() => {
+                                  setBackupMessage(`Deleted backup "${backup.name}"`);
+                                  refreshBackups();
+                                })
+                                .catch((e) => setBackupMessage(`Delete failed: ${e}`));
+                            }}
+                          >
+                            Delete
+                          </AlertDialogAction>
+                        </AlertDialogFooter>
+                      </AlertDialogContent>
+                    </AlertDialog>
+                  </div>
+                </CardContent>
+              </Card>
+            ))}
+          </div>
         )}
 
       {/* Create Agent Dialog */}
