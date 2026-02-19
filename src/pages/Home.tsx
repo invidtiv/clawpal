@@ -415,9 +415,45 @@ export function Home({
                       >
                         <div className="flex items-center gap-2.5">
                           <code className="text-sm text-foreground font-medium">{agent.id}</code>
-                          <span className="text-sm text-muted-foreground">
-                            {agent.model || "default model"}
-                          </span>
+                          <Select
+                            value={(() => {
+                              if (!agent.model) return "__none__";
+                              const normalized = agent.model.toLowerCase();
+                              for (const p of modelProfiles) {
+                                const profileVal = p.model.includes("/") ? p.model : `${p.provider}/${p.model}`;
+                                if (profileVal.toLowerCase() === normalized || p.model.toLowerCase() === normalized) {
+                                  return p.id;
+                                }
+                              }
+                              return "__none__";
+                            })()}
+                            onValueChange={(val) => {
+                              const setModelPromise = isRemote
+                                ? (() => {
+                                    const profile = modelProfiles.find((p) => p.id === val);
+                                    const modelValue = profile ? `${profile.provider}/${profile.model}` : null;
+                                    return api.remoteSetAgentModel(instanceId, agent.id, modelValue);
+                                  })()
+                                : api.setAgentModel(agent.id, val === "__none__" ? null : val);
+                              setModelPromise
+                                .then(() => refreshAgents())
+                                .catch((e) => showToast?.(String(e), "error"));
+                            }}
+                          >
+                            <SelectTrigger size="sm" className="text-xs h-6 w-auto min-w-[120px] max-w-[200px]">
+                              <SelectValue />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="__none__">
+                                <span className="text-muted-foreground">default model</span>
+                              </SelectItem>
+                              {modelProfiles.map((p) => (
+                                <SelectItem key={p.id} value={p.id}>
+                                  {p.provider}/{p.model}
+                                </SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
                         </div>
                         <div className="flex items-center gap-2">
                           {agent.online ? (

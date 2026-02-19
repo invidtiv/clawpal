@@ -43,6 +43,62 @@ export function Cook({
     });
   }, [recipeId, recipeSource]);
 
+  // Pre-populate fields from existing config when channel is selected
+  useEffect(() => {
+    if (!recipe) return;
+    const guildId = params.guild_id;
+    const channelId = params.channel_id;
+    if (!guildId || !channelId) return;
+
+    // Find textarea params that map to config values via the recipe steps
+    const configPaths: Record<string, string> = {};
+    for (const step of recipe.steps) {
+      if (step.action !== "config_patch" || typeof step.args?.patchTemplate !== "string") continue;
+      try {
+        const tpl = (step.args.patchTemplate as string)
+          .replace(/\{\{guild_id\}\}/g, guildId)
+          .replace(/\{\{channel_id\}\}/g, channelId);
+        const parsed = JSON.parse(tpl);
+        // Walk the parsed object to find {{param}} leaves
+        const walk = (obj: Record<string, unknown>, path: string) => {
+          for (const [k, v] of Object.entries(obj)) {
+            const full = path ? `${path}.${k}` : k;
+            if (typeof v === "string") {
+              const m = v.match(/^\{\{(\w+)\}\}$/);
+              if (m) configPaths[m[1]] = full;
+            } else if (v && typeof v === "object") {
+              walk(v as Record<string, unknown>, full);
+            }
+          }
+        };
+        walk(parsed, "");
+      } catch { /* ignore parse errors */ }
+    }
+
+    if (Object.keys(configPaths).length === 0) return;
+
+    const readConfig = isRemote
+      ? api.remoteReadRawConfig(instanceId)
+      : api.readRawConfig();
+
+    readConfig.then((raw) => {
+      try {
+        const cfg = JSON.parse(raw);
+        for (const [paramId, path] of Object.entries(configPaths)) {
+          const parts = path.split(".");
+          let cur: unknown = cfg;
+          for (const part of parts) {
+            if (cur && typeof cur === "object") cur = (cur as Record<string, unknown>)[part];
+            else { cur = undefined; break; }
+          }
+          if (typeof cur === "string" && cur.length > 0) {
+            setParams((prev) => ({ ...prev, [paramId]: prev[paramId] || cur as string }));
+          }
+        }
+      } catch { /* ignore */ }
+    }).catch(() => { /* ignore config read errors */ });
+  }, [recipe, params.guild_id, params.channel_id, isRemote, instanceId]);
+
   if (!recipe) return <div>Recipe not found</div>;
 
   const handleNext = () => {

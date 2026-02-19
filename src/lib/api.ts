@@ -94,6 +94,8 @@ export const api = {
     invoke("restart_gateway", {}),
   setGlobalModel: (profileId: string | null): Promise<boolean> =>
     invoke("set_global_model", { profileId }),
+  setAgentModel: (agentId: string, profileId: string | null): Promise<boolean> =>
+    invoke("set_agent_model", { agentId, profileId }),
   listBindings: (): Promise<Binding[]> =>
     invoke("list_bindings", {}),
   assignChannelAgent: (channelType: string, peerId: string, agentId: string | null): Promise<boolean> =>
@@ -158,6 +160,8 @@ export const api = {
     invoke("remote_assign_channel_agent", { hostId, channelType, peerId, agentId }),
   remoteSetGlobalModel: (hostId: string, modelValue: string | null): Promise<boolean> =>
     invoke("remote_set_global_model", { hostId, modelValue }),
+  remoteSetAgentModel: (hostId: string, agentId: string, modelValue: string | null): Promise<boolean> =>
+    invoke("remote_set_agent_model", { hostId, agentId, modelValue }),
   remoteListDiscordGuildChannels: (hostId: string): Promise<DiscordGuildChannel[]> =>
     invoke("remote_list_discord_guild_channels", { hostId }),
   remoteRunDoctor: (hostId: string): Promise<DoctorReport> =>

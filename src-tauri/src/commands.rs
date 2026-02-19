@@ -2924,12 +2924,22 @@ fn set_agent_model_value(
         if let Some(list) = agents.get_mut("list").and_then(Value::as_array_mut) {
             for agent in list {
                 if agent.get("id").and_then(Value::as_str) == Some(agent_id) {
-                    if let Some(v) = model {
-                        if let Some(agent_obj) = agent.as_object_mut() {
-                            agent_obj.insert("model".into(), Value::String(v));
+                    if let Some(agent_obj) = agent.as_object_mut() {
+                        match model {
+                            Some(v) => {
+                                // If existing model is an object, update "primary" inside it
+                                if let Some(existing) = agent_obj.get_mut("model") {
+                                    if let Some(model_obj) = existing.as_object_mut() {
+                                        model_obj.insert("primary".into(), Value::String(v));
+                                        return Ok(());
+                                    }
+                                }
+                                agent_obj.insert("model".into(), Value::String(v));
+                            }
+                            None => {
+                                agent_obj.remove("model");
+                            }
                         }
-                    } else if let Some(agent_obj) = agent.as_object_mut() {
-                        agent_obj.remove("model");
                     }
                     return Ok(());
                 }
@@ -4799,6 +4809,27 @@ pub async fn remote_set_global_model(
         model_value.map(Value::String),
     )?;
     remote_write_config_with_snapshot(&pool, &host_id, &current_text, &cfg, "set-global-model")
+        .await?;
+    Ok(true)
+}
+
+#[tauri::command]
+pub async fn remote_set_agent_model(
+    pool: State<'_, SshConnectionPool>,
+    host_id: String,
+    agent_id: String,
+    model_value: Option<String>,
+) -> Result<bool, String> {
+    if agent_id.trim().is_empty() {
+        return Err("agent id is required".into());
+    }
+    let raw = pool.sftp_read(&host_id, "~/.openclaw/openclaw.json").await?;
+    let mut cfg: Value =
+        serde_json::from_str(&raw).map_err(|e| format!("Failed to parse: {e}"))?;
+    let current_text = serde_json::to_string_pretty(&cfg).map_err(|e| e.to_string())?;
+
+    set_agent_model_value(&mut cfg, &agent_id, model_value)?;
+    remote_write_config_with_snapshot(&pool, &host_id, &current_text, &cfg, "set-agent-model")
         .await?;
     Ok(true)
 }
