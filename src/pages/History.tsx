@@ -73,14 +73,16 @@ export function History() {
                     <Badge variant="outline" className="text-muted-foreground">not rollbackable</Badge>
                   )}
                 </div>
-                {!isRollback && !isRemote && (
+                {!isRollback && (
                   <div className="flex gap-2 mt-2">
                     <Button
                       variant="outline"
                       size="sm"
                       onClick={async () => {
                         try {
-                          const p = await api.previewRollback(item.id);
+                          const p = isRemote
+                            ? await api.remotePreviewRollback(instanceId, item.id)
+                            : await api.previewRollback(item.id);
                           setPreview(p);
                         } catch (err) {
                           setMessage(String(err));
@@ -95,7 +97,11 @@ export function History() {
                       size="sm"
                       onClick={async () => {
                         try {
-                          await api.rollback(item.id);
+                          if (isRemote) {
+                            await api.remoteRollback(instanceId, item.id);
+                          } else {
+                            await api.rollback(item.id);
+                          }
                           setMessage("Rollback completed");
                           await refreshHistory();
                         } catch (err) {

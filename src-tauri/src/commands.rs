@@ -4883,7 +4883,7 @@ pub async fn remote_list_history(
             "id": entry.name,
             "createdAt": created_at_iso,
             "source": source,
-            "canRollback": false,
+            "canRollback": true,
         }));
     }
     // Sort newest first
@@ -4893,6 +4893,60 @@ pub async fn remote_list_history(
         tb.cmp(ta)
     });
     Ok(serde_json::json!({ "items": items }))
+}
+
+#[tauri::command]
+pub async fn remote_preview_rollback(
+    pool: State<'_, SshConnectionPool>,
+    host_id: String,
+    snapshot_id: String,
+) -> Result<PreviewResult, String> {
+    let snapshot_path = format!("~/.clawpal/snapshots/{snapshot_id}");
+    let snapshot_text = pool.sftp_read(&host_id, &snapshot_path).await?;
+    let target: Value = serde_json::from_str(&snapshot_text)
+        .map_err(|e| format!("Failed to parse snapshot: {e}"))?;
+
+    let current_text = pool.sftp_read(&host_id, "~/.openclaw/openclaw.json").await?;
+    let current: Value = serde_json::from_str(&current_text)
+        .map_err(|e| format!("Failed to parse config: {e}"))?;
+
+    let before = serde_json::to_string_pretty(&current).unwrap_or_else(|_| "{}".into());
+    let after = serde_json::to_string_pretty(&target).unwrap_or_else(|_| "{}".into());
+    Ok(PreviewResult {
+        recipe_id: "rollback".into(),
+        diff: format_diff(&current, &target),
+        config_before: before,
+        config_after: after,
+        changes: collect_change_paths(&current, &target),
+        overwrites_existing: true,
+        can_rollback: true,
+        impact_level: "medium".into(),
+        warnings: vec!["Rollback will replace current configuration".into()],
+    })
+}
+
+#[tauri::command]
+pub async fn remote_rollback(
+    pool: State<'_, SshConnectionPool>,
+    host_id: String,
+    snapshot_id: String,
+) -> Result<ApplyResult, String> {
+    let snapshot_path = format!("~/.clawpal/snapshots/{snapshot_id}");
+    let target_text = pool.sftp_read(&host_id, &snapshot_path).await?;
+    let target: Value = serde_json::from_str(&target_text)
+        .map_err(|e| format!("Failed to parse snapshot: {e}"))?;
+
+    let current_text = pool.sftp_read(&host_id, "~/.openclaw/openclaw.json").await?;
+    remote_write_config_with_snapshot(&pool, &host_id, &current_text, &target, "rollback").await?;
+
+    Ok(ApplyResult {
+        ok: true,
+        snapshot_id: Some(snapshot_id),
+        config_path: "~/.openclaw/openclaw.json".into(),
+        backup_path: None,
+        warnings: vec!["rolled back".into()],
+        errors: Vec::new(),
+    })
 }
 
 #[tauri::command]
@@ -5017,29 +5071,34 @@ pub async fn remote_analyze_sessions(
     // Run a shell script via SSH that scans session files and outputs JSON.
     // This is MUCH faster than doing per-file SFTP reads.
     let script = r#"
-cd ~/.openclaw/agents 2>/dev/null || exit 0
+cd ~/.openclaw/agents 2>/dev/null || { echo '[]'; exit 0; }
 now=$(date +%s)
+sep=""
 echo "["
-first_agent=1
 for agent_dir in */; do
+  [ -d "$agent_dir" ] || continue
   agent="${agent_dir%/}"
-  first_session=1
+  # Sanitize agent name for JSON (escape backslash then double-quote)
+  safe_agent=$(printf '%s' "$agent" | sed 's/\\/\\\\/g; s/"/\\"/g')
   for kind in sessions sessions_archive; do
     dir="$agent_dir$kind"
     [ -d "$dir" ] || continue
     for f in "$dir"/*.jsonl; do
       [ -f "$f" ] || continue
       fname=$(basename "$f" .jsonl)
+      safe_fname=$(printf '%s' "$fname" | sed 's/\\/\\\\/g; s/"/\\"/g')
       size=$(wc -c < "$f" 2>/dev/null | tr -d ' ')
-      msgs=$(grep -c '"type":"message"' "$f" 2>/dev/null || echo 0)
-      user_msgs=$(grep -c '"role":"user"' "$f" 2>/dev/null || echo 0)
-      asst_msgs=$(grep -c '"role":"assistant"' "$f" 2>/dev/null || echo 0)
+      msgs=$(grep -c '"type":"message"' "$f" 2>/dev/null || true)
+      [ -z "$msgs" ] && msgs=0
+      user_msgs=$(grep -c '"role":"user"' "$f" 2>/dev/null || true)
+      [ -z "$user_msgs" ] && user_msgs=0
+      asst_msgs=$(grep -c '"role":"assistant"' "$f" 2>/dev/null || true)
+      [ -z "$asst_msgs" ] && asst_msgs=0
       mtime=$(stat -f %m "$f" 2>/dev/null || stat -c %Y "$f" 2>/dev/null || echo 0)
       age_days=$(( (now - mtime) / 86400 ))
-      if [ "$first_agent" = "1" ] && [ "$first_session" = "1" ]; then first_agent=0; else echo ","; fi
-      first_session=0
-      printf '{"agent":"%s","sessionId":"%s","sizeBytes":%s,"messageCount":%s,"userMessageCount":%s,"assistantMessageCount":%s,"ageDays":%s,"kind":"%s"}' \
-        "$agent" "$fname" "$size" "$msgs" "$user_msgs" "$asst_msgs" "$age_days" "$kind"
+      printf '%s{"agent":"%s","sessionId":"%s","sizeBytes":%s,"messageCount":%s,"userMessageCount":%s,"assistantMessageCount":%s,"ageDays":%s,"kind":"%s"}' \
+        "$sep" "$safe_agent" "$safe_fname" "$size" "$msgs" "$user_msgs" "$asst_msgs" "$age_days" "$kind"
+      sep=","
     done
   done
 done

@@ -168,6 +168,10 @@ export const api = {
     invoke("remote_run_doctor", { hostId }),
   remoteListHistory: (hostId: string): Promise<{ items: HistoryItem[] }> =>
     invoke("remote_list_history", { hostId }),
+  remotePreviewRollback: (hostId: string, snapshotId: string): Promise<PreviewResult> =>
+    invoke("remote_preview_rollback", { hostId, snapshotId }),
+  remoteRollback: (hostId: string, snapshotId: string): Promise<ApplyResult> =>
+    invoke("remote_rollback", { hostId, snapshotId }),
   remoteWriteRawConfig: (hostId: string, content: string): Promise<boolean> =>
     invoke("remote_write_raw_config", { hostId, content }),
   remoteAnalyzeSessions: (hostId: string): Promise<AgentSessionAnalysis[]> =>
