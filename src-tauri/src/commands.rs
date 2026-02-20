@@ -327,12 +327,14 @@ pub struct StatusLight {
 pub fn get_status_light() -> Result<StatusLight, String> {
     let paths = resolve_paths();
     let cfg = read_openclaw_config(&paths)?;
-    let active_agents = cfg
+    let explicit_count = cfg
         .get("agents")
         .and_then(|a| a.get("list"))
         .and_then(|a| a.as_array())
         .map(|a| a.len() as u32)
         .unwrap_or(0);
+    // At least 1 agent (implicit "main") when agents section exists
+    let active_agents = if explicit_count == 0 && cfg.get("agents").is_some() { 1 } else { explicit_count };
     let global_default_model = cfg
         .pointer("/agents/defaults/model")
         .and_then(read_model_value)
@@ -341,7 +343,7 @@ pub fn get_status_light() -> Result<StatusLight, String> {
     // Quick gateway health: TCP connect to gateway port
     let gateway_port = cfg.pointer("/gateway/port")
         .and_then(Value::as_u64)
-        .unwrap_or(8080) as u16;
+        .unwrap_or(18789) as u16;
     let healthy = std::net::TcpStream::connect_timeout(
         &std::net::SocketAddr::from(([127, 0, 0, 1], gateway_port)),
         std::time::Duration::from_millis(500),
@@ -988,7 +990,7 @@ pub fn list_agents_overview() -> Result<Vec<AgentOverview>, String> {
     if let Some(list) = cfg.pointer("/agents/list").and_then(Value::as_array) {
         let channel_nodes = collect_channel_nodes(&cfg);
         for agent in list {
-            let id = agent.get("id").and_then(Value::as_str).unwrap_or("agent").to_string();
+            let id = agent.get("id").and_then(Value::as_str).unwrap_or("main").to_string();
 
             // Deduplicate by ID
             if !seen_ids.insert(id.clone()) {
@@ -1021,6 +1023,27 @@ pub fn list_agents_overview() -> Result<Vec<AgentOverview>, String> {
             });
         }
     }
+
+    // Implicit "main" agent: when agents.list is missing/empty, synthesize from defaults
+    if agents.is_empty() {
+        let default_model = cfg.pointer("/agents/defaults/model").and_then(read_model_value)
+            .or_else(|| cfg.pointer("/agents/default/model").and_then(read_model_value));
+        let workspace = default_workspace.clone();
+        let (name, emoji) = workspace.as_ref()
+            .and_then(|ws| parse_identity_md(ws))
+            .unwrap_or((None, None));
+        let has_sessions = paths.base_dir.join("agents").join("main").join("sessions").exists();
+        agents.push(AgentOverview {
+            id: "main".into(),
+            name,
+            emoji,
+            model: default_model,
+            channels: Vec::new(),
+            online: has_sessions,
+            workspace,
+        });
+    }
+
     Ok(agents)
 }
 
@@ -3599,6 +3622,10 @@ fn collect_agent_ids(cfg: &Value) -> Vec<String> {
             }
         }
     }
+    // Implicit "main" agent when no agents.list
+    if ids.is_empty() {
+        ids.push("main".into());
+    }
     ids
 }
 
@@ -4382,20 +4409,21 @@ pub async fn remote_get_system_status(pool: State<'_, SshConnectionPool>, host_i
     let (active_agents, global_default_model, _gateway_port) = match &config_raw {
         Ok(raw) => {
             let cfg: Value = serde_json::from_str(raw).unwrap_or(Value::Null);
-            let agents = cfg.pointer("/agents/list")
+            let explicit = cfg.pointer("/agents/list")
                 .and_then(Value::as_array)
                 .map(|a| a.len() as u32)
                 .unwrap_or(0);
+            let agents = if explicit == 0 && cfg.get("agents").is_some() { 1 } else { explicit };
             let model = cfg.pointer("/agents/defaults/model")
                 .and_then(|v| read_model_value(v))
                 .or_else(|| cfg.pointer("/agents/default/model").and_then(|v| read_model_value(v)))
                 .unwrap_or_default();
             let port = cfg.pointer("/gateway/port")
                 .and_then(Value::as_u64)
-                .unwrap_or(5337);
+                .unwrap_or(18789);
             (agents, model, port)
         }
-        Err(_) => (0, String::new(), 5337),
+        Err(_) => (0, String::new(), 18789),
     };
 
     // 3. Check gateway health — pgrep is most reliable via SSH; HTTP as fallback
@@ -4482,7 +4510,7 @@ pub async fn remote_list_agents_overview(pool: State<'_, SshConnectionPool>, hos
 
     if let Some(list) = cfg.pointer("/agents/list").and_then(Value::as_array) {
         for agent in list {
-            let id = agent.get("id").and_then(Value::as_str).unwrap_or("agent").to_string();
+            let id = agent.get("id").and_then(Value::as_str).unwrap_or("main").to_string();
             if !seen_ids.insert(id.clone()) {
                 continue;
             }
@@ -4518,6 +4546,30 @@ pub async fn remote_list_agents_overview(pool: State<'_, SshConnectionPool>, hos
             });
         }
     }
+
+    // Implicit "main" agent: when agents.list is missing/empty, synthesize from defaults
+    if agents.is_empty() {
+        let workspace = default_workspace.clone();
+        let (name, emoji) = if let Some(ref ws) = workspace {
+            let identity_path = format!("{}/IDENTITY.md", ws.trim_end_matches('/'));
+            match pool.sftp_read(&host_id, &identity_path).await {
+                Ok(content) => parse_identity_content(&content),
+                Err(_) => (None, None),
+            }
+        } else {
+            (None, None)
+        };
+        agents.push(AgentOverview {
+            id: "main".into(),
+            name,
+            emoji,
+            model: default_model,
+            channels: Vec::new(),
+            online: gateway_running,
+            workspace,
+        });
+    }
+
     Ok(agents)
 }
 

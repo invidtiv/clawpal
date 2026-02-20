@@ -33,7 +33,7 @@ pub fn apply_auto_fixes(paths: &OpenClawPaths, issue_ids: &[String]) -> Vec<Stri
     if issue_ids.iter().any(|id| id == "field.agents") && current.get("agents").is_none() {
         let mut agents = serde_json::Map::new();
         let mut defaults = serde_json::Map::new();
-        defaults.insert("model".into(), Value::String("gpt-4o".into()));
+        defaults.insert("model".into(), Value::String("anthropic/claude-sonnet-4-5".into()));
         agents.insert("defaults".into(), Value::Object(defaults));
         if let Value::Object(map) = &mut current {
             map.insert("agents".into(), Value::Object(agents));
@@ -43,7 +43,7 @@ pub fn apply_auto_fixes(paths: &OpenClawPaths, issue_ids: &[String]) -> Vec<Stri
 
     if issue_ids.iter().any(|id| id == "json.syntax") {
         if current.is_null() {
-            if let Ok(safe) = json5::from_str::<Value>("{\"agents\":{\"defaults\":{\"model\":\"gpt-4o\"}}}") {
+            if let Ok(safe) = json5::from_str::<Value>("{\"agents\":{\"defaults\":{\"model\":\"anthropic/claude-sonnet-4-5\"}}}") {
                 current = safe;
                 fixed.push("json.syntax".into());
             }
@@ -56,7 +56,7 @@ pub fn apply_auto_fixes(paths: &OpenClawPaths, issue_ids: &[String]) -> Vec<Stri
             .and_then(|v| v.as_object())
             .cloned()
             .unwrap_or_default();
-        gateway.insert("port".into(), Value::Number(serde_json::Number::from(8080_u64)));
+        gateway.insert("port".into(), Value::Number(serde_json::Number::from(18789_u64)));
         if let Value::Object(map) = &mut current {
             map.insert("gateway".into(), Value::Object(gateway));
         }
