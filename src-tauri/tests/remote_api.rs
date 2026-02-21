@@ -103,6 +103,43 @@ async fn test_04c_exec_login_openclaw_version() {
     // Don't assert exit_code — openclaw may not be installed on vm1
 }
 
+/// Test exec_login with commands containing single quotes (simulates run_openclaw_remote args).
+#[tokio::test]
+#[ignore]
+async fn test_04d_exec_login_nested_quotes() {
+    let pool = SshConnectionPool::new();
+    let cfg = vm1_config();
+    pool.connect(&cfg).await.expect("connect failed");
+
+    // Simulate what run_openclaw_remote produces: openclaw 'config' 'get' 'agents' '--json'
+    let result = pool
+        .exec_login(&cfg.id, "echo 'hello' 'world'")
+        .await
+        .expect("exec_login with single-quoted args failed");
+    assert_eq!(result.exit_code, 0);
+    assert_eq!(result.stdout.trim(), "hello world", "stdout: {:?}", result.stdout);
+}
+
+/// Test exec_login with content containing both single and double quotes.
+#[tokio::test]
+#[ignore]
+async fn test_04e_exec_login_complex_quotes() {
+    let pool = SshConnectionPool::new();
+    let cfg = vm1_config();
+    pool.connect(&cfg).await.expect("connect failed");
+
+    // Value with single quote, double quote, backslash, dollar sign
+    let result = pool
+        .exec_login(&cfg.id, r#"echo 'it'\''s a "test" with $VAR and \backslash'"#)
+        .await
+        .expect("exec_login with complex quotes failed");
+    assert_eq!(result.exit_code, 0);
+    let out = result.stdout.trim();
+    eprintln!("complex quotes output: {:?}", out);
+    assert!(out.contains("it's"), "should contain it's: {out}");
+    assert!(out.contains("\"test\""), "should contain quoted test: {out}");
+}
+
 #[tokio::test]
 async fn test_05_sftp_write_read_roundtrip() {
     let pool = SshConnectionPool::new();

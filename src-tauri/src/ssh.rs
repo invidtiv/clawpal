@@ -205,16 +205,17 @@ mod inner {
         /// Forces bash to avoid zsh glob/nomatch quirks.
         pub async fn exec_login(&self, id: &str, command: &str) -> Result<SshExecResult, String> {
             let target_bin = command.split_whitespace().next().unwrap_or("");
-            let inner = format!(
+            let wrapped = format!(
                 concat!(
-                    "shopt -s nullglob 2>/dev/null; ",
+                    "setopt nonomatch 2>/dev/null; shopt -s nullglob 2>/dev/null; ",
                     ". \"$HOME/.profile\" 2>/dev/null; ",
                     ". \"$HOME/.bashrc\" 2>/dev/null; ",
+                    ". \"$HOME/.zshrc\" 2>/dev/null; ",
                     "[ -d \"$HOME/.local/bin\" ] && export PATH=\"$HOME/.local/bin:$PATH\"; ",
                     "export NVM_DIR=\"${{NVM_DIR:-$HOME/.nvm}}\"; ",
                     "[ -s \"$NVM_DIR/nvm.sh\" ] && . \"$NVM_DIR/nvm.sh\" 2>/dev/null; ",
                     "for _fnm in \"$HOME/.fnm/fnm\" \"$HOME/.local/bin/fnm\"; do ",
-                      "[ -x \"$_fnm\" ] && eval \"$($_fnm env --shell bash)\" 2>/dev/null && break; ",
+                      "[ -x \"$_fnm\" ] && eval \"$($_fnm env --shell bash 2>/dev/null || $_fnm env 2>/dev/null)\" 2>/dev/null && break; ",
                     "done; ",
                     "if ! command -v {target_bin} >/dev/null 2>&1; then ",
                       "for d in \"$HOME\"/.nvm/versions/node/*/bin; do ",
@@ -226,7 +227,6 @@ mod inner {
                 target_bin = target_bin,
                 command = command
             );
-            let wrapped = format!("bash -c {}", shell_quote(&inner));
             self.exec(id, &wrapped).await
         }
 
@@ -497,16 +497,17 @@ mod inner {
 
         pub async fn exec_login(&self, id: &str, command: &str) -> Result<SshExecResult, String> {
             let target_bin = command.split_whitespace().next().unwrap_or("");
-            let inner = format!(
+            let wrapped = format!(
                 concat!(
-                    "shopt -s nullglob 2>/dev/null; ",
+                    "setopt nonomatch 2>/dev/null; shopt -s nullglob 2>/dev/null; ",
                     ". \"$HOME/.profile\" 2>/dev/null; ",
                     ". \"$HOME/.bashrc\" 2>/dev/null; ",
+                    ". \"$HOME/.zshrc\" 2>/dev/null; ",
                     "[ -d \"$HOME/.local/bin\" ] && export PATH=\"$HOME/.local/bin:$PATH\"; ",
                     "export NVM_DIR=\"${{NVM_DIR:-$HOME/.nvm}}\"; ",
                     "[ -s \"$NVM_DIR/nvm.sh\" ] && . \"$NVM_DIR/nvm.sh\" 2>/dev/null; ",
                     "for _fnm in \"$HOME/.fnm/fnm\" \"$HOME/.local/bin/fnm\"; do ",
-                      "[ -x \"$_fnm\" ] && eval \"$($_fnm env --shell bash)\" 2>/dev/null && break; ",
+                      "[ -x \"$_fnm\" ] && eval \"$($_fnm env --shell bash 2>/dev/null || $_fnm env 2>/dev/null)\" 2>/dev/null && break; ",
                     "done; ",
                     "if ! command -v {target_bin} >/dev/null 2>&1; then ",
                       "for d in \"$HOME\"/.nvm/versions/node/*/bin; do ",
@@ -518,7 +519,6 @@ mod inner {
                 target_bin = target_bin,
                 command = command
             );
-            let wrapped = format!("bash -c {}", shell_quote(&inner));
             self.exec(id, &wrapped).await
         }
 
