@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
+use crate::models::resolve_paths;
 use crate::ssh::SshConnectionPool;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -217,4 +218,194 @@ pub fn queued_commands_count(
     queue: tauri::State<CommandQueue>,
 ) -> Result<usize, String> {
     Ok(queue.len())
+}
+
+// ---------------------------------------------------------------------------
+// Preview — sandbox execution with OPENCLAW_HOME
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewQueueResult {
+    pub commands: Vec<PendingCommand>,
+    pub config_before: String,
+    pub config_after: String,
+    pub errors: Vec<String>,
+}
+
+#[tauri::command]
+pub fn preview_queued_commands(
+    queue: tauri::State<CommandQueue>,
+) -> Result<PreviewQueueResult, String> {
+    let commands = queue.list();
+    if commands.is_empty() {
+        return Err("No pending commands to preview".into());
+    }
+
+    let paths = resolve_paths();
+
+    // Read current config
+    let config_before = crate::config_io::read_text(&paths.config_path)?;
+
+    // Set up sandbox directory
+    let preview_dir = paths.clawpal_dir.join("preview").join(".openclaw");
+    std::fs::create_dir_all(&preview_dir).map_err(|e| e.to_string())?;
+
+    // Copy current config to sandbox
+    let preview_config = preview_dir.join("openclaw.json");
+    std::fs::copy(&paths.config_path, &preview_config).map_err(|e| e.to_string())?;
+
+    let mut env = HashMap::new();
+    env.insert(
+        "OPENCLAW_HOME".to_string(),
+        preview_dir.to_string_lossy().to_string(),
+    );
+
+    // Execute each command in sandbox
+    let mut errors = Vec::new();
+    for cmd in &commands {
+        let args: Vec<&str> = cmd.command.iter().skip(1).map(|s| s.as_str()).collect();
+        let result = run_openclaw_with_env(&args, Some(&env));
+        match result {
+            Ok(output) if output.exit_code != 0 => {
+                let detail = if !output.stderr.is_empty() {
+                    output.stderr.clone()
+                } else {
+                    output.stdout.clone()
+                };
+                errors.push(format!("{}: {}", cmd.label, detail));
+                break;
+            }
+            Err(e) => {
+                errors.push(format!("{}: {}", cmd.label, e));
+                break;
+            }
+            _ => {}
+        }
+    }
+
+    // Read result config from sandbox
+    let config_after = if errors.is_empty() {
+        crate::config_io::read_text(&preview_config)?
+    } else {
+        config_before.clone()
+    };
+
+    // Cleanup sandbox
+    let _ = std::fs::remove_dir_all(paths.clawpal_dir.join("preview"));
+
+    Ok(PreviewQueueResult {
+        commands,
+        config_before,
+        config_after,
+        errors,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Apply — execute queue for real, rollback on failure
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApplyQueueResult {
+    pub ok: bool,
+    pub applied_count: usize,
+    pub total_count: usize,
+    pub error: Option<String>,
+    pub rolled_back: bool,
+}
+
+#[tauri::command]
+pub fn apply_queued_commands(
+    queue: tauri::State<CommandQueue>,
+) -> Result<ApplyQueueResult, String> {
+    let commands = queue.list();
+    if commands.is_empty() {
+        return Err("No pending commands to apply".into());
+    }
+
+    let paths = resolve_paths();
+    let total_count = commands.len();
+
+    // Save snapshot before applying (for rollback)
+    let config_before = crate::config_io::read_text(&paths.config_path)?;
+    let _ = crate::history::add_snapshot(
+        &paths.history_dir,
+        &paths.metadata_path,
+        Some("pre-apply".to_string()),
+        "queue-apply",
+        true,
+        &config_before,
+        None,
+    );
+
+    // Execute each command for real
+    let mut applied_count = 0;
+    for cmd in &commands {
+        let args: Vec<&str> = cmd.command.iter().skip(1).map(|s| s.as_str()).collect();
+        let result = run_openclaw(&args);
+        match result {
+            Ok(output) if output.exit_code != 0 => {
+                let detail = if !output.stderr.is_empty() {
+                    output.stderr.clone()
+                } else {
+                    output.stdout.clone()
+                };
+
+                // Rollback: restore config from snapshot
+                let _ = crate::config_io::write_text(&paths.config_path, &config_before);
+
+                queue.clear();
+                return Ok(ApplyQueueResult {
+                    ok: false,
+                    applied_count,
+                    total_count,
+                    error: Some(format!(
+                        "Step {} failed ({}): {}",
+                        applied_count + 1,
+                        cmd.label,
+                        detail
+                    )),
+                    rolled_back: true,
+                });
+            }
+            Err(e) => {
+                let _ = crate::config_io::write_text(&paths.config_path, &config_before);
+                queue.clear();
+                return Ok(ApplyQueueResult {
+                    ok: false,
+                    applied_count,
+                    total_count,
+                    error: Some(format!(
+                        "Step {} failed ({}): {}",
+                        applied_count + 1,
+                        cmd.label,
+                        e
+                    )),
+                    rolled_back: true,
+                });
+            }
+            Ok(_) => {
+                applied_count += 1;
+            }
+        }
+    }
+
+    // All succeeded — clear queue and restart gateway
+    queue.clear();
+
+    // Restart gateway (best effort, don't fail the whole apply)
+    let gateway_result = run_openclaw(&["gateway", "restart"]);
+    if let Err(e) = &gateway_result {
+        eprintln!("Warning: gateway restart failed after apply: {e}");
+    }
+
+    Ok(ApplyQueueResult {
+        ok: true,
+        applied_count,
+        total_count,
+        error: None,
+        rolled_back: false,
+    })
 }

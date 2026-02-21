@@ -44,7 +44,8 @@ use crate::commands::{
 };
 use crate::cli_runner::{
     queue_command, remove_queued_command, list_queued_commands,
-    discard_queued_commands, queued_commands_count, CommandQueue,
+    discard_queued_commands, queued_commands_count,
+    preview_queued_commands, apply_queued_commands, CommandQueue,
 };
 use crate::ssh::SshConnectionPool;
 
@@ -193,6 +194,8 @@ pub fn run() {
             list_queued_commands,
             discard_queued_commands,
             queued_commands_count,
+            preview_queued_commands,
+            apply_queued_commands,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run app");
