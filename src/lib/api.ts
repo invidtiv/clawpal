@@ -1,10 +1,10 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { AgentOverview, AgentSessionAnalysis, ApplyResult, BackupInfo, Binding, ChannelNode, ConfigDirtyState, CronJob, CronRun, DiscordGuildChannel, HistoryItem, ModelCatalogProvider, ModelProfile, PreviewResult, ProviderAuthSuggestion, Recipe, RemoteSystemStatus, ResolvedApiKey, StatusLight, SystemStatus, DoctorReport, SessionFile, SshHost, WatchdogStatus } from "./types";
+import type { AgentOverview, AgentSessionAnalysis, ApplyResult, BackupInfo, Binding, ChannelNode, ConfigDirtyState, CronJob, CronRun, DiscordGuildChannel, HistoryItem, InstanceStatus, ModelCatalogProvider, ModelProfile, PreviewResult, ProviderAuthSuggestion, Recipe, ResolvedApiKey, SystemStatus, DoctorReport, SessionFile, SshHost, WatchdogStatus } from "./types";
 
 export const api = {
   getSystemStatus: (): Promise<SystemStatus> =>
     invoke("get_system_status", {}),
-  getStatusLight: (): Promise<StatusLight> =>
+  getInstanceStatus: (): Promise<InstanceStatus> =>
     invoke("get_status_light", {}),
   getCachedModelCatalog: (): Promise<ModelCatalogProvider[]> =>
     invoke("get_cached_model_catalog", {}),
@@ -112,7 +112,7 @@ export const api = {
   // Remote business commands
   remoteReadRawConfig: (hostId: string): Promise<string> =>
     invoke("remote_read_raw_config", { hostId }),
-  remoteGetSystemStatus: (hostId: string): Promise<RemoteSystemStatus> =>
+  remoteGetInstanceStatus: (hostId: string): Promise<InstanceStatus> =>
     invoke("remote_get_system_status", { hostId }),
   remoteListAgentsOverview: (hostId: string): Promise<AgentOverview[]> =>
     invoke("remote_list_agents_overview", { hostId }),

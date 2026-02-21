@@ -218,19 +218,11 @@ export interface AgentOverview {
   workspace?: string;
 }
 
-export interface StatusLight {
+export interface InstanceStatus {
   healthy: boolean;
   activeAgents: number;
   globalDefaultModel?: string;
-}
-
-export interface RemoteSystemStatus {
-  healthy: boolean;
-  openclawVersion: string;
-  activeAgents: number;
-  globalDefaultModel?: string;
-  configPath: string;
-  openclawDir: string;
+  openclawVersion?: string;
 }
 
 export interface Binding {

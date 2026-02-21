@@ -317,6 +317,7 @@ pub struct StatusLight {
     pub healthy: bool,
     pub active_agents: u32,
     pub global_default_model: Option<String>,
+    pub openclaw_version: Option<String>,
 }
 
 /// Fast status: reads config + quick TCP probe of gateway port.
@@ -346,10 +347,18 @@ pub fn get_status_light() -> Result<StatusLight, String> {
         std::time::Duration::from_millis(500),
     ).is_ok();
 
+    let openclaw_version = std::process::Command::new("openclaw")
+        .arg("--version")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
+
     Ok(StatusLight {
         healthy,
         active_agents,
         global_default_model,
+        openclaw_version,
     })
 }
 
@@ -4348,17 +4357,20 @@ pub async fn remote_read_raw_config(pool: State<'_, SshConnectionPool>, host_id:
 }
 
 #[tauri::command]
-pub async fn remote_get_system_status(pool: State<'_, SshConnectionPool>, host_id: String) -> Result<Value, String> {
+pub async fn remote_get_system_status(pool: State<'_, SshConnectionPool>, host_id: String) -> Result<StatusLight, String> {
     // 1. Get openclaw version (use login shell for PATH) — don't fail if binary not found
     let openclaw_version = match pool.exec_login(&host_id, "openclaw --version").await {
-        Ok(r) if r.exit_code == 0 => r.stdout.trim().to_string(),
-        Ok(r) => r.stdout.trim().to_string(), // might have partial output
-        Err(_) => String::new(),
+        Ok(r) if r.exit_code == 0 => Some(r.stdout.trim().to_string()),
+        Ok(r) => {
+            let trimmed = r.stdout.trim().to_string();
+            if trimmed.is_empty() { None } else { Some(trimmed) }
+        }
+        Err(_) => None,
     };
 
     // 2. Read remote config
     let config_raw = pool.sftp_read(&host_id, "~/.openclaw/openclaw.json").await;
-    let (active_agents, global_default_model, _gateway_port) = match &config_raw {
+    let (active_agents, global_default_model) = match &config_raw {
         Ok(raw) => {
             let cfg: Value = serde_json::from_str(raw).unwrap_or(Value::Null);
             let explicit = cfg.pointer("/agents/list")
@@ -4368,14 +4380,10 @@ pub async fn remote_get_system_status(pool: State<'_, SshConnectionPool>, host_i
             let agents = if explicit == 0 && cfg.get("agents").is_some() { 1 } else { explicit };
             let model = cfg.pointer("/agents/defaults/model")
                 .and_then(|v| read_model_value(v))
-                .or_else(|| cfg.pointer("/agents/default/model").and_then(|v| read_model_value(v)))
-                .unwrap_or_default();
-            let port = cfg.pointer("/gateway/port")
-                .and_then(Value::as_u64)
-                .unwrap_or(18789);
-            (agents, model, port)
+                .or_else(|| cfg.pointer("/agents/default/model").and_then(|v| read_model_value(v)));
+            (agents, model)
         }
-        Err(_) => (0, String::new(), 18789),
+        Err(_) => (0, None),
     };
 
     // 3. Check gateway health — pgrep is most reliable via SSH; HTTP as fallback
@@ -4385,16 +4393,12 @@ pub async fn remote_get_system_status(pool: State<'_, SshConnectionPool>, host_i
         Err(_) => false,
     };
 
-    let status = serde_json::json!({
-        "healthy": healthy,
-        "openclawVersion": openclaw_version,
-        "activeAgents": active_agents,
-        "globalDefaultModel": global_default_model,
-        "configPath": "~/.openclaw/openclaw.json",
-        "openclawDir": "~/.openclaw",
-    });
-
-    Ok(status)
+    Ok(StatusLight {
+        healthy,
+        active_agents,
+        global_default_model,
+        openclaw_version,
+    })
 }
 
 #[tauri::command]

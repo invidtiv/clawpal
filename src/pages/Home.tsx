@@ -26,7 +26,7 @@ import { CreateAgentDialog } from "@/components/CreateAgentDialog";
 import { UpgradeDialog } from "@/components/UpgradeDialog";
 import { RecipeCard } from "@/components/RecipeCard";
 import { Skeleton } from "@/components/ui/skeleton";
-import type { StatusLight, AgentOverview, Recipe, BackupInfo, ModelProfile, RemoteSystemStatus } from "../lib/types";
+import type { InstanceStatus, AgentOverview, Recipe, BackupInfo, ModelProfile } from "../lib/types";
 import { formatTime, formatBytes } from "@/lib/utils";
 import { useInstance } from "@/lib/instance-context";
 
@@ -62,7 +62,7 @@ export function Home({
 }) {
   const { t } = useTranslation();
   const { instanceId, isRemote, isConnected } = useInstance();
-  const [status, setStatus] = useState<StatusLight | null>(null);
+  const [status, setStatus] = useState<InstanceStatus | null>(null);
   const [version, setVersion] = useState<string | null>(null);
   const [updateInfo, setUpdateInfo] = useState<{ available: boolean; latest?: string } | null>(null);
   const [checkingUpdate, setCheckingUpdate] = useState(false);
@@ -87,8 +87,8 @@ export function Home({
   const fetchStatus = useCallback(() => {
     if (isRemote) {
       if (!isConnected) return; // Wait for SSH connection
-      api.remoteGetSystemStatus(instanceId).then((s: RemoteSystemStatus) => {
-        setStatus({ healthy: s.healthy, activeAgents: s.activeAgents, globalDefaultModel: s.globalDefaultModel });
+      api.remoteGetInstanceStatus(instanceId).then((s) => {
+        setStatus(s);
         setStatusSettled(true);
         remoteErrorShownRef.current = false;
         if (s.openclawVersion) setVersion(s.openclawVersion);
@@ -100,7 +100,7 @@ export function Home({
         }
       });
     } else {
-      api.getStatusLight().then((s) => {
+      api.getInstanceStatus().then((s) => {
         setStatus(s);
         if (s.healthy) {
           setStatusSettled(true);
