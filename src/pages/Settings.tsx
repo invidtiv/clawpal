@@ -201,7 +201,7 @@ export function Settings({ onDataChange, hasAppUpdate, onAppUpdateSeen }: {
       handleCheckForUpdates();
       onAppUpdateSeen?.();
     }
-  }, [hasAppUpdate]);
+  }, [hasAppUpdate, handleCheckForUpdates, onAppUpdateSeen]);
 
   // Extract profiles from remote config on first load
   useEffect(() => {

@@ -112,7 +112,7 @@ export function Home({
         }
       }).catch((e) => console.error("Failed to fetch status:", e));
     }
-  }, [isRemote, isConnected, instanceId]);
+  }, [isRemote, isConnected, instanceId, showToast, t]);
 
   useEffect(() => {
     remoteErrorShownRef.current = false;
@@ -138,7 +138,7 @@ export function Home({
       return;
     }
     api.listAgentsOverview().then(setAgents).catch((e) => console.error("Failed to load agents:", e));
-  }, [isRemote, isConnected, instanceId]);
+  }, [isRemote, isConnected, instanceId, showToast, t]);
 
   useEffect(() => {
     refreshAgents();
@@ -151,16 +151,15 @@ export function Home({
     api.listRecipes().then((r) => setRecipes(r.slice(0, 4))).catch((e) => console.error("Failed to load recipes:", e));
   }, []);
 
-  const refreshBackups = () => {
+  const refreshBackups = useCallback(() => {
     if (isRemote) {
       if (!isConnected) return;
       api.remoteListBackups(instanceId).then(setBackups).catch((e) => console.error("Failed to load remote backups:", e));
     } else {
       api.listBackups().then(setBackups).catch((e) => console.error("Failed to load backups:", e));
     }
-  };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  useEffect(refreshBackups, [isRemote, isConnected, instanceId]);
+  }, [isRemote, isConnected, instanceId]);
+  useEffect(refreshBackups, [refreshBackups]);
 
   useEffect(() => {
     if (isRemote) {

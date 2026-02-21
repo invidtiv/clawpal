@@ -292,6 +292,12 @@ export interface CronSchedule {
   at?: string;
 }
 
+export interface CronJobState {
+  lastRunAtMs?: number;
+  lastStatus?: string;
+  lastError?: string;
+}
+
 export interface CronJob {
   jobId: string;
   name: string;
@@ -300,6 +306,7 @@ export interface CronJob {
   agentId?: string;
   enabled: boolean;
   description?: string;
+  state?: CronJobState;
 }
 
 export interface CronRun {
@@ -308,6 +315,10 @@ export interface CronRun {
   endedAt?: string;
   outcome: string;
   error?: string;
+  ts?: number;
+  runAtMs?: number;
+  durationMs?: number;
+  summary?: string;
 }
 
 export interface WatchdogJobState {

@@ -93,7 +93,7 @@ export function CreateAgentDialog({
   };
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog open={open} onOpenChange={(v) => { if (!v) reset(); onOpenChange(v); }}>
       <DialogContent>
         <DialogHeader>
           <DialogTitle>{t('createAgent.title')}</DialogTitle>

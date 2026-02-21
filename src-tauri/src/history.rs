@@ -38,9 +38,15 @@ pub fn list_snapshots(path: &std::path::Path) -> Result<SnapshotIndex, String> {
 pub fn write_snapshots(path: &std::path::Path, index: &SnapshotIndex) -> Result<(), String> {
     let parent = path.parent().ok_or_else(|| "invalid metadata path".to_string())?;
     fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    let mut file = File::create(path).map_err(|e| e.to_string())?;
     let text = serde_json::to_string_pretty(index).map_err(|e| e.to_string())?;
-    file.write_all(text.as_bytes()).map_err(|e| e.to_string())
+    // Atomic write: write to .tmp file, sync, then rename
+    let tmp = path.with_extension("tmp");
+    {
+        let mut file = File::create(&tmp).map_err(|e| e.to_string())?;
+        file.write_all(text.as_bytes()).map_err(|e| e.to_string())?;
+        file.sync_all().map_err(|e| e.to_string())?;
+    }
+    fs::rename(&tmp, path).map_err(|e| e.to_string())
 }
 
 pub fn add_snapshot(
@@ -91,5 +97,11 @@ pub fn add_snapshot(
 }
 
 pub fn read_snapshot(path: &str) -> Result<String, String> {
-    std::fs::read_to_string(path).map_err(|e| e.to_string())
+    let canonical = std::fs::canonicalize(path).map_err(|e| e.to_string())?;
+    let home = dirs::home_dir().ok_or("Cannot determine home directory")?;
+    let allowed_base = home.join(".clawpal").join("history");
+    if !canonical.starts_with(&allowed_base) {
+        return Err("Path outside allowed directory".into());
+    }
+    std::fs::read_to_string(&canonical).map_err(|e| e.to_string())
 }

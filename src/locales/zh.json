@@ -193,6 +193,8 @@
   "history.rollbackPreview": "回滚预览",
   "history.manual": "手动",
   "history.unknown": "未知",
+  "history.rollbackConfirmTitle": "回滚到此快照？",
+  "history.rollbackConfirmDescription": "这将把配置恢复到此快照的状态，当前配置将被替换。",
 
   "channels.title": "频道",
   "channels.noChannels": "未配置频道。请在 OpenClaw 配置中添加频道插件，然后刷新查看。",
@@ -271,6 +273,9 @@
 
   "recipeCard.steps_one": "{{count}} 个步骤",
   "recipeCard.steps_other": "{{count}} 个步骤",
+  "recipeCard.easy": "简单",
+  "recipeCard.normal": "普通",
+  "recipeCard.advanced": "高级",
   "recipeCard.cook": "开始烹饪",
 
   "paramForm.isRequired": "{{label}} 为必填项",
@@ -306,6 +311,9 @@
   "instance.saving": "保存中...",
   "instance.update": "更新",
   "instance.add": "添加",
+  "instance.deleteTitle": "删除远程实例？",
+  "instance.deleteDescription": "这将从 ClawPal 中移除 SSH 主机「{{label}}」，远程服务器本身不受影响。",
+  "instance.deleteConfirm": "删除",
 
   "nav.cron": "定时任务",
   "cron.title": "定时任务",
@@ -346,6 +354,13 @@
   "cron.weekdays": "工作日",
   "cron.monthly": "每月 {{day}} 日 {{time}}",
   "cron.oneShot": "一次性：{{time}}",
+  "cron.justNow": "刚刚",
+  "cron.secsAgo": "{{count}}秒前",
+  "cron.minsAgo": "{{count}}分钟前",
+  "cron.hoursAgo": "{{count}}小时前",
+  "cron.daysAgo": "{{count}}天前",
+  "cron.durSecs": "{{count}}秒",
+  "cron.durMins": "{{m}}分{{s}}秒",
   "cron.lastDuration": "上次耗时",
   "cron.consecutiveErrors": "连续 {{count}} 次错误",
   "watchdog.title": "看门狗",

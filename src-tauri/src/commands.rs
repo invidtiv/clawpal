@@ -14,6 +14,11 @@ use crate::models::resolve_paths;
 use crate::ssh::{SshConnectionPool, SshHostConfig, SshExecResult, SftpEntry};
 use std::sync::Mutex;
 
+/// Escape a string for safe inclusion in a single-quoted shell argument.
+fn shell_escape(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
 /// Stores remote config baselines keyed by host_id for dirty tracking.
 pub struct RemoteConfigBaselines(Mutex<HashMap<String, String>>);
 
@@ -2908,7 +2913,13 @@ fn save_model_profiles(paths: &crate::models::OpenClawPaths, profiles: &[ModelPr
         version: 1,
     };
     let text = serde_json::to_string_pretty(&payload).map_err(|e| e.to_string())?;
-    crate::config_io::write_text(&path, &text)
+    crate::config_io::write_text(&path, &text)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o600));
+    }
+    Ok(())
 }
 
 fn write_config_with_snapshot(
@@ -3799,8 +3810,10 @@ pub async fn apply_pending_changes() -> Result<bool, String> {
     }).await.map_err(|e| e.to_string())?
 }
 
-#[tauri::command]
-pub fn resolve_full_api_key(profile_id: String) -> Result<String, String> {
+// resolve_full_api_key is intentionally not exposed as a Tauri command.
+// It returns raw API keys which should never be sent to the frontend.
+#[allow(dead_code)]
+fn resolve_full_api_key(profile_id: String) -> Result<String, String> {
     let paths = resolve_paths();
     let profiles = load_model_profiles(&paths);
     let profile = profiles.iter().find(|p| p.id == profile_id)
@@ -3814,8 +3827,17 @@ pub fn resolve_full_api_key(profile_id: String) -> Result<String, String> {
 
 #[tauri::command]
 pub fn open_url(url: String) -> Result<(), String> {
-    if url.trim().is_empty() {
+    let trimmed = url.trim();
+    if trimmed.is_empty() {
         return Err("URL is required".into());
+    }
+    // Allow http(s) URLs and local paths within user home directory
+    if !trimmed.starts_with("http://") && !trimmed.starts_with("https://") {
+        // For local paths, ensure they don't execute apps
+        let path = std::path::Path::new(trimmed);
+        if path.extension().map_or(false, |ext| ext == "app" || ext == "exe") {
+            return Err("Cannot open application files".into());
+        }
     }
     #[cfg(target_os = "macos")]
     {
@@ -4089,17 +4111,18 @@ pub async fn remote_backup_before_upgrade(
         .map(|dt| dt.format("%Y-%m-%d_%H%M%S").to_string())
         .unwrap_or_else(|| format!("{now_secs}"));
 
+    let escaped_name = shell_escape(&name);
     let cmd = format!(
         concat!(
             "set -e; ",
-            "BDIR=\"$HOME/.clawpal/backups/{name}\"; ",
+            "BDIR=\"$HOME/.clawpal/backups/\"{name}; ",
             "mkdir -p \"$BDIR\"; ",
             "cp \"$HOME/.openclaw/openclaw.json\" \"$BDIR/\" 2>/dev/null || true; ",
             "cp -r \"$HOME/.openclaw/agents\" \"$BDIR/\" 2>/dev/null || true; ",
             "cp -r \"$HOME/.openclaw/memory\" \"$BDIR/\" 2>/dev/null || true; ",
             "du -sk \"$BDIR\" 2>/dev/null | awk '{{print $1 * 1024}}' || echo 0"
         ),
-        name = name
+        name = escaped_name
     );
 
     let result = pool.exec_login(&host_id, &cmd).await?;
@@ -4191,17 +4214,18 @@ pub async fn remote_restore_from_backup(
     host_id: String,
     backup_name: String,
 ) -> Result<String, String> {
+    let escaped_name = shell_escape(&backup_name);
     let cmd = format!(
         concat!(
             "set -e; ",
-            "BDIR=\"$HOME/.clawpal/backups/{name}\"; ",
+            "BDIR=\"$HOME/.clawpal/backups/\"{name}; ",
             "[ -d \"$BDIR\" ] || {{ echo 'Backup not found'; exit 1; }}; ",
             "cp \"$BDIR/openclaw.json\" \"$HOME/.openclaw/openclaw.json\" 2>/dev/null || true; ",
             "[ -d \"$BDIR/agents\" ] && cp -r \"$BDIR/agents\" \"$HOME/.openclaw/\" 2>/dev/null || true; ",
             "[ -d \"$BDIR/memory\" ] && cp -r \"$BDIR/memory\" \"$HOME/.openclaw/\" 2>/dev/null || true; ",
-            "echo 'Restored from backup '\"'\"'{name}'\"'\"''"
+            "echo 'Restored from backup '{name}"
         ),
-        name = backup_name
+        name = escaped_name
     );
 
     let result = pool.exec_login(&host_id, &cmd).await?;
@@ -4218,9 +4242,10 @@ pub async fn remote_delete_backup(
     host_id: String,
     backup_name: String,
 ) -> Result<bool, String> {
+    let escaped_name = shell_escape(&backup_name);
     let cmd = format!(
-        "BDIR=\"$HOME/.clawpal/backups/{name}\"; [ -d \"$BDIR\" ] && rm -rf \"$BDIR\" && echo 'deleted' || echo 'not_found'",
-        name = backup_name
+        "BDIR=\"$HOME/.clawpal/backups/\"{name}; [ -d \"$BDIR\" ] && rm -rf \"$BDIR\" && echo 'deleted' || echo 'not_found'",
+        name = escaped_name
     );
 
     let result = pool.exec_login(&host_id, &cmd).await?;
@@ -4275,7 +4300,13 @@ fn write_hosts_to_disk(hosts: &[SshHostConfig]) -> Result<(), String> {
         fs::create_dir_all(parent).map_err(|e| format!("Failed to create dir: {e}"))?;
     }
     let json = serde_json::to_string_pretty(hosts).map_err(|e| format!("Failed to serialize hosts: {e}"))?;
-    fs::write(&path, json).map_err(|e| format!("Failed to write remote-instances.json: {e}"))
+    fs::write(&path, &json).map_err(|e| format!("Failed to write remote-instances.json: {e}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o600));
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -4620,7 +4651,7 @@ pub async fn remote_save_config_baseline(
     let cfg: Value = serde_json::from_str(&raw)
         .map_err(|e| format!("Failed to parse remote config: {e}"))?;
     let text = serde_json::to_string_pretty(&cfg).map_err(|e| e.to_string())?;
-    baselines.0.lock().unwrap().insert(host_id, text);
+    baselines.0.lock().unwrap_or_else(|e| e.into_inner()).insert(host_id, text);
     Ok(true)
 }
 
@@ -4634,7 +4665,7 @@ pub async fn remote_check_config_dirty(
     let cfg: Value = serde_json::from_str(&raw)
         .map_err(|e| format!("Failed to parse remote config: {e}"))?;
     let current = serde_json::to_string_pretty(&cfg).map_err(|e| e.to_string())?;
-    let mut map = baselines.0.lock().unwrap();
+    let mut map = baselines.0.lock().unwrap_or_else(|e| e.into_inner());
     let baseline = match map.get(&host_id) {
         Some(b) => b.clone(),
         None => {
@@ -4654,7 +4685,7 @@ pub async fn remote_discard_config_changes(
     host_id: String,
 ) -> Result<bool, String> {
     let baseline = {
-        let map = baselines.0.lock().unwrap();
+        let map = baselines.0.lock().unwrap_or_else(|e| e.into_inner());
         map.get(&host_id).cloned()
             .ok_or_else(|| "No baseline config found for this host".to_string())?
     };
@@ -4678,7 +4709,7 @@ pub async fn remote_apply_pending_changes(
     let cfg: Value = serde_json::from_str(&raw)
         .map_err(|e| format!("Failed to parse remote config: {e}"))?;
     let text = serde_json::to_string_pretty(&cfg).map_err(|e| e.to_string())?;
-    baselines.0.lock().unwrap().insert(host_id.clone(), text);
+    baselines.0.lock().unwrap_or_else(|e| e.into_inner()).insert(host_id.clone(), text);
     // Restart gateway
     pool.exec_login(&host_id, "openclaw gateway restart").await?;
     Ok(true)
@@ -5872,7 +5903,7 @@ pub async fn remote_get_cron_runs(pool: State<'_, SshConnectionPool>, host_id: S
 
 #[tauri::command]
 pub async fn remote_trigger_cron_job(pool: State<'_, SshConnectionPool>, host_id: String, job_id: String) -> Result<String, String> {
-    let result = pool.exec_login(&host_id, &format!("openclaw cron run {}", job_id)).await?;
+    let result = pool.exec_login(&host_id, &format!("openclaw cron run {}", shell_escape(&job_id))).await?;
     if result.exit_code == 0 {
         Ok(result.stdout)
     } else {
@@ -5882,7 +5913,7 @@ pub async fn remote_trigger_cron_job(pool: State<'_, SshConnectionPool>, host_id
 
 #[tauri::command]
 pub async fn remote_delete_cron_job(pool: State<'_, SshConnectionPool>, host_id: String, job_id: String) -> Result<String, String> {
-    let result = pool.exec_login(&host_id, &format!("openclaw cron remove {}", job_id)).await?;
+    let result = pool.exec_login(&host_id, &format!("openclaw cron remove {}", shell_escape(&job_id))).await?;
     if result.exit_code == 0 {
         Ok(result.stdout)
     } else {
@@ -5897,7 +5928,7 @@ pub async fn remote_delete_cron_job(pool: State<'_, SshConnectionPool>, host_id:
 #[tauri::command]
 pub fn get_watchdog_status() -> Result<Value, String> {
     let paths = resolve_paths();
-    let wd_dir = paths.base_dir.join("watchdog");
+    let wd_dir = paths.clawpal_dir.join("watchdog");
     let status_path = wd_dir.join("status.json");
     let pid_path = wd_dir.join("watchdog.pid");
 
@@ -5939,7 +5970,7 @@ pub fn get_watchdog_status() -> Result<Value, String> {
 #[tauri::command]
 pub fn deploy_watchdog(app_handle: tauri::AppHandle) -> Result<bool, String> {
     let paths = resolve_paths();
-    let wd_dir = paths.base_dir.join("watchdog");
+    let wd_dir = paths.clawpal_dir.join("watchdog");
     std::fs::create_dir_all(&wd_dir).map_err(|e| e.to_string())?;
 
     let resource_path = app_handle.path()
@@ -5950,13 +5981,14 @@ pub fn deploy_watchdog(app_handle: tauri::AppHandle) -> Result<bool, String> {
         .map_err(|e| format!("Failed to read watchdog resource: {e}"))?;
 
     std::fs::write(wd_dir.join("watchdog.js"), content).map_err(|e| e.to_string())?;
+    crate::logging::log_info("Watchdog deployed");
     Ok(true)
 }
 
 #[tauri::command]
 pub fn start_watchdog() -> Result<bool, String> {
     let paths = resolve_paths();
-    let wd_dir = paths.base_dir.join("watchdog");
+    let wd_dir = paths.clawpal_dir.join("watchdog");
     let script = wd_dir.join("watchdog.js");
     let pid_path = wd_dir.join("watchdog.pid");
     let log_path = wd_dir.join("watchdog.log");
@@ -5988,6 +6020,7 @@ pub fn start_watchdog() -> Result<bool, String> {
     let _child = std::process::Command::new("node")
         .arg(&script)
         .current_dir(&wd_dir)
+        .env("CLAWPAL_WATCHDOG_DIR", &wd_dir)
         .stdout(log_file)
         .stderr(log_err)
         .stdin(std::process::Stdio::null())
@@ -5995,13 +6028,14 @@ pub fn start_watchdog() -> Result<bool, String> {
         .map_err(|e| format!("Failed to start watchdog: {e}"))?;
 
     // PID file is written by watchdog.js itself via acquirePidFile()
+    crate::logging::log_info("Watchdog started");
     Ok(true)
 }
 
 #[tauri::command]
 pub fn stop_watchdog() -> Result<bool, String> {
     let paths = resolve_paths();
-    let pid_path = paths.base_dir.join("watchdog").join("watchdog.pid");
+    let pid_path = paths.clawpal_dir.join("watchdog").join("watchdog.pid");
 
     if !pid_path.exists() {
         return Ok(true);
@@ -6015,13 +6049,14 @@ pub fn stop_watchdog() -> Result<bool, String> {
     }
 
     let _ = std::fs::remove_file(&pid_path);
+    crate::logging::log_info("Watchdog stopped");
     Ok(true)
 }
 
 #[tauri::command]
 pub fn uninstall_watchdog() -> Result<bool, String> {
     let paths = resolve_paths();
-    let wd_dir = paths.base_dir.join("watchdog");
+    let wd_dir = paths.clawpal_dir.join("watchdog");
 
     // Stop first if running
     let pid_path = wd_dir.join("watchdog.pid");
@@ -6036,7 +6071,22 @@ pub fn uninstall_watchdog() -> Result<bool, String> {
     if wd_dir.exists() {
         std::fs::remove_dir_all(&wd_dir).map_err(|e| e.to_string())?;
     }
+    crate::logging::log_info("Watchdog uninstalled");
     Ok(true)
+}
+
+// ---------------------------------------------------------------------------
+// Log reading commands
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+pub fn read_app_log(lines: Option<usize>) -> Result<String, String> {
+    crate::logging::read_log_tail("app.log", lines.unwrap_or(200))
+}
+
+#[tauri::command]
+pub fn read_error_log(lines: Option<usize>) -> Result<String, String> {
+    crate::logging::read_log_tail("error.log", lines.unwrap_or(200))
 }
 
 // ---------------------------------------------------------------------------

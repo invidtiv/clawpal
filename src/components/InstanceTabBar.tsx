@@ -17,6 +17,17 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from "@/components/ui/alert-dialog";
 import { cn } from "@/lib/utils";
 import { api } from "@/lib/api";
 import type { SshHost } from "@/lib/types";
@@ -147,15 +158,35 @@ export function InstanceTabBar({
               {statusDot(connectionStatus[host.id])}
               {host.label || host.host}
             </button>
-            <button
-              className="absolute -top-0.5 -right-0.5 hidden group-hover:flex items-center justify-center w-4 h-4 rounded-full bg-muted-foreground/20 hover:bg-destructive hover:text-white text-[10px] leading-none"
-              onClick={(e) => {
-                e.stopPropagation();
-                handleDelete(host.id);
-              }}
-            >
-              &times;
-            </button>
+            <AlertDialog>
+              <AlertDialogTrigger asChild>
+                <button
+                  className="absolute -top-0.5 -right-0.5 hidden group-hover:flex items-center justify-center w-4 h-4 rounded-full bg-muted-foreground/20 hover:bg-destructive hover:text-white text-[10px] leading-none"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                  }}
+                >
+                  &times;
+                </button>
+              </AlertDialogTrigger>
+              <AlertDialogContent>
+                <AlertDialogHeader>
+                  <AlertDialogTitle>{t('instance.deleteTitle')}</AlertDialogTitle>
+                  <AlertDialogDescription>
+                    {t('instance.deleteDescription', { label: host.label || host.host })}
+                  </AlertDialogDescription>
+                </AlertDialogHeader>
+                <AlertDialogFooter>
+                  <AlertDialogCancel>{t('instance.cancel')}</AlertDialogCancel>
+                  <AlertDialogAction
+                    className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+                    onClick={() => handleDelete(host.id)}
+                  >
+                    {t('instance.deleteConfirm')}
+                  </AlertDialogAction>
+                </AlertDialogFooter>
+              </AlertDialogContent>
+            </AlertDialog>
           </div>
         ))}
 

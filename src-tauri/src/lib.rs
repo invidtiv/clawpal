@@ -6,7 +6,7 @@ use crate::commands::{
     list_agent_ids, list_agents_overview, create_agent, delete_agent, setup_agent_identity, list_memory_files, delete_memory_file, clear_memory, list_session_files,
     delete_session_file, clear_all_sessions, clear_agent_sessions, analyze_sessions, delete_sessions_by_ids, preview_session,
     preview_rollback, rollback, run_doctor_command,
-    resolve_api_keys, read_raw_config, resolve_full_api_key, open_url, chat_via_openclaw,
+    resolve_api_keys, read_raw_config, open_url, chat_via_openclaw,
     backup_before_upgrade, list_backups, restore_from_backup, delete_backup,
     list_channels_minimal,
     list_discord_guild_channels,
@@ -39,6 +39,7 @@ use crate::commands::{
     remote_list_cron_jobs, remote_get_cron_runs, remote_trigger_cron_job, remote_delete_cron_job,
     get_watchdog_status, deploy_watchdog, start_watchdog, stop_watchdog, uninstall_watchdog,
     remote_get_watchdog_status, remote_deploy_watchdog, remote_start_watchdog, remote_stop_watchdog, remote_uninstall_watchdog,
+    read_app_log, read_error_log,
     RemoteConfigBaselines,
 };
 use crate::ssh::SshConnectionPool;
@@ -47,6 +48,7 @@ pub mod commands;
 pub mod config_io;
 pub mod doctor;
 pub mod history;
+pub mod logging;
 pub mod models;
 pub mod recipe;
 pub mod ssh;
@@ -93,7 +95,6 @@ pub fn run() {
             fix_issues,
             resolve_api_keys,
             read_raw_config,
-            resolve_full_api_key,
             open_url,
             chat_via_openclaw,
             backup_before_upgrade,
@@ -182,6 +183,8 @@ pub fn run() {
             remote_start_watchdog,
             remote_stop_watchdog,
             remote_uninstall_watchdog,
+            read_app_log,
+            read_error_log,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run app");

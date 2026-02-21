@@ -27,7 +27,7 @@ export function RecipeCard({
             {recipe.description}
           </div>
           <div className="text-xs text-muted-foreground mt-2">
-            {t('recipeCard.steps', { count: recipe.steps.length })} &middot; {recipe.difficulty}
+            {t('recipeCard.steps', { count: recipe.steps.length })} &middot; {t(`recipeCard.${recipe.difficulty}`)}
           </div>
         </CardContent>
       </Card>
@@ -49,7 +49,7 @@ export function RecipeCard({
           ))}
         </div>
         <p className="text-sm text-muted-foreground">
-          {t('recipeCard.steps', { count: recipe.steps.length })} &middot; {recipe.difficulty}
+          {t('recipeCard.steps', { count: recipe.steps.length })} &middot; {t(`recipeCard.${recipe.difficulty}`)}
         </p>
       </CardContent>
       <CardFooter>

@@ -193,6 +193,8 @@
   "history.rollbackPreview": "Rollback Preview",
   "history.manual": "manual",
   "history.unknown": "unknown",
+  "history.rollbackConfirmTitle": "Rollback to this snapshot?",
+  "history.rollbackConfirmDescription": "This will revert your configuration to the state captured in this snapshot. The current config will be replaced.",
 
   "channels.title": "Channels",
   "channels.noChannels": "No channels configured. Add channel plugins in your OpenClaw config, then refresh to see them here.",
@@ -271,6 +273,9 @@
 
   "recipeCard.steps_one": "{{count}} step",
   "recipeCard.steps_other": "{{count}} steps",
+  "recipeCard.easy": "Easy",
+  "recipeCard.normal": "Normal",
+  "recipeCard.advanced": "Advanced",
   "recipeCard.cook": "Cook",
 
   "paramForm.isRequired": "{{label}} is required",
@@ -306,6 +311,9 @@
   "instance.saving": "Saving...",
   "instance.update": "Update",
   "instance.add": "Add",
+  "instance.deleteTitle": "Delete remote instance?",
+  "instance.deleteDescription": "This will remove the SSH host \"{{label}}\" from ClawPal. The remote server itself will not be affected.",
+  "instance.deleteConfirm": "Delete",
 
   "nav.cron": "Cron",
   "cron.title": "Cron Jobs",
@@ -346,6 +354,13 @@
   "cron.weekdays": "Weekdays",
   "cron.monthly": "Monthly on {{day}}th at {{time}}",
   "cron.oneShot": "One-shot: {{time}}",
+  "cron.justNow": "just now",
+  "cron.secsAgo": "{{count}}s ago",
+  "cron.minsAgo": "{{count}}m ago",
+  "cron.hoursAgo": "{{count}}h ago",
+  "cron.daysAgo": "{{count}}d ago",
+  "cron.durSecs": "{{count}}s",
+  "cron.durMins": "{{m}}m {{s}}s",
   "cron.lastDuration": "Last duration",
   "cron.consecutiveErrors": "{{count}} consecutive error(s)",
   "watchdog.title": "Watchdog",

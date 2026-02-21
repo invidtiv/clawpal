@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 import { api } from "@/lib/api";
@@ -78,22 +78,22 @@ function fmtDate(ms: number): string {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 }
 
-function fmtRelative(ms: number): string {
+function fmtRelative(ms: number, t: TFunction): string {
   const diff = Date.now() - ms;
   const secs = Math.floor(diff / 1000);
-  if (secs < 0) return "just now";
-  if (secs < 60) return `${secs}s ago`;
+  if (secs < 0) return t("cron.justNow");
+  if (secs < 60) return t("cron.secsAgo", { count: secs });
   const mins = Math.floor(secs / 60);
-  if (mins < 60) return `${mins}m ago`;
+  if (mins < 60) return t("cron.minsAgo", { count: mins });
   const hours = Math.floor(mins / 60);
-  if (hours < 24) return `${hours}h ago`;
-  return `${Math.floor(hours / 24)}d ago`;
+  if (hours < 24) return t("cron.hoursAgo", { count: hours });
+  return t("cron.daysAgo", { count: Math.floor(hours / 24) });
 }
 
-function fmtDur(ms: number): string {
+function fmtDur(ms: number, t: TFunction): string {
   if (ms < 1000) return `${ms}ms`;
   const s = Math.round(ms / 1000);
-  return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m${s % 60}s`;
+  return s < 60 ? t("cron.durSecs", { count: s }) : t("cron.durMins", { m: Math.floor(s / 60), s: s % 60 });
 }
 
 
@@ -128,12 +128,12 @@ export function Cron() {
   const [lastError, setLastError] = useState<string | null>(null);
   const [lastSuccess, setLastSuccess] = useState<string | null>(null);
 
-  const loadJobs = () => { (isRemote ? api.remoteListCronJobs(instanceId) : api.listCronJobs()).then(setJobs).catch(() => {}); };
-  const loadWd = () => { (isRemote ? api.remoteGetWatchdogStatus(instanceId) : api.getWatchdogStatus()).then(setWatchdog).catch(() => setWatchdog(null)); };
-  const loadRuns = (id: string) => { (isRemote ? api.remoteGetCronRuns(instanceId, id, 10) : api.getCronRuns(id, 10)).then(r => setRuns(p => ({ ...p, [id]: r }))).catch(() => {}); };
+  const loadJobs = useCallback(() => { (isRemote ? api.remoteListCronJobs(instanceId) : api.listCronJobs()).then(setJobs).catch(() => {}); }, [isRemote, instanceId]);
+  const loadWd = useCallback(() => { (isRemote ? api.remoteGetWatchdogStatus(instanceId) : api.getWatchdogStatus()).then(setWatchdog).catch(() => setWatchdog(null)); }, [isRemote, instanceId]);
+  const loadRuns = useCallback((id: string) => { (isRemote ? api.remoteGetCronRuns(instanceId, id, 10) : api.getCronRuns(id, 10)).then(r => setRuns(p => ({ ...p, [id]: r }))).catch(() => {}); }, [isRemote, instanceId]);
 
-  useEffect(() => { loadJobs(); loadWd(); const iv = setInterval(() => { loadJobs(); loadWd(); }, 10_000); return () => clearInterval(iv); }, [instanceId, isRemote]); // eslint-disable-line
-  useEffect(() => { if (expandedJob) loadRuns(expandedJob); }, [expandedJob]); // eslint-disable-line
+  useEffect(() => { loadJobs(); loadWd(); const iv = setInterval(() => { loadJobs(); loadWd(); }, 10_000); return () => clearInterval(iv); }, [loadJobs, loadWd]);
+  useEffect(() => { if (expandedJob) loadRuns(expandedJob); }, [expandedJob, loadRuns]);
 
   const showErr = (e: unknown) => { const msg = e instanceof Error ? e.message : String(e); setLastError(msg); setLastSuccess(null); setTimeout(() => setLastError(null), 8000); };
   const showOk = (msg: string) => { setLastSuccess(msg); setLastError(null); setTimeout(() => setLastSuccess(null), 5000); };
@@ -234,7 +234,7 @@ export function Cron() {
               <span>{t("watchdog.startingHint")}</span>
             )}
             {watchdog?.alive && watchdog?.lastCheckAt && (
-              <span>{t("watchdog.lastCheck", { time: fmtRelative(new Date(watchdog.lastCheckAt).getTime()) })}</span>
+              <span>{t("watchdog.lastCheck", { time: fmtRelative(new Date(watchdog.lastCheckAt).getTime(), t) })}</span>
             )}
           </div>
           <div className="flex items-center gap-1.5 shrink-0">
@@ -261,8 +261,8 @@ export function Cron() {
             <span className="flex items-center gap-1"><span className="w-1.5 h-1.5 rounded-full bg-red-500" />{t("cron.legendEscalated")}</span>
             <span className="flex items-center gap-1"><span className="w-1.5 h-1.5 rounded-full bg-gray-400" />{t("cron.legendDisabled")}</span>
           </div>
-          {jobs.map((job: any, idx: number) => {
-            const jobId = job.jobId || job.id || String(idx);
+          {jobs.map((job, idx) => {
+            const jobId = job.jobId || String(idx);
             const st = job.state || {};
             const expanded = expandedJob === jobId;
             const jobName = job.name || jobId;
@@ -303,7 +303,7 @@ export function Cron() {
 
                     {/* Last run */}
                     <span className="text-xs text-muted-foreground shrink-0 w-16 text-right">
-                      {st.lastRunAtMs ? fmtRelative(st.lastRunAtMs) : "—"}
+                      {st.lastRunAtMs ? fmtRelative(st.lastRunAtMs, t) : "—"}
                     </span>
 
                     {/* Actions */}
@@ -339,12 +339,12 @@ export function Cron() {
                         <p className="text-xs text-muted-foreground py-1">{t("cron.noRuns")}</p>
                       ) : (
                         <div className="space-y-0.5">
-                          {(runs[jobId] || []).map((run: any, i: number) => {
+                          {(runs[jobId] || []).map((run, i) => {
                             const ts = run.ts || run.runAtMs;
                             return (
                               <div key={i} className="flex items-start gap-3 text-xs py-0.5 min-w-0">
                                 <span className="text-muted-foreground w-[130px] shrink-0 tabular-nums">{ts ? fmtDate(ts) : "—"}</span>
-                                <span className="text-muted-foreground w-10 shrink-0 tabular-nums">{run.durationMs != null ? fmtDur(run.durationMs) : "—"}</span>
+                                <span className="text-muted-foreground w-10 shrink-0 tabular-nums">{run.durationMs != null ? fmtDur(run.durationMs, t) : "—"}</span>
                                 <span className="text-muted-foreground min-w-0 break-words">
                                   {run.summary || "—"}
                                 </span>

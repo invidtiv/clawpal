@@ -24,6 +24,7 @@ export function Cook({
   const { t } = useTranslation();
   const { instanceId, isRemote, discordGuildChannels } = useInstance();
   const [recipe, setRecipe] = useState<Recipe | null>(null);
+  const [loading, setLoading] = useState(true);
   const [params, setParams] = useState<Record<string, string>>({});
   const [phase, setPhase] = useState<Phase>("params");
   const [resolvedStepList, setResolvedStepList] = useState<ResolvedStep[]>([]);
@@ -32,6 +33,7 @@ export function Cook({
   const [needsRestart, setNeedsRestart] = useState(false);
 
   useEffect(() => {
+    setLoading(true);
     api.listRecipes(recipeSource).then((recipes) => {
       const found = recipes.find((it) => it.id === recipeId);
       setRecipe(found || null);
@@ -42,7 +44,7 @@ export function Cook({
         }
         setParams(defaults);
       }
-    });
+    }).finally(() => setLoading(false));
   }, [recipeId, recipeSource]);
 
   // Pre-populate fields from existing config when channel is selected
@@ -101,6 +103,7 @@ export function Cook({
     }).catch(() => { /* ignore config read errors */ });
   }, [recipe, params.guild_id, params.channel_id, isRemote, instanceId]);
 
+  if (loading) return <div className="flex items-center justify-center py-12"><div className="h-6 w-6 animate-spin rounded-full border-2 border-primary border-t-transparent" /></div>;
   if (!recipe) return <div>{t('cook.recipeNotFound')}</div>;
 
   const handleNext = () => {

@@ -12,6 +12,17 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from "@/components/ui/alert-dialog";
 import type { HistoryItem, PreviewResult } from "../lib/types";
 import { formatTime } from "@/lib/utils";
 
@@ -71,7 +82,7 @@ export function History() {
                     </>
                   ) : (
                     <>
-                      <Badge variant="secondary">{item.recipeId || "manual"}</Badge>
+                      <Badge variant="secondary">{item.recipeId || t('history.manual')}</Badge>
                       <span className="text-muted-foreground">{item.source}</span>
                     </>
                   )}
@@ -98,26 +109,46 @@ export function History() {
                     >
                       {t('history.preview')}
                     </Button>
-                    <Button
-                      variant="destructive"
-                      size="sm"
-                      onClick={async () => {
-                        try {
-                          if (isRemote) {
-                            await api.remoteRollback(instanceId, item.id);
-                          } else {
-                            await api.rollback(item.id);
-                          }
-                          setMessage(t('history.rollbackCompleted'));
-                          await refreshHistory();
-                        } catch (err) {
-                          setMessage(String(err));
-                        }
-                      }}
-                      disabled={!item.canRollback}
-                    >
-                      {t('history.rollbackBtn')}
-                    </Button>
+                    <AlertDialog>
+                      <AlertDialogTrigger asChild>
+                        <Button
+                          variant="destructive"
+                          size="sm"
+                          disabled={!item.canRollback}
+                        >
+                          {t('history.rollbackBtn')}
+                        </Button>
+                      </AlertDialogTrigger>
+                      <AlertDialogContent>
+                        <AlertDialogHeader>
+                          <AlertDialogTitle>{t('history.rollbackConfirmTitle')}</AlertDialogTitle>
+                          <AlertDialogDescription>
+                            {t('history.rollbackConfirmDescription')}
+                          </AlertDialogDescription>
+                        </AlertDialogHeader>
+                        <AlertDialogFooter>
+                          <AlertDialogCancel>{t('config.cancel')}</AlertDialogCancel>
+                          <AlertDialogAction
+                            className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+                            onClick={async () => {
+                              try {
+                                if (isRemote) {
+                                  await api.remoteRollback(instanceId, item.id);
+                                } else {
+                                  await api.rollback(item.id);
+                                }
+                                setMessage(t('history.rollbackCompleted'));
+                                await refreshHistory();
+                              } catch (err) {
+                                setMessage(String(err));
+                              }
+                            }}
+                          >
+                            {t('history.rollbackBtn')}
+                          </AlertDialogAction>
+                        </AlertDialogFooter>
+                      </AlertDialogContent>
+                    </AlertDialog>
                   </div>
                 )}
               </CardContent>

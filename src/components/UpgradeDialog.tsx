@@ -58,7 +58,7 @@ export function UpgradeDialog({
 
   const startUpgrade = async () => {
     setStep("backup");
-    runBackup();
+    await runBackup();
   };
 
   const runBackup = async () => {
@@ -71,7 +71,7 @@ export function UpgradeDialog({
       setBackupName(info.name);
       setLoading(false);
       setStep("upgrading");
-      runUpgrade();
+      await runUpgrade();
     } catch (e) {
       setError(String(e));
       setLoading(false);

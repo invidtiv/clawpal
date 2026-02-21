@@ -16,12 +16,13 @@
 const fs   = require('fs');
 const path = require('path');
 const net  = require('net');
-const { execSync, exec } = require('child_process');
+const { execSync, execFileSync } = require('child_process');
 
 // -- Paths & constants -------------------------------------------------------
 
 const OPENCLAW_DIR  = path.join(process.env.HOME || '', '.openclaw');
-const WATCHDOG_DIR  = path.join(OPENCLAW_DIR, 'watchdog');
+const WATCHDOG_DIR  = process.env.CLAWPAL_WATCHDOG_DIR
+  || path.join(process.env.HOME || '', '.clawpal', 'watchdog');
 const PID_FILE      = path.join(WATCHDOG_DIR, 'watchdog.pid');
 const STATUS_FILE   = path.join(WATCHDOG_DIR, 'status.json');
 const CONFIG_FILE   = path.join(OPENCLAW_DIR, 'openclaw.json');
@@ -365,7 +366,7 @@ function normaliseJobs(raw) {
  */
 function triggerJob(jobId) {
   log(`Triggering job "${jobId}" via \`openclaw cron run ${jobId} --due\`...`);
-  execSync(`openclaw cron run ${jobId} --due`, {
+  execFileSync('openclaw', ['cron', 'run', jobId, '--due'], {
     timeout: EXEC_TIMEOUT,
     stdio: 'ignore',
   });
@@ -549,7 +550,7 @@ async function main() {
   acquirePidFile();
 
   // Schedule recurring checks
-  async function loop() {
+  async function watchLoop() {
     while (true) {
       try {
         await runCheckCycle();
@@ -560,7 +561,7 @@ async function main() {
     }
   }
 
-  loop();
+  await watchLoop();
 }
 
 // -- Graceful shutdown -------------------------------------------------------

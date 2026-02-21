@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { AgentOverview, AgentSessionAnalysis, ApplyResult, BackupInfo, Binding, ChannelNode, ConfigDirtyState, CronJob, CronRun, DiscordGuildChannel, HistoryItem, ModelCatalogProvider, ModelProfile, PreviewResult, ProviderAuthSuggestion, Recipe, RemoteSystemStatus, ResolvedApiKey, StatusLight, SystemStatus, DoctorReport, MemoryFile, SessionFile, SshHost, SshExecResult, SftpEntry, WatchdogStatus } from "./types";
+import type { AgentOverview, AgentSessionAnalysis, ApplyResult, BackupInfo, Binding, ChannelNode, ConfigDirtyState, CronJob, CronRun, DiscordGuildChannel, HistoryItem, ModelCatalogProvider, ModelProfile, PreviewResult, ProviderAuthSuggestion, Recipe, RemoteSystemStatus, ResolvedApiKey, StatusLight, SystemStatus, DoctorReport, MemoryFile, SessionFile, SshHost, WatchdogStatus } from "./types";
 
 export const api = {
   getSystemStatus: (): Promise<SystemStatus> =>
@@ -70,8 +70,6 @@ export const api = {
     invoke("fix_issues", { ids }),
   readRawConfig: (): Promise<string> =>
     invoke("read_raw_config", {}),
-  resolveFullApiKey: (profileId: string): Promise<string> =>
-    invoke("resolve_full_api_key", { profileId }),
   openUrl: (url: string): Promise<void> =>
     invoke("open_url", { url }),
   chatViaOpenclaw: (agentId: string, message: string, sessionId?: string): Promise<Record<string, unknown>> =>
@@ -124,18 +122,6 @@ export const api = {
     invoke("ssh_disconnect", { hostId }),
   sshStatus: (hostId: string): Promise<string> =>
     invoke("ssh_status", { hostId }),
-
-  // SSH primitives
-  sshExec: (hostId: string, command: string): Promise<SshExecResult> =>
-    invoke("ssh_exec", { hostId, command }),
-  sftpReadFile: (hostId: string, path: string): Promise<string> =>
-    invoke("sftp_read_file", { hostId, path }),
-  sftpWriteFile: (hostId: string, path: string, content: string): Promise<boolean> =>
-    invoke("sftp_write_file", { hostId, path, content }),
-  sftpListDir: (hostId: string, path: string): Promise<SftpEntry[]> =>
-    invoke("sftp_list_dir", { hostId, path }),
-  sftpRemoveFile: (hostId: string, path: string): Promise<boolean> =>
-    invoke("sftp_remove_file", { hostId, path }),
 
   // Remote business commands
   remoteReadRawConfig: (hostId: string): Promise<string> =>
@@ -268,4 +254,10 @@ export const api = {
     invoke("remote_stop_watchdog", { hostId }),
   remoteUninstallWatchdog: (hostId: string): Promise<boolean> =>
     invoke("remote_uninstall_watchdog", { hostId }),
+
+  // Logs
+  readAppLog: (lines?: number): Promise<string> =>
+    invoke("read_app_log", { lines }),
+  readErrorLog: (lines?: number): Promise<string> =>
+    invoke("read_error_log", { lines }),
 };
