@@ -87,6 +87,15 @@ export function Home({
       : `${profile.provider}/${profile.model}`;
   };
 
+  // Skip polling refreshes while there are queued commands (to preserve optimistic UI)
+  const hasPendingRef = useRef(false);
+  useEffect(() => {
+    const check = () => { ua.queuedCommandsCount().then((n) => { hasPendingRef.current = n > 0; }).catch(() => {}); };
+    check();
+    const interval = setInterval(check, 3000);
+    return () => clearInterval(interval);
+  }, [ua]);
+
   // Health status with grace period: retry quickly when unhealthy, then slow-poll
   const [statusSettled, setStatusSettled] = useState(false);
   const retriesRef = useRef(0);
@@ -94,6 +103,7 @@ export function Home({
 
   const fetchStatus = useCallback(() => {
     if (ua.isRemote && !ua.isConnected) return; // Wait for SSH connection
+    if (hasPendingRef.current) return; // Don't overwrite optimistic UI
     ua.getInstanceStatus().then((s) => {
       setStatus(s);
       if (ua.isRemote) {
@@ -133,6 +143,7 @@ export function Home({
 
   const refreshAgents = useCallback(() => {
     if (ua.isRemote && !ua.isConnected) return; // Wait for SSH connection
+    if (hasPendingRef.current) return; // Don't overwrite optimistic UI
     ua.listAgents().then((a) => {
       setAgents(a);
       if (ua.isRemote) remoteErrorShownRef.current = false;
