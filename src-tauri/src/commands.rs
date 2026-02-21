@@ -1234,6 +1234,62 @@ pub fn setup_agent_identity(
     Ok(true)
 }
 
+#[tauri::command]
+pub async fn remote_setup_agent_identity(
+    pool: State<'_, SshConnectionPool>,
+    host_id: String,
+    agent_id: String,
+    name: String,
+    emoji: Option<String>,
+) -> Result<bool, String> {
+    let agent_id = agent_id.trim().to_string();
+    let name = name.trim().to_string();
+    if agent_id.is_empty() {
+        return Err("Agent ID is required".into());
+    }
+    if name.is_empty() {
+        return Err("Name is required".into());
+    }
+
+    // Read remote config to find agent workspace
+    let raw = pool.sftp_read(&host_id, "~/.openclaw/openclaw.json").await?;
+    let cfg: Value = serde_json::from_str(&raw).map_err(|e| format!("Failed to parse config: {e}"))?;
+
+    let agents_list = cfg.pointer("/agents/list")
+        .and_then(Value::as_array)
+        .ok_or("agents.list not found")?;
+
+    let agent = agents_list.iter()
+        .find(|a| a.get("id").and_then(Value::as_str) == Some(&agent_id))
+        .ok_or_else(|| format!("Agent '{}' not found", agent_id))?;
+
+    let default_workspace = cfg.pointer("/agents/defaults/workspace")
+        .or_else(|| cfg.pointer("/agents/default/workspace"))
+        .and_then(Value::as_str)
+        .unwrap_or("~/.openclaw/agents");
+
+    let workspace = agent.get("workspace")
+        .and_then(Value::as_str)
+        .unwrap_or(default_workspace);
+
+    // Build IDENTITY.md content
+    let mut content = format!("- Name: {}\n", name);
+    if let Some(ref e) = emoji {
+        let e = e.trim();
+        if !e.is_empty() {
+            content.push_str(&format!("- Emoji: {}\n", e));
+        }
+    }
+
+    // Write via SSH
+    let ws = if workspace.starts_with("~/") { workspace.to_string() } else { format!("~/{workspace}") };
+    pool.exec(&host_id, &format!("mkdir -p {}", shell_escape(&ws))).await?;
+    let identity_path = format!("{}/IDENTITY.md", ws);
+    pool.sftp_write(&host_id, &identity_path, &content).await?;
+
+    Ok(true)
+}
+
 fn expand_tilde(path: &str) -> String {
     if path.starts_with("~/") {
         if let Some(home) = std::env::var("HOME").ok() {
@@ -1847,6 +1903,58 @@ pub fn fix_issues(ids: Vec<String>) -> Result<FixResult, String> {
             remaining.push(id);
         }
     }
+    Ok(FixResult {
+        ok: true,
+        applied,
+        remaining_issues: remaining,
+    })
+}
+
+#[tauri::command]
+pub async fn remote_fix_issues(pool: State<'_, SshConnectionPool>, host_id: String, ids: Vec<String>) -> Result<FixResult, String> {
+    let raw = pool.sftp_read(&host_id, "~/.openclaw/openclaw.json").await?;
+    let mut cfg: Value = json5::from_str(&raw).unwrap_or_else(|_| Value::Object(Default::default()));
+    let mut applied = Vec::new();
+
+    for id in &ids {
+        match id.as_str() {
+            "field.agents" if cfg.get("agents").is_none() => {
+                let mut agents = serde_json::Map::new();
+                let mut defaults = serde_json::Map::new();
+                defaults.insert("model".into(), Value::String("anthropic/claude-sonnet-4-5".into()));
+                agents.insert("defaults".into(), Value::Object(defaults));
+                if let Value::Object(map) = &mut cfg {
+                    map.insert("agents".into(), Value::Object(agents));
+                }
+                applied.push(id.clone());
+            }
+            "json.syntax" => {
+                // If we got here, json5 already parsed it or fell back to empty object
+                applied.push(id.clone());
+            }
+            "field.port" => {
+                let mut gateway = cfg
+                    .get("gateway")
+                    .and_then(|v| v.as_object())
+                    .cloned()
+                    .unwrap_or_default();
+                gateway.insert("port".into(), Value::Number(serde_json::Number::from(18789_u64)));
+                if let Value::Object(map) = &mut cfg {
+                    map.insert("gateway".into(), Value::Object(gateway));
+                }
+                applied.push(id.clone());
+            }
+            _ => {}
+        }
+    }
+
+    if !applied.is_empty() {
+        let new_text = serde_json::to_string_pretty(&cfg).map_err(|e| e.to_string())?;
+        remote_write_config_with_snapshot(&pool, &host_id, &raw, &cfg, "doctor-fix").await?;
+        let _ = new_text; // written by remote_write_config_with_snapshot
+    }
+
+    let remaining: Vec<String> = ids.into_iter().filter(|id| !applied.contains(id)).collect();
     Ok(FixResult {
         ok: true,
         applied,
@@ -6089,19 +6197,35 @@ pub fn read_error_log(lines: Option<usize>) -> Result<String, String> {
     crate::logging::read_log_tail("error.log", lines.unwrap_or(200))
 }
 
+#[tauri::command]
+pub async fn remote_read_app_log(pool: State<'_, SshConnectionPool>, host_id: String, lines: Option<usize>) -> Result<String, String> {
+    let n = lines.unwrap_or(200);
+    let cmd = format!("tail -n {n} ~/.clawpal/logs/app.log 2>/dev/null || echo ''");
+    let result = pool.exec(&host_id, &cmd).await?;
+    Ok(result.stdout)
+}
+
+#[tauri::command]
+pub async fn remote_read_error_log(pool: State<'_, SshConnectionPool>, host_id: String, lines: Option<usize>) -> Result<String, String> {
+    let n = lines.unwrap_or(200);
+    let cmd = format!("tail -n {n} ~/.clawpal/logs/error.log 2>/dev/null || echo ''");
+    let result = pool.exec(&host_id, &cmd).await?;
+    Ok(result.stdout)
+}
+
 // ---------------------------------------------------------------------------
 // Remote watchdog management
 // ---------------------------------------------------------------------------
 
 #[tauri::command]
 pub async fn remote_get_watchdog_status(pool: State<'_, SshConnectionPool>, host_id: String) -> Result<Value, String> {
-    let status_raw = pool.sftp_read(&host_id, "~/.openclaw/watchdog/status.json").await;
+    let status_raw = pool.sftp_read(&host_id, "~/.clawpal/watchdog/status.json").await;
     let mut status = match status_raw {
         Ok(text) => serde_json::from_str::<Value>(&text).unwrap_or(Value::Null),
         Err(_) => Value::Null,
     };
 
-    let pid_raw = pool.sftp_read(&host_id, "~/.openclaw/watchdog/watchdog.pid").await;
+    let pid_raw = pool.sftp_read(&host_id, "~/.clawpal/watchdog/watchdog.pid").await;
     let alive = match pid_raw {
         Ok(pid_str) => {
             let cmd = format!("kill -0 {} 2>/dev/null && echo alive || echo dead", pid_str.trim());
@@ -6112,7 +6236,7 @@ pub async fn remote_get_watchdog_status(pool: State<'_, SshConnectionPool>, host
         Err(_) => false,
     };
 
-    let deployed = pool.sftp_read(&host_id, "~/.openclaw/watchdog/watchdog.js").await.is_ok();
+    let deployed = pool.sftp_read(&host_id, "~/.clawpal/watchdog/watchdog.js").await.is_ok();
 
     if let Value::Object(ref mut map) = status {
         map.insert("alive".into(), Value::Bool(alive));
@@ -6128,15 +6252,21 @@ pub async fn remote_get_watchdog_status(pool: State<'_, SshConnectionPool>, host
 }
 
 #[tauri::command]
-pub async fn remote_deploy_watchdog(pool: State<'_, SshConnectionPool>, host_id: String, script_content: String) -> Result<bool, String> {
-    pool.exec(&host_id, "mkdir -p ~/.openclaw/watchdog").await?;
-    pool.sftp_write(&host_id, "~/.openclaw/watchdog/watchdog.js", &script_content).await?;
+pub async fn remote_deploy_watchdog(app_handle: tauri::AppHandle, pool: State<'_, SshConnectionPool>, host_id: String) -> Result<bool, String> {
+    let resource_path = app_handle.path()
+        .resolve("resources/watchdog.js", tauri::path::BaseDirectory::Resource)
+        .map_err(|e| format!("Failed to resolve watchdog resource: {e}"))?;
+    let content = std::fs::read_to_string(&resource_path)
+        .map_err(|e| format!("Failed to read watchdog resource: {e}"))?;
+
+    pool.exec(&host_id, "mkdir -p ~/.clawpal/watchdog").await?;
+    pool.sftp_write(&host_id, "~/.clawpal/watchdog/watchdog.js", &content).await?;
     Ok(true)
 }
 
 #[tauri::command]
 pub async fn remote_start_watchdog(pool: State<'_, SshConnectionPool>, host_id: String) -> Result<bool, String> {
-    let pid_raw = pool.sftp_read(&host_id, "~/.openclaw/watchdog/watchdog.pid").await;
+    let pid_raw = pool.sftp_read(&host_id, "~/.clawpal/watchdog/watchdog.pid").await;
     if let Ok(pid_str) = pid_raw {
         let cmd = format!("kill -0 {} 2>/dev/null && echo alive || echo dead", pid_str.trim());
         if let Ok(r) = pool.exec(&host_id, &cmd).await {
@@ -6146,33 +6276,30 @@ pub async fn remote_start_watchdog(pool: State<'_, SshConnectionPool>, host_id: 
         }
     }
 
-    let cmd = "cd ~/.openclaw/watchdog && nohup node watchdog.js >> watchdog.log 2>&1 & echo $!";
-    let result = pool.exec(&host_id, cmd).await?;
-    let pid = result.stdout.trim();
-    if !pid.is_empty() {
-        pool.sftp_write(&host_id, "~/.openclaw/watchdog/watchdog.pid", pid).await?;
-    }
+    let cmd = "cd ~/.clawpal/watchdog && nohup node watchdog.js >> watchdog.log 2>&1 &";
+    pool.exec(&host_id, cmd).await?;
+    // watchdog.js writes its own PID file to ~/.clawpal/watchdog/
     Ok(true)
 }
 
 #[tauri::command]
 pub async fn remote_stop_watchdog(pool: State<'_, SshConnectionPool>, host_id: String) -> Result<bool, String> {
-    let pid_raw = pool.sftp_read(&host_id, "~/.openclaw/watchdog/watchdog.pid").await;
+    let pid_raw = pool.sftp_read(&host_id, "~/.clawpal/watchdog/watchdog.pid").await;
     if let Ok(pid_str) = pid_raw {
         let _ = pool.exec(&host_id, &format!("kill {} 2>/dev/null", pid_str.trim())).await;
     }
-    let _ = pool.exec(&host_id, "rm -f ~/.openclaw/watchdog/watchdog.pid").await;
+    let _ = pool.exec(&host_id, "rm -f ~/.clawpal/watchdog/watchdog.pid").await;
     Ok(true)
 }
 
 #[tauri::command]
 pub async fn remote_uninstall_watchdog(pool: State<'_, SshConnectionPool>, host_id: String) -> Result<bool, String> {
     // Stop first
-    let pid_raw = pool.sftp_read(&host_id, "~/.openclaw/watchdog/watchdog.pid").await;
+    let pid_raw = pool.sftp_read(&host_id, "~/.clawpal/watchdog/watchdog.pid").await;
     if let Ok(pid_str) = pid_raw {
         let _ = pool.exec(&host_id, &format!("kill {} 2>/dev/null", pid_str.trim())).await;
     }
     // Remove entire directory
-    let _ = pool.exec(&host_id, "rm -rf ~/.openclaw/watchdog").await;
+    let _ = pool.exec(&host_id, "rm -rf ~/.clawpal/watchdog").await;
     Ok(true)
 }

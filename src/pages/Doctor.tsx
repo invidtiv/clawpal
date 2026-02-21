@@ -62,7 +62,9 @@ export function Doctor() {
 
   const fetchLog = useCallback((which: "app" | "error") => {
     setLogsLoading(true);
-    const fn = which === "app" ? api.readAppLog : api.readErrorLog;
+    const fn = isRemote
+      ? (which === "app" ? (n?: number) => api.remoteReadAppLog(instanceId, n) : (n?: number) => api.remoteReadErrorLog(instanceId, n))
+      : (which === "app" ? api.readAppLog : api.readErrorLog);
     fn(500)
       .then((text) => {
         setLogsContent(text);
@@ -74,7 +76,7 @@ export function Doctor() {
       })
       .catch(() => setLogsContent(""))
       .finally(() => setLogsLoading(false));
-  }, []);
+  }, [isRemote, instanceId]);
 
   useEffect(() => {
     if (logsOpen) fetchLog(logsTab);
@@ -123,6 +125,14 @@ export function Doctor() {
     }
     setRawOutput(null);
     return api.runDoctor();
+  }
+
+  function fixIssuesCmd(ids: string[]) {
+    if (isRemote) {
+      if (!isConnected) return Promise.reject("Not connected");
+      return api.remoteFixIssues(instanceId, ids);
+    }
+    return api.fixIssues(ids);
   }
 
   function refreshData() {
@@ -213,8 +223,7 @@ export function Doctor() {
                           <Button
                             size="sm"
                             onClick={() => {
-                              api
-                                .fixIssues([issue.id])
+                              fixIssuesCmd([issue.id])
                                 .then(() => runDoctorCmd())
                                 .then((report) =>
                                   dispatch({ type: "setDoctor", doctor: report }),
@@ -237,8 +246,7 @@ export function Doctor() {
                     <Button
                       variant="outline"
                       onClick={() => {
-                        api
-                          .fixIssues(autoFixable)
+                        fixIssuesCmd(autoFixable)
                           .then(() => runDoctorCmd())
                           .then((report) =>
                             dispatch({ type: "setDoctor", doctor: report }),

@@ -152,6 +152,10 @@ export const api = {
     invoke("remote_list_discord_guild_channels", { hostId }),
   remoteRunDoctor: (hostId: string): Promise<DoctorReport> =>
     invoke("remote_run_doctor", { hostId }),
+  remoteFixIssues: (hostId: string, ids: string[]): Promise<{ ok: boolean; applied: string[]; remainingIssues: string[] }> =>
+    invoke("remote_fix_issues", { hostId, ids }),
+  remoteSetupAgentIdentity: (hostId: string, agentId: string, name: string, emoji?: string): Promise<boolean> =>
+    invoke("remote_setup_agent_identity", { hostId, agentId, name, emoji }),
   remoteListHistory: (hostId: string): Promise<{ items: HistoryItem[] }> =>
     invoke("remote_list_history", { hostId }),
   remotePreviewRollback: (hostId: string, snapshotId: string): Promise<PreviewResult> =>
@@ -246,8 +250,8 @@ export const api = {
   // Remote watchdog
   remoteGetWatchdogStatus: (hostId: string): Promise<WatchdogStatus & { alive: boolean; deployed: boolean }> =>
     invoke("remote_get_watchdog_status", { hostId }),
-  remoteDeployWatchdog: (hostId: string, scriptContent: string): Promise<boolean> =>
-    invoke("remote_deploy_watchdog", { hostId, scriptContent }),
+  remoteDeployWatchdog: (hostId: string): Promise<boolean> =>
+    invoke("remote_deploy_watchdog", { hostId }),
   remoteStartWatchdog: (hostId: string): Promise<boolean> =>
     invoke("remote_start_watchdog", { hostId }),
   remoteStopWatchdog: (hostId: string): Promise<boolean> =>
@@ -260,4 +264,8 @@ export const api = {
     invoke("read_app_log", { lines }),
   readErrorLog: (lines?: number): Promise<string> =>
     invoke("read_error_log", { lines }),
+  remoteReadAppLog: (hostId: string, lines?: number): Promise<string> =>
+    invoke("remote_read_app_log", { hostId, lines }),
+  remoteReadErrorLog: (hostId: string, lines?: number): Promise<string> =>
+    invoke("remote_read_error_log", { hostId, lines }),
 };

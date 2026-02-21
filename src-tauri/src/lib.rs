@@ -23,9 +23,9 @@ use crate::commands::{
     remote_read_raw_config, remote_get_system_status,
     remote_list_agents_overview, remote_list_channels_minimal, remote_list_bindings,
     remote_restart_gateway, remote_apply_config_patch,
-    remote_create_agent, remote_delete_agent,
+    remote_create_agent, remote_delete_agent, remote_setup_agent_identity,
     remote_assign_channel_agent, remote_set_global_model, remote_set_agent_model,
-    remote_run_doctor, remote_list_history, remote_preview_rollback, remote_rollback,
+    remote_run_doctor, remote_fix_issues, remote_list_history, remote_preview_rollback, remote_rollback,
     remote_list_discord_guild_channels, remote_write_raw_config,
     remote_analyze_sessions, remote_delete_sessions_by_ids,
     remote_list_session_files, remote_clear_all_sessions, remote_preview_session,
@@ -39,7 +39,7 @@ use crate::commands::{
     remote_list_cron_jobs, remote_get_cron_runs, remote_trigger_cron_job, remote_delete_cron_job,
     get_watchdog_status, deploy_watchdog, start_watchdog, stop_watchdog, uninstall_watchdog,
     remote_get_watchdog_status, remote_deploy_watchdog, remote_start_watchdog, remote_stop_watchdog, remote_uninstall_watchdog,
-    read_app_log, read_error_log,
+    read_app_log, read_error_log, remote_read_app_log, remote_read_error_log,
     RemoteConfigBaselines,
 };
 use crate::ssh::SshConnectionPool;
@@ -133,10 +133,12 @@ pub fn run() {
             remote_apply_config_patch,
             remote_create_agent,
             remote_delete_agent,
+            remote_setup_agent_identity,
             remote_assign_channel_agent,
             remote_set_global_model,
             remote_set_agent_model,
             remote_run_doctor,
+            remote_fix_issues,
             remote_list_history,
             remote_preview_rollback,
             remote_rollback,
@@ -185,6 +187,8 @@ pub fn run() {
             remote_uninstall_watchdog,
             read_app_log,
             read_error_log,
+            remote_read_app_log,
+            remote_read_error_log,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run app");

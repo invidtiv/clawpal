@@ -72,13 +72,14 @@ export function CreateAgentDialog({
       const created = isRemote && instanceId
         ? await api.remoteCreateAgent(instanceId, id, model || undefined)
         : await api.createAgent(id, model || undefined, independent || undefined);
-      // Set identity if name or emoji provided (local only — remote doesn't support identity setup)
-      if (!isRemote) {
-        const name = displayName.trim();
-        const emojiVal = emoji.trim();
-        if (independent && (name || emojiVal)) {
-          await api.setupAgentIdentity(id, name || id, emojiVal || undefined).catch(() => {});
-        }
+      // Set identity if name or emoji provided
+      const name = displayName.trim();
+      const emojiVal = emoji.trim();
+      if (independent && (name || emojiVal)) {
+        const identityFn = isRemote && instanceId
+          ? api.remoteSetupAgentIdentity(instanceId, id, name || id, emojiVal || undefined)
+          : api.setupAgentIdentity(id, name || id, emojiVal || undefined);
+        await identityFn.catch(() => {});
       }
       onOpenChange(false);
       const result: CreateAgentResult = { agentId: created.id };

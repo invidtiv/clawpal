@@ -156,7 +156,7 @@ export function Cron() {
   const doDeploy = async (andStart = false) => {
     setWdAction("deploying");
     try {
-      if (isRemote) await api.remoteDeployWatchdog(instanceId, ""); else await api.deployWatchdog();
+      if (isRemote) await api.remoteDeployWatchdog(instanceId); else await api.deployWatchdog();
       if (andStart) {
         setWdAction("starting");
         if (isRemote) await api.remoteStartWatchdog(instanceId); else await api.startWatchdog();
