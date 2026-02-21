@@ -327,8 +327,34 @@ pub fn preview_queued_commands(
     }
 
     // Always read result config from sandbox (commands may have partially succeeded)
-    let config_after = crate::config_io::read_text(&preview_config)
+    let config_after_raw = crate::config_io::read_text(&preview_config)
         .unwrap_or_else(|_| config_before.clone());
+
+    // Normalize both configs to sorted-key pretty JSON so the diff only
+    // shows semantic changes, not key reordering by the CLI.
+    fn sort_value(v: &Value) -> Value {
+        match v {
+            Value::Object(map) => {
+                let sorted: serde_json::Map<String, Value> = map.iter()
+                    .collect::<std::collections::BTreeMap<_, _>>()
+                    .into_iter()
+                    .map(|(k, v)| (k.clone(), sort_value(v)))
+                    .collect();
+                Value::Object(sorted)
+            }
+            Value::Array(arr) => Value::Array(arr.iter().map(sort_value).collect()),
+            other => other.clone(),
+        }
+    }
+    let normalize_json = |s: &str| -> String {
+        match serde_json::from_str::<Value>(s) {
+            Ok(v) => serde_json::to_string_pretty(&sort_value(&v))
+                .unwrap_or_else(|_| s.to_string()),
+            Err(_) => s.to_string(),
+        }
+    };
+    let config_before = normalize_json(&config_before);
+    let config_after = normalize_json(&config_after_raw);
 
     // Cleanup sandbox
     let _ = std::fs::remove_dir_all(paths.clawpal_dir.join("preview"));
