@@ -266,27 +266,28 @@ mod inner {
         pub async fn sftp_list(&self, id: &str, path: &str) -> Result<Vec<SftpEntry>, String> {
             let resolved = self.resolve_path(id, path).await?;
             let quoted = shell_quote(&resolved);
+            // Use ls -lA for cross-platform compat (GNU stat vs BSD stat differ).
             let cmd = format!(
-                "stat --format='%n\t%F\t%s' {}/* 2>/dev/null || true",
+                "ls -lA {} 2>/dev/null || true",
                 quoted
             );
             let result = self.exec(id, &cmd).await?;
 
             let mut entries = Vec::new();
             for line in result.stdout.lines() {
-                let parts: Vec<&str> = line.split('\t').collect();
-                if parts.len() < 3 {
+                // Skip "total NNN" header and empty lines
+                if line.starts_with("total ") || line.trim().is_empty() {
                     continue;
                 }
-                let full_path = parts[0];
-                let file_type = parts[1];
-                let size: u64 = parts[2].parse().unwrap_or(0);
-
-                let name = full_path
-                    .rsplit('/')
-                    .next()
-                    .unwrap_or(full_path)
-                    .to_string();
+                // ls -l: perms links owner group size month day time name...
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if parts.len() < 9 {
+                    continue;
+                }
+                let perms = parts[0];
+                let size: u64 = parts[4].parse().unwrap_or(0);
+                // Name may contain spaces — rejoin from field 8 onward
+                let name = parts[8..].join(" ");
 
                 if name == "." || name == ".." || name.is_empty() {
                     continue;
@@ -294,7 +295,7 @@ mod inner {
 
                 entries.push(SftpEntry {
                     name,
-                    is_dir: file_type == "directory",
+                    is_dir: perms.starts_with('d'),
                     size,
                 });
             }
@@ -556,27 +557,28 @@ mod inner {
         pub async fn sftp_list(&self, id: &str, path: &str) -> Result<Vec<SftpEntry>, String> {
             let resolved = self.resolve_path(id, path).await?;
             let quoted = shell_quote(&resolved);
+            // Use ls -lA for cross-platform compat (GNU stat vs BSD stat differ).
             let cmd = format!(
-                "stat --format='%n\t%F\t%s' {}/* 2>/dev/null || true",
+                "ls -lA {} 2>/dev/null || true",
                 quoted
             );
             let result = self.exec(id, &cmd).await?;
 
             let mut entries = Vec::new();
             for line in result.stdout.lines() {
-                let parts: Vec<&str> = line.split('\t').collect();
-                if parts.len() < 3 {
+                // Skip "total NNN" header and empty lines
+                if line.starts_with("total ") || line.trim().is_empty() {
                     continue;
                 }
-                let full_path = parts[0];
-                let file_type = parts[1];
-                let size: u64 = parts[2].parse().unwrap_or(0);
-
-                let name = full_path
-                    .rsplit('/')
-                    .next()
-                    .unwrap_or(full_path)
-                    .to_string();
+                // ls -l: perms links owner group size month day time name...
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if parts.len() < 9 {
+                    continue;
+                }
+                let perms = parts[0];
+                let size: u64 = parts[4].parse().unwrap_or(0);
+                // Name may contain spaces — rejoin from field 8 onward
+                let name = parts[8..].join(" ");
 
                 if name == "." || name == ".." || name.is_empty() {
                     continue;
@@ -584,7 +586,7 @@ mod inner {
 
                 entries.push(SftpEntry {
                     name,
-                    is_dir: file_type == "directory",
+                    is_dir: perms.starts_with('d'),
                     size,
                 });
             }
