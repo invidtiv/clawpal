@@ -46,6 +46,9 @@ use crate::cli_runner::{
     queue_command, remove_queued_command, list_queued_commands,
     discard_queued_commands, queued_commands_count,
     preview_queued_commands, apply_queued_commands, CommandQueue,
+    remote_queue_command, remote_remove_queued_command, remote_list_queued_commands,
+    remote_discard_queued_commands, remote_queued_commands_count,
+    remote_preview_queued_commands, remote_apply_queued_commands, RemoteCommandQueues,
 };
 use crate::ssh::SshConnectionPool;
 
@@ -66,6 +69,7 @@ pub fn run() {
         .manage(SshConnectionPool::new())
         .manage(RemoteConfigBaselines::new())
         .manage(CommandQueue::new())
+        .manage(RemoteCommandQueues::new())
         .invoke_handler(tauri::generate_handler![
             get_system_status,
             get_status_light,
@@ -196,6 +200,13 @@ pub fn run() {
             queued_commands_count,
             preview_queued_commands,
             apply_queued_commands,
+            remote_queue_command,
+            remote_remove_queued_command,
+            remote_list_queued_commands,
+            remote_discard_queued_commands,
+            remote_queued_commands_count,
+            remote_preview_queued_commands,
+            remote_apply_queued_commands,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run app");

@@ -409,3 +409,292 @@ pub fn apply_queued_commands(
         rolled_back: false,
     })
 }
+
+// ---------------------------------------------------------------------------
+// RemoteCommandQueues — Task 6: per-host command queues
+// ---------------------------------------------------------------------------
+
+pub struct RemoteCommandQueues {
+    queues: Mutex<HashMap<String, Vec<PendingCommand>>>,
+}
+
+impl RemoteCommandQueues {
+    pub fn new() -> Self {
+        Self {
+            queues: Mutex::new(HashMap::new()),
+        }
+    }
+
+    pub fn enqueue(&self, host_id: &str, label: String, command: Vec<String>) -> PendingCommand {
+        let cmd = PendingCommand {
+            id: Uuid::new_v4().to_string(),
+            label,
+            command,
+            created_at: chrono::Utc::now().to_rfc3339(),
+        };
+        self.queues
+            .lock()
+            .unwrap()
+            .entry(host_id.to_string())
+            .or_default()
+            .push(cmd.clone());
+        cmd
+    }
+
+    pub fn remove(&self, host_id: &str, id: &str) -> bool {
+        let mut queues = self.queues.lock().unwrap();
+        if let Some(cmds) = queues.get_mut(host_id) {
+            let before = cmds.len();
+            cmds.retain(|c| c.id != id);
+            return cmds.len() < before;
+        }
+        false
+    }
+
+    pub fn list(&self, host_id: &str) -> Vec<PendingCommand> {
+        self.queues
+            .lock()
+            .unwrap()
+            .get(host_id)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    pub fn clear(&self, host_id: &str) {
+        self.queues.lock().unwrap().remove(host_id);
+    }
+
+    pub fn len(&self, host_id: &str) -> usize {
+        self.queues
+            .lock()
+            .unwrap()
+            .get(host_id)
+            .map(|v| v.len())
+            .unwrap_or(0)
+    }
+}
+
+impl Default for RemoteCommandQueues {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Remote queue management Tauri commands
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+pub fn remote_queue_command(
+    queues: tauri::State<RemoteCommandQueues>,
+    host_id: String,
+    label: String,
+    command: Vec<String>,
+) -> Result<PendingCommand, String> {
+    if command.is_empty() {
+        return Err("command cannot be empty".into());
+    }
+    Ok(queues.enqueue(&host_id, label, command))
+}
+
+#[tauri::command]
+pub fn remote_remove_queued_command(
+    queues: tauri::State<RemoteCommandQueues>,
+    host_id: String,
+    id: String,
+) -> Result<bool, String> {
+    Ok(queues.remove(&host_id, &id))
+}
+
+#[tauri::command]
+pub fn remote_list_queued_commands(
+    queues: tauri::State<RemoteCommandQueues>,
+    host_id: String,
+) -> Result<Vec<PendingCommand>, String> {
+    Ok(queues.list(&host_id))
+}
+
+#[tauri::command]
+pub fn remote_discard_queued_commands(
+    queues: tauri::State<RemoteCommandQueues>,
+    host_id: String,
+) -> Result<bool, String> {
+    queues.clear(&host_id);
+    Ok(true)
+}
+
+#[tauri::command]
+pub fn remote_queued_commands_count(
+    queues: tauri::State<RemoteCommandQueues>,
+    host_id: String,
+) -> Result<usize, String> {
+    Ok(queues.len(&host_id))
+}
+
+// ---------------------------------------------------------------------------
+// Remote preview — sandbox execution via SSH
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+pub async fn remote_preview_queued_commands(
+    pool: tauri::State<'_, SshConnectionPool>,
+    queues: tauri::State<'_, RemoteCommandQueues>,
+    host_id: String,
+) -> Result<PreviewQueueResult, String> {
+    let commands = queues.list(&host_id);
+    if commands.is_empty() {
+        return Err("No pending commands to preview".into());
+    }
+
+    // Read current config via SSH
+    let config_before = pool.sftp_read(&host_id, "~/.openclaw/openclaw.json").await?;
+
+    // Set up sandbox on remote
+    pool.exec(&host_id, "mkdir -p ~/.clawpal/preview/.openclaw")
+        .await?;
+    pool.exec(
+        &host_id,
+        "cp ~/.openclaw/openclaw.json ~/.clawpal/preview/.openclaw/openclaw.json",
+    )
+    .await?;
+
+    // Execute each command in sandbox with OPENCLAW_HOME override
+    let mut errors = Vec::new();
+    for cmd in &commands {
+        let args: Vec<&str> = cmd.command.iter().skip(1).map(|s| s.as_str()).collect();
+        let mut env = HashMap::new();
+        env.insert(
+            "OPENCLAW_HOME".to_string(),
+            "~/.clawpal/preview/.openclaw".to_string(),
+        );
+
+        match run_openclaw_remote_with_env(&pool, &host_id, &args, Some(&env)).await {
+            Ok(output) if output.exit_code != 0 => {
+                let detail = if !output.stderr.is_empty() {
+                    output.stderr.clone()
+                } else {
+                    output.stdout.clone()
+                };
+                errors.push(format!("{}: {}", cmd.label, detail));
+                break;
+            }
+            Err(e) => {
+                errors.push(format!("{}: {}", cmd.label, e));
+                break;
+            }
+            _ => {}
+        }
+    }
+
+    let config_after = if errors.is_empty() {
+        pool.sftp_read(&host_id, "~/.clawpal/preview/.openclaw/openclaw.json")
+            .await?
+    } else {
+        config_before.clone()
+    };
+
+    let _ = pool.exec(&host_id, "rm -rf ~/.clawpal/preview").await;
+
+    Ok(PreviewQueueResult {
+        commands,
+        config_before,
+        config_after,
+        errors,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Remote apply — execute queue for real via SSH, rollback on failure
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+pub async fn remote_apply_queued_commands(
+    pool: tauri::State<'_, SshConnectionPool>,
+    queues: tauri::State<'_, RemoteCommandQueues>,
+    host_id: String,
+) -> Result<ApplyQueueResult, String> {
+    let commands = queues.list(&host_id);
+    if commands.is_empty() {
+        return Err("No pending commands to apply".into());
+    }
+    let total_count = commands.len();
+
+    // Save snapshot on remote
+    let config_before = pool
+        .sftp_read(&host_id, "~/.openclaw/openclaw.json")
+        .await?;
+    let ts = chrono::Utc::now().format("%Y%m%dT%H%M%S").to_string();
+    let snapshot_path = format!("~/.clawpal/snapshots/{ts}-queue-apply.json");
+    let _ = pool
+        .exec(&host_id, "mkdir -p ~/.clawpal/snapshots")
+        .await;
+    let _ = pool
+        .sftp_write(&host_id, &snapshot_path, &config_before)
+        .await;
+
+    // Execute each command
+    let mut applied_count = 0;
+    for cmd in &commands {
+        let args: Vec<&str> = cmd.command.iter().skip(1).map(|s| s.as_str()).collect();
+        match run_openclaw_remote(&pool, &host_id, &args).await {
+            Ok(output) if output.exit_code != 0 => {
+                let detail = if !output.stderr.is_empty() {
+                    output.stderr.clone()
+                } else {
+                    output.stdout.clone()
+                };
+                // Rollback
+                let _ = pool
+                    .sftp_write(&host_id, "~/.openclaw/openclaw.json", &config_before)
+                    .await;
+                queues.clear(&host_id);
+                return Ok(ApplyQueueResult {
+                    ok: false,
+                    applied_count,
+                    total_count,
+                    error: Some(format!(
+                        "Step {} failed ({}): {}",
+                        applied_count + 1,
+                        cmd.label,
+                        detail
+                    )),
+                    rolled_back: true,
+                });
+            }
+            Err(e) => {
+                let _ = pool
+                    .sftp_write(&host_id, "~/.openclaw/openclaw.json", &config_before)
+                    .await;
+                queues.clear(&host_id);
+                return Ok(ApplyQueueResult {
+                    ok: false,
+                    applied_count,
+                    total_count,
+                    error: Some(format!(
+                        "Step {} failed ({}): {}",
+                        applied_count + 1,
+                        cmd.label,
+                        e
+                    )),
+                    rolled_back: true,
+                });
+            }
+            Ok(_) => {
+                applied_count += 1;
+            }
+        }
+    }
+
+    queues.clear(&host_id);
+    let _ = pool
+        .exec_login(&host_id, "openclaw gateway restart")
+        .await;
+
+    Ok(ApplyQueueResult {
+        ok: true,
+        applied_count,
+        total_count,
+        error: None,
+        rolled_back: false,
+    })
+}
