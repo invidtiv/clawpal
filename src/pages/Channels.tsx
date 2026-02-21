@@ -1,8 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { AgentOverview, Binding, ChannelNode, DiscordGuildChannel, ModelProfile } from "../lib/types";
-import { api } from "../lib/api";
-import { useInstance } from "@/lib/instance-context";
+import { useApi } from "@/lib/use-api";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -59,7 +58,7 @@ export function Channels({
   showToast?: (message: string, type?: "success" | "error") => void;
 }) {
   const { t } = useTranslation();
-  const { instanceId, isRemote, isConnected } = useInstance();
+  const ua = useApi();
   const [agents, setAgents] = useState<AgentOverview[]>([]);
   const [bindings, setBindings] = useState<Binding[]>([]);
   const [modelProfiles, setModelProfiles] = useState<ModelProfile[]>([]);
@@ -77,57 +76,32 @@ export function Channels({
   } | null>(null);
 
   const refreshAgents = useCallback(() => {
-    if (isRemote) {
-      if (!isConnected) return;
-      api.remoteListAgentsOverview(instanceId).then(setAgents).catch((e) => console.error("Failed to load remote agents:", e));
-    } else {
-      api.listAgentsOverview().then(setAgents).catch((e) => console.error("Failed to load agents:", e));
-    }
-  }, [isRemote, isConnected, instanceId]);
+    ua.listAgents().then(setAgents).catch((e) => console.error("Failed to load agents:", e));
+  }, [ua]);
 
   const refreshBindings = useCallback(() => {
-    if (isRemote) {
-      if (!isConnected) return;
-      api.remoteListBindings(instanceId).then((b) => setBindings(b)).catch((e) => console.error("Failed to load remote bindings:", e));
-    } else {
-      api.listBindings().then((b) => setBindings(b)).catch((e) => console.error("Failed to load bindings:", e));
-    }
-  }, [isRemote, isConnected, instanceId]);
+    ua.listBindings().then((b) => setBindings(b)).catch((e) => console.error("Failed to load bindings:", e));
+  }, [ua]);
 
   const refreshChannelNodes = useCallback(() => {
-    if (isRemote) {
-      if (!isConnected) return;
-      api.remoteListChannelsMinimal(instanceId).then(setChannelNodes).catch((e) => console.error("Failed to load remote channels:", e));
-    } else {
-      api.listChannelsMinimal().then(setChannelNodes).catch((e) => console.error("Failed to load channel nodes:", e));
-    }
-  }, [isRemote, isConnected, instanceId]);
+    ua.listChannels().then(setChannelNodes).catch((e) => console.error("Failed to load channel nodes:", e));
+  }, [ua]);
 
   const refreshDiscordCache = useCallback(() => {
-    if (isRemote) {
-      if (!isConnected) return;
-      api.remoteListDiscordGuildChannels(instanceId).then(setDiscordChannels).catch((e) => console.error("Failed to load remote Discord channels:", e));
-    } else {
-      api.listDiscordGuildChannels().then(setDiscordChannels).catch((e) => console.error("Failed to load Discord channels:", e));
-    }
-  }, [isRemote, isConnected, instanceId]);
+    ua.listDiscordGuildChannels().then(setDiscordChannels).catch((e) => console.error("Failed to load Discord channels:", e));
+  }, [ua]);
 
   useEffect(() => {
     refreshAgents();
     refreshBindings();
-    if (!isRemote) {
-      api.listModelProfiles().then((p) => setModelProfiles(p.filter((m) => m.enabled))).catch((e) => console.error("Failed to load model profiles:", e));
-    } else if (isRemote && isConnected) {
-      api.remoteListModelProfiles(instanceId).then((p) => setModelProfiles(p.filter((m) => m.enabled))).catch((e) => console.error("Failed to load remote model profiles:", e));
-    }
+    ua.listModelProfiles().then((p) => setModelProfiles(p.filter((m) => m.enabled))).catch((e) => console.error("Failed to load model profiles:", e));
     refreshChannelNodes();
     refreshDiscordCache();
-  }, [isRemote, refreshAgents, refreshBindings, refreshChannelNodes, refreshDiscordCache]);
+  }, [ua, refreshAgents, refreshBindings, refreshChannelNodes, refreshDiscordCache]);
 
   const handleRefreshDiscord = () => {
-    if (isRemote) return; // Refresh is local-only
     setRefreshing("discord");
-    api.refreshDiscordGuildChannels()
+    ua.refreshDiscordGuildChannels()
       .then((channels) => {
         setDiscordChannels(channels);
         showToast?.(t('channels.discordRefreshed'), "success");
@@ -137,9 +111,8 @@ export function Channels({
   };
 
   const handleRefreshPlatform = (platform: string) => {
-    if (isRemote) return; // Refresh is local-only
     setRefreshing(platform);
-    api.listChannelsMinimal()
+    ua.listChannels()
       .then((nodes) => {
         setChannelNodes(nodes);
         showToast?.(t('channels.platformRefreshed', { platform: PLATFORM_LABELS[platform] || platform }), "success");
@@ -195,11 +168,7 @@ export function Channels({
     const key = `${platform}:${peerId}`;
     setSaving(key);
     try {
-      if (isRemote) {
-        await api.remoteAssignChannelAgent(instanceId, platform, peerId, agentId === "__default__" ? null : agentId);
-      } else {
-        await api.assignChannelAgent(platform, peerId, agentId === "__default__" ? null : agentId);
-      }
+      await ua.assignChannelAgent(platform, peerId, agentId === "__default__" ? null : agentId);
       refreshBindings();
     } catch (e) {
       showToast?.(String(e), "error");
@@ -276,12 +245,11 @@ export function Channels({
       )}
 
       <div className="space-y-6">
-        {/* Discord section — only show for local or when Discord data exists */}
+        {/* Discord section */}
         <Card>
           <CardContent>
             <div className="flex items-center gap-2 mb-3">
               <strong className="text-lg">Discord</strong>
-              {!isRemote && (
               <Button
                 variant="outline"
                 size="sm"
@@ -291,7 +259,6 @@ export function Channels({
               >
                 {refreshing === "discord" ? t('channels.refreshing') : t('channels.refresh')}
               </Button>
-              )}
             </div>
 
             {discordChannels === null ? (
@@ -330,7 +297,6 @@ export function Channels({
             <CardContent>
               <div className="flex items-center gap-2 mb-3">
                 <strong className="text-lg">{PLATFORM_LABELS[platform] || platform}</strong>
-                {!isRemote && (
                 <Button
                   variant="outline"
                   size="sm"
@@ -340,7 +306,6 @@ export function Channels({
                 >
                   {refreshing === platform ? t('channels.refreshing') : t('channels.refresh')}
                 </Button>
-                )}
               </div>
               <div className="grid grid-cols-[repeat(auto-fit,minmax(260px,1fr))] gap-2">
                 {nodes.map((node) => {
@@ -383,10 +348,7 @@ export function Channels({
                 const patch = JSON.stringify({
                   channels: { discord: { guilds: { [ch.guildId]: { channels: { [ch.channelId]: { systemPrompt: result.persona } } } } } },
                 });
-                const patchPromise = isRemote
-                  ? api.remoteApplyConfigPatch(instanceId, patch, {})
-                  : api.applyConfigPatch(patch, {});
-                patchPromise.catch((e) => showToast?.(String(e), "error"));
+                ua.applyConfigPatch(patch, {}).catch((e) => showToast?.(String(e), "error"));
               }
             }
             setPendingChannel(null);
