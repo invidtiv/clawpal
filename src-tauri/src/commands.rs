@@ -4984,37 +4984,73 @@ pub async fn remote_list_discord_guild_channels(
         .and_then(|d| d.get("guilds"))
         .and_then(Value::as_object);
 
-    let Some(guilds) = guilds else {
-        return Ok(Vec::new());
-    };
-
     let mut entries: Vec<DiscordGuildChannel> = Vec::new();
     let mut channel_ids: Vec<String> = Vec::new();
     let mut unresolved_guild_ids: Vec<String> = Vec::new();
 
-    for (guild_id, guild_val) in guilds {
-        let guild_name = guild_val
-            .get("slug")
-            .or_else(|| guild_val.get("name"))
-            .and_then(Value::as_str)
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| guild_id.clone());
+    // Collect from channels.discord.guilds (structured config)
+    if let Some(guilds) = guilds {
+        for (guild_id, guild_val) in guilds {
+            let guild_name = guild_val
+                .get("slug")
+                .or_else(|| guild_val.get("name"))
+                .and_then(Value::as_str)
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| guild_id.clone());
 
-        if guild_name == *guild_id {
-            unresolved_guild_ids.push(guild_id.clone());
-        }
-
-        if let Some(channels) = guild_val.get("channels").and_then(Value::as_object) {
-            for (channel_id, _) in channels {
-                channel_ids.push(channel_id.clone());
-                entries.push(DiscordGuildChannel {
-                    guild_id: guild_id.clone(),
-                    guild_name: guild_name.clone(),
-                    channel_id: channel_id.clone(),
-                    channel_name: channel_id.clone(),
-                });
+            if guild_name == *guild_id {
+                unresolved_guild_ids.push(guild_id.clone());
             }
+
+            if let Some(channels) = guild_val.get("channels").and_then(Value::as_object) {
+                for (channel_id, _) in channels {
+                    channel_ids.push(channel_id.clone());
+                    entries.push(DiscordGuildChannel {
+                        guild_id: guild_id.clone(),
+                        guild_name: guild_name.clone(),
+                        channel_id: channel_id.clone(),
+                        channel_name: channel_id.clone(),
+                    });
+                }
+            }
+        }
+    }
+
+    // Also collect from bindings array (users may only have bindings, no guilds map)
+    if let Some(bindings) = cfg.get("bindings").and_then(Value::as_array) {
+        for b in bindings {
+            let m = match b.get("match") {
+                Some(m) => m,
+                None => continue,
+            };
+            if m.get("channel").and_then(Value::as_str) != Some("discord") {
+                continue;
+            }
+            let guild_id = match m.get("guildId") {
+                Some(Value::String(s)) => s.clone(),
+                Some(Value::Number(n)) => n.to_string(),
+                _ => continue,
+            };
+            let channel_id = match m.pointer("/peer/id") {
+                Some(Value::String(s)) => s.clone(),
+                Some(Value::Number(n)) => n.to_string(),
+                _ => continue,
+            };
+            // Skip if already collected from guilds map
+            if entries.iter().any(|e| e.guild_id == guild_id && e.channel_id == channel_id) {
+                continue;
+            }
+            if !unresolved_guild_ids.contains(&guild_id) {
+                unresolved_guild_ids.push(guild_id.clone());
+            }
+            channel_ids.push(channel_id.clone());
+            entries.push(DiscordGuildChannel {
+                guild_id: guild_id.clone(),
+                guild_name: guild_id.clone(),
+                channel_id: channel_id.clone(),
+                channel_name: channel_id.clone(),
+            });
         }
     }
 
@@ -5054,6 +5090,12 @@ pub async fn remote_list_discord_guild_channels(
                 }
             }
         }
+    }
+
+    // Persist to remote cache
+    if !entries.is_empty() {
+        let json = serde_json::to_string_pretty(&entries).map_err(|e| e.to_string())?;
+        let _ = pool.sftp_write(&host_id, "~/.clawpal/discord-guild-channels.json", &json).await;
     }
 
     Ok(entries)
