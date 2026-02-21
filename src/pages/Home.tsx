@@ -220,7 +220,10 @@ export function Home({
     ua.queueCommand(
       `Delete agent: ${agentId}`,
       ["openclaw", "agents", "delete", agentId, "--force"],
-    ).catch((e) => showToast?.(String(e), "error"));
+    ).then(() => {
+      // Optimistic UI update
+      setAgents((prev) => prev?.filter((a) => a.id !== agentId) ?? null);
+    }).catch((e) => showToast?.(String(e), "error"));
   };
 
   return (
@@ -291,7 +294,10 @@ export function Home({
                           "Clear global model override",
                           ["openclaw", "config", "unset", "agents.defaults.model.primary"],
                         );
-                    p.catch((e) => showToast?.(String(e), "error"))
+                    p.then(() => {
+                      // Optimistic UI update
+                      setStatus((prev) => prev ? { ...prev, globalDefaultModel: modelValue ?? "" } : prev);
+                    }).catch((e) => showToast?.(String(e), "error"))
                       .finally(() => setSavingModel(false));
                   }}
                   disabled={savingModel}
@@ -365,18 +371,30 @@ export function Home({
                               }
                               return "__none__";
                             })()}
-                            onValueChange={(val) => {
+                            onValueChange={async (val) => {
                               const modelValue = resolveModelValue(val === "__none__" ? null : val);
-                              const p = modelValue
-                                ? ua.queueCommand(
-                                    `Set model for ${agent.id}: ${modelValue}`,
-                                    ["openclaw", "config", "set", `agents.list[id=${agent.id}].model`, modelValue],
-                                  )
-                                : ua.queueCommand(
-                                    `Clear model override for ${agent.id}`,
-                                    ["openclaw", "config", "unset", `agents.list[id=${agent.id}].model`],
-                                  );
-                              p.catch((e) => showToast?.(String(e), "error"));
+                              try {
+                                const raw = await ua.readRawConfig();
+                                const cfg = JSON.parse(raw);
+                                const list: Record<string, unknown>[] = cfg?.agents?.list ?? [];
+                                const entry = list.find((a) => a.id === agent.id);
+                                if (entry) {
+                                  if (modelValue) entry.model = modelValue;
+                                  else delete entry.model;
+                                } else if (modelValue) {
+                                  list.push({ id: agent.id, model: modelValue });
+                                }
+                                const label = modelValue
+                                  ? `Set model for ${agent.id}: ${modelValue}`
+                                  : `Clear model override for ${agent.id}`;
+                                await ua.queueCommand(label, ["openclaw", "config", "set", "agents.list", JSON.stringify(list), "--json"]);
+                                // Optimistic UI update
+                                setAgents((prev) => prev?.map((a) =>
+                                  a.id === agent.id ? { ...a, model: modelValue ?? null } : a
+                                ) ?? null);
+                              } catch (e) {
+                                showToast?.(String(e), "error");
+                              }
                             }}
                           >
                             <SelectTrigger size="sm" className="text-xs h-6 w-auto min-w-[120px] max-w-[200px]">
