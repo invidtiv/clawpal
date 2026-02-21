@@ -331,6 +331,18 @@ mod inner {
     use super::*;
     use tokio::process::Command;
 
+    /// Create an ssh Command with hidden console window on Windows.
+    fn ssh_command() -> Command {
+        let mut cmd = ssh_command();
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x08000000;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+        cmd
+    }
+
     struct SshConnection {
         config: SshHostConfig,
         home_dir: String,
@@ -397,7 +409,7 @@ mod inner {
             let mut args = conn.ssh_args();
             args.push("echo $HOME".into());
 
-            let output = Command::new("ssh")
+            let output = ssh_command()
                 .args(&args)
                 .output()
                 .await
@@ -434,7 +446,7 @@ mod inner {
                     None => return false,
                 }
             };
-            Command::new("ssh")
+            ssh_command()
                 .args(&args)
                 .output()
                 .await
@@ -470,7 +482,7 @@ mod inner {
                 a
             };
 
-            let output = Command::new("ssh")
+            let output = ssh_command()
                 .args(&args)
                 .output()
                 .await
