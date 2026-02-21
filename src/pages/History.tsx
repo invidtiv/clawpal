@@ -124,6 +124,7 @@ export function History() {
                             onClick={async () => {
                               try {
                                 await ua.rollback(item.id);
+                                await ua.restartGateway().catch(() => {});
                                 setMessage(t('history.rollbackCompleted'));
                                 await refreshHistory();
                               } catch (err) {
