@@ -1,7 +1,6 @@
-import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
+import { useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { api } from "@/lib/api";
-import { useInstance } from "@/lib/instance-context";
+import { useApi } from "@/lib/use-api";
 import { initialState, reducer } from "@/lib/state";
 import { formatBytes } from "@/lib/utils";
 import type { AgentSessionAnalysis, BackupInfo, SessionFile } from "@/lib/types";
@@ -35,7 +34,7 @@ import {
 
 export function Doctor() {
   const { t } = useTranslation();
-  const { instanceId, isRemote, isConnected } = useInstance();
+  const ua = useApi();
   const [state, dispatch] = useReducer(reducer, initialState);
   const [rawOutput, setRawOutput] = useState<string | null>(null);
   const [sessionFiles, setSessionFiles] = useState<SessionFile[]>([]);
@@ -60,11 +59,9 @@ export function Doctor() {
   const [logsLoading, setLogsLoading] = useState(false);
   const logsContentRef = useRef<HTMLPreElement>(null);
 
-  const fetchLog = useCallback((which: "app" | "error") => {
+  const fetchLog = (which: "app" | "error") => {
     setLogsLoading(true);
-    const fn = isRemote
-      ? (which === "app" ? (n?: number) => api.remoteReadAppLog(instanceId, n) : (n?: number) => api.remoteReadErrorLog(instanceId, n))
-      : (which === "app" ? api.readAppLog : api.readErrorLog);
+    const fn = which === "app" ? ua.readAppLog : ua.readErrorLog;
     fn(500)
       .then((text) => {
         setLogsContent(text);
@@ -76,11 +73,12 @@ export function Doctor() {
       })
       .catch(() => setLogsContent(""))
       .finally(() => setLogsLoading(false));
-  }, [isRemote, instanceId]);
+  };
 
   useEffect(() => {
     if (logsOpen) fetchLog(logsTab);
-  }, [logsOpen, logsTab, fetchLog]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [logsOpen, logsTab]);
 
   const hasReport = Boolean(state.doctor);
   const autoFixable = hasReport
@@ -110,42 +108,22 @@ export function Doctor() {
   );
 
   function runDoctorCmd(): Promise<import("@/lib/types").DoctorReport> {
-    if (isRemote) {
-      if (!isConnected) return Promise.reject("Not connected");
-      return api.remoteRunDoctor(instanceId).then((report) => {
-        // Remote doctor may return a rawOutput field instead of structured issues
-        const raw = (report as unknown as Record<string, unknown>).rawOutput;
-        if (raw && typeof raw === "string") {
-          setRawOutput(raw);
-        } else {
-          setRawOutput(null);
-        }
-        return report;
-      });
-    }
-    setRawOutput(null);
-    return api.runDoctor();
+    return ua.runDoctor().then((report) => {
+      const raw = (report as any).rawOutput;
+      if (raw && typeof raw === "string") setRawOutput(raw);
+      else setRawOutput(null);
+      return report;
+    });
   }
 
   function fixIssuesCmd(ids: string[]) {
-    if (isRemote) {
-      if (!isConnected) return Promise.reject("Not connected");
-      return api.remoteFixIssues(instanceId, ids);
-    }
-    return api.fixIssues(ids);
+    return ua.fixIssues(ids);
   }
 
   function refreshData() {
-    if (isRemote) {
-      if (!isConnected) return;
-      api.remoteListSessionFiles(instanceId)
-        .then(setSessionFiles)
-        .catch(() => setDataMessage(t('doctor.failedLoadRemoteSessions')));
-    } else {
-      api.listSessionFiles()
-        .then(setSessionFiles)
-        .catch(() => setDataMessage(t('doctor.failedLoadSessions')));
-    }
+    ua.listSessionFiles()
+      .then(setSessionFiles)
+      .catch(() => setDataMessage(t('doctor.failedLoadSessions')));
   }
 
   function removeSessionsFromAnalysis(agent: string, deletedIds: Set<string>) {
@@ -170,7 +148,7 @@ export function Doctor() {
   }
 
   useEffect(() => {
-    if (!isRemote) {
+    if (!ua.isRemote) {
       runDoctorCmd()
         .then((report) => dispatch({ type: "setDoctor", doctor: report }))
         .catch(() =>
@@ -179,20 +157,21 @@ export function Doctor() {
     }
     refreshData();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [instanceId, isRemote, isConnected]);
+  }, [ua.instanceId, ua.isRemote, ua.isConnected]);
 
   useEffect(() => {
-    if (isRemote) { setBackups([]); return; }
-    api.listBackups().then(setBackups).catch((e) => console.error("Failed to load backups:", e));
-  }, [instanceId, isRemote]);
+    if (ua.isRemote) { setBackups([]); return; }
+    ua.listBackups().then(setBackups).catch((e: unknown) => console.error("Failed to load backups:", e));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ua.instanceId, ua.isRemote]);
 
   return (
     <section>
       <h2 className="text-2xl font-bold mb-4">{t('doctor.title')}</h2>
 
-      <div className={`grid ${isRemote ? '' : 'grid-cols-2'} gap-3 mb-6`}>
+      <div className={`grid ${ua.isRemote ? '' : 'grid-cols-2'} gap-3 mb-6`}>
         {/* Health Card — local only */}
-        {!isRemote && (
+        {!ua.isRemote && (
           <Card>
             <CardHeader>
               <CardTitle>{t("doctor.health")}</CardTitle>
@@ -380,10 +359,7 @@ export function Doctor() {
                   disabled={analyzing}
                   onClick={() => {
                     setAnalyzing(true);
-                    const analyzePromise = isRemote
-                      ? api.remoteAnalyzeSessions(instanceId)
-                      : api.analyzeSessions();
-                    analyzePromise
+                    ua.analyzeSessions()
                       .then((data) => {
                         setSessionAnalysis(data);
                         setExpandedAgents(new Set());
@@ -413,10 +389,7 @@ export function Doctor() {
                       <AlertDialogAction
                         className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
                         onClick={() => {
-                          const clearPromise = isRemote
-                            ? api.remoteClearAllSessions(instanceId)
-                            : api.clearAllSessions();
-                          clearPromise
+                          ua.clearAllSessions()
                             .then((count) => {
                               setDataMessage(t('doctor.clearedSessions', { count }));
                               setSessionAnalysis(null);
@@ -457,12 +430,8 @@ export function Doctor() {
                   const isExpanded = expandedAgents.has(agentData.agent);
                   const agentSelected = selectedSessions.get(agentData.agent) || new Set<string>();
 
-                  const deleteSessionsFn = (ids: string[]) => {
-                    const deletePromise = isRemote
-                      ? api.remoteDeleteSessionsByIds(instanceId, agentData.agent, ids)
-                      : api.deleteSessionsByIds(agentData.agent, ids);
-                    return deletePromise;
-                  };
+                  const deleteSessionsFn = (ids: string[]) =>
+                    ua.deleteSessionsByIds(agentData.agent, ids);
 
                   return (
                     <div key={agentData.agent} className="border rounded-md p-3">
@@ -710,10 +679,7 @@ export function Doctor() {
                                     setPreviewMessages([]);
                                     setPreviewLoading(true);
                                     setPreviewOpen(true);
-                                    const previewPromise = isRemote
-                                      ? api.remotePreviewSession(instanceId, agentData.agent, session.sessionId)
-                                      : api.previewSession(agentData.agent, session.sessionId);
-                                    previewPromise
+                                    ua.previewSession(agentData.agent, session.sessionId)
                                       .then(setPreviewMessages)
                                       .catch(() => setPreviewMessages([{ role: "error", content: t('doctor.failedLoadSession') }]))
                                       .finally(() => setPreviewLoading(false));
@@ -745,7 +711,7 @@ export function Doctor() {
       </div>
 
       {/* Backups — local only */}
-      {!isRemote && (
+      {!ua.isRemote && (
       <>
       <h3 className="text-lg font-semibold mt-6 mb-3">{t('doctor.backups')}</h3>
       {backups.length === 0 ? (
@@ -765,7 +731,7 @@ export function Doctor() {
                   <Button
                     size="sm"
                     variant="outline"
-                    onClick={() => api.openUrl(backup.path)}
+                    onClick={() => ua.openUrl(backup.path)}
                   >
                     {t('doctor.show')}
                   </Button>
@@ -786,7 +752,7 @@ export function Doctor() {
                         <AlertDialogCancel>{t('config.cancel')}</AlertDialogCancel>
                         <AlertDialogAction
                           onClick={() => {
-                            api.restoreFromBackup(backup.name)
+                            ua.restoreFromBackup(backup.name)
                               .then((msg) => setDataMessage(msg))
                               .catch(() => setDataMessage(t('doctor.restoreFailed')));
                           }}
@@ -814,10 +780,10 @@ export function Doctor() {
                         <AlertDialogAction
                           className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
                           onClick={() => {
-                            api.deleteBackup(backup.name)
+                            ua.deleteBackup(backup.name)
                               .then(() => {
                                 setDataMessage(t('doctor.deletedBackup', { name: backup.name }));
-                                api.listBackups().then(setBackups).catch(() => {});
+                                ua.listBackups().then(setBackups).catch(() => {});
                               })
                               .catch(() => setDataMessage(t('doctor.deleteBackupFailed')));
                           }}
