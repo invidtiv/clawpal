@@ -61,7 +61,7 @@ export function PendingChangesBar({ onApplied, showToast }: PendingChangesBarPro
 
   useEffect(() => {
     refreshCount();
-    pollRef.current = setInterval(refreshCount, 2000);
+    pollRef.current = setInterval(refreshCount, api.isRemote ? 10000 : 2000);
     return () => {
       if (pollRef.current) clearInterval(pollRef.current);
     };

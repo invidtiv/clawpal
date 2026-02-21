@@ -92,7 +92,7 @@ export function Home({
   useEffect(() => {
     const check = () => { ua.queuedCommandsCount().then((n) => { hasPendingRef.current = n > 0; }).catch(() => {}); };
     check();
-    const interval = setInterval(check, 3000);
+    const interval = setInterval(check, ua.isRemote ? 10000 : 3000);
     return () => clearInterval(interval);
   }, [ua]);
 
@@ -136,8 +136,8 @@ export function Home({
   useEffect(() => {
     remoteErrorShownRef.current = false;
     fetchStatus();
-    // Poll fast (2s) while not settled, slow (10s) once settled
-    const interval = setInterval(fetchStatus, statusSettled ? 10000 : 2000);
+    // Poll fast (2s) while not settled, slow (10s) once settled; remote always slow
+    const interval = setInterval(fetchStatus, ua.isRemote ? 30000 : (statusSettled ? 10000 : 2000));
     return () => clearInterval(interval);
   }, [fetchStatus, statusSettled]);
 
@@ -162,8 +162,8 @@ export function Home({
 
   useEffect(() => {
     refreshAgents();
-    // Auto-refresh agents every 15s
-    const interval = setInterval(refreshAgents, 15000);
+    // Auto-refresh agents (remote less frequently to avoid ssh process spam)
+    const interval = setInterval(refreshAgents, ua.isRemote ? 30000 : 15000);
     return () => clearInterval(interval);
   }, [refreshAgents]);
 
