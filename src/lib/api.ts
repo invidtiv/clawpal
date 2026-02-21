@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { AgentOverview, AgentSessionAnalysis, ApplyResult, BackupInfo, Binding, ChannelNode, ConfigDirtyState, CronJob, CronRun, DiscordGuildChannel, HistoryItem, ModelCatalogProvider, ModelProfile, PreviewResult, ProviderAuthSuggestion, Recipe, RemoteSystemStatus, ResolvedApiKey, StatusLight, SystemStatus, DoctorReport, MemoryFile, SessionFile, SshHost, WatchdogStatus } from "./types";
+import type { AgentOverview, AgentSessionAnalysis, ApplyResult, BackupInfo, Binding, ChannelNode, ConfigDirtyState, CronJob, CronRun, DiscordGuildChannel, HistoryItem, ModelCatalogProvider, ModelProfile, PreviewResult, ProviderAuthSuggestion, Recipe, RemoteSystemStatus, ResolvedApiKey, StatusLight, SystemStatus, DoctorReport, SessionFile, SshHost, WatchdogStatus } from "./types";
 
 export const api = {
   getSystemStatus: (): Promise<SystemStatus> =>
@@ -22,8 +22,6 @@ export const api = {
     invoke("rollback", { snapshotId }),
   listModelProfiles: (): Promise<ModelProfile[]> =>
     invoke("list_model_profiles", {}),
-  listModelCatalog: (): Promise<ModelCatalogProvider[]> =>
-    invoke("list_model_catalog", {}),
   extractModelProfilesFromConfig: (): Promise<{ created: number; reused: number; skippedInvalid: number }> =>
     invoke("extract_model_profiles_from_config", {}),
   upsertModelProfile: (profile: ModelProfile): Promise<ModelProfile> =>
@@ -34,8 +32,6 @@ export const api = {
     invoke("resolve_provider_auth", { provider }),
   resolveApiKeys: (): Promise<ResolvedApiKey[]> =>
     invoke("resolve_api_keys", {}),
-  listAgentIds: (): Promise<string[]> =>
-    invoke("list_agent_ids", {}),
   listAgentsOverview: (): Promise<AgentOverview[]> =>
     invoke("list_agents_overview", {}),
   createAgent: (agentId: string, modelProfileId?: string, independent?: boolean): Promise<AgentOverview> =>
@@ -44,20 +40,10 @@ export const api = {
     invoke("delete_agent", { agentId }),
   setupAgentIdentity: (agentId: string, name: string, emoji?: string): Promise<boolean> =>
     invoke("setup_agent_identity", { agentId, name, emoji }),
-  listMemoryFiles: (): Promise<MemoryFile[]> =>
-    invoke("list_memory_files", {}),
-  deleteMemoryFile: (filePath: string): Promise<boolean> =>
-    invoke("delete_memory_file", { path: filePath }),
-  clearMemory: (): Promise<number> =>
-    invoke("clear_memory", {}),
   listSessionFiles: (): Promise<SessionFile[]> =>
     invoke("list_session_files", {}),
-  deleteSessionFile: (filePath: string): Promise<boolean> =>
-    invoke("delete_session_file", { path: filePath }),
   clearAllSessions: (): Promise<number> =>
     invoke("clear_all_sessions", {}),
-  clearAgentSessions: (agentId: string): Promise<number> =>
-    invoke("clear_agent_sessions", { agentId }),
   analyzeSessions: (): Promise<AgentSessionAnalysis[]> =>
     invoke("analyze_sessions", {}),
   deleteSessionsByIds: (agentId: string, sessionIds: string[]): Promise<number> =>

@@ -64,7 +64,7 @@ export function Chat() {
         .then((agents) => setAgents(agents.map((a) => a.id)))
         .catch((e) => console.error("Failed to load remote agent IDs:", e));
     } else {
-      api.listAgentIds().then(setAgents).catch((e) => console.error("Failed to load agent IDs:", e));
+      api.listAgentsOverview().then((agents) => setAgents(agents.map((a) => a.id))).catch((e) => console.error("Failed to load agent IDs:", e));
     }
   }, [isRemote, isConnected, instanceId]);
 

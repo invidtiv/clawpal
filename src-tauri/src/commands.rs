@@ -145,14 +145,6 @@ pub struct MemorySummary {
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct MemoryFile {
-    pub path: String,
-    pub relative_path: String,
-    pub size_bytes: u64,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct AgentSessionSummary {
     pub agent: String,
     pub session_files: usize,
@@ -428,13 +420,6 @@ pub fn get_system_status() -> Result<SystemStatus, String> {
 pub fn list_model_profiles() -> Result<Vec<ModelProfile>, String> {
     let paths = resolve_paths();
     Ok(load_model_profiles(&paths))
-}
-
-#[tauri::command]
-pub fn list_model_catalog() -> Result<Vec<ModelCatalogProvider>, String> {
-    let paths = resolve_paths();
-    let cfg = read_openclaw_config(&paths)?;
-    load_model_catalog(&paths, &cfg)
 }
 
 #[tauri::command]
@@ -975,13 +960,6 @@ pub fn list_model_bindings() -> Result<Vec<ModelBinding>, String> {
 }
 
 #[tauri::command]
-pub fn list_agent_ids() -> Result<Vec<String>, String> {
-    let paths = resolve_paths();
-    let cfg = read_openclaw_config(&paths)?;
-    Ok(collect_agent_ids(&cfg))
-}
-
-#[tauri::command]
 pub fn list_agents_overview() -> Result<Vec<AgentOverview>, String> {
     let paths = resolve_paths();
     let cfg = read_openclaw_config(&paths)?;
@@ -1328,75 +1306,15 @@ fn parse_identity_md(workspace: &str) -> Option<(Option<String>, Option<String>)
 }
 
 #[tauri::command]
-pub fn list_memory_files() -> Result<Vec<MemoryFile>, String> {
-    let paths = resolve_paths();
-    list_memory_files_detailed(&paths.base_dir.join("memory"))
-}
-
-#[tauri::command]
-pub fn delete_memory_file(path: String) -> Result<bool, String> {
-    let paths = resolve_paths();
-    let root = paths.base_dir.join("memory");
-    let target = resolve_child_path(&root, &path)?;
-    if !target.exists() {
-        return Ok(false);
-    }
-    if !target.is_file() {
-        return Err("target is not a file".into());
-    }
-    fs::remove_file(&target).map_err(|e| e.to_string())?;
-    Ok(true)
-}
-
-#[tauri::command]
-pub fn clear_memory() -> Result<usize, String> {
-    let paths = resolve_paths();
-    let root = paths.base_dir.join("memory");
-    if !root.exists() {
-        return Ok(0);
-    }
-    let count = count_files_recursive(&root);
-    fs::remove_dir_all(&root).map_err(|e| e.to_string())?;
-    fs::create_dir_all(&root).map_err(|e| e.to_string())?;
-    Ok(count)
-}
-
-#[tauri::command]
 pub fn list_session_files() -> Result<Vec<SessionFile>, String> {
     let paths = resolve_paths();
     list_session_files_detailed(&paths.base_dir)
 }
 
 #[tauri::command]
-pub fn delete_session_file(path: String) -> Result<bool, String> {
-    let paths = resolve_paths();
-    let target = resolve_child_path(&paths.base_dir, &path)?;
-    if !target.exists() {
-        return Ok(false);
-    }
-    if !target.is_file() {
-        return Err("target is not a file".into());
-    }
-    fs::remove_file(&target).map_err(|e| e.to_string())?;
-    Ok(true)
-}
-
-#[tauri::command]
 pub fn clear_all_sessions() -> Result<usize, String> {
     let paths = resolve_paths();
     clear_agent_and_global_sessions(&paths.base_dir.join("agents"), None)
-}
-
-#[tauri::command]
-pub fn clear_agent_sessions(agent_id: String) -> Result<usize, String> {
-    if agent_id.trim().is_empty() {
-        return Err("agent id is required".into());
-    }
-    if agent_id.contains("..") || agent_id.contains('/') || agent_id.contains('\\') {
-        return Err("invalid agent id".into());
-    }
-    let paths = resolve_paths();
-    clear_agent_and_global_sessions(&paths.base_dir.join("agents"), Some(agent_id.as_str()))
 }
 
 #[tauri::command]
@@ -2620,46 +2538,6 @@ fn collect_file_inventory_with_limit(path: &Path) -> InventorySummary {
     }
 }
 
-fn list_memory_files_detailed(memory_root: &Path) -> Result<Vec<MemoryFile>, String> {
-    if !memory_root.exists() {
-        return Ok(Vec::new());
-    }
-    let mut queue = VecDeque::new();
-    let mut files = Vec::new();
-    queue.push_back(memory_root.to_path_buf());
-    while let Some(current) = queue.pop_front() {
-        let entries = match fs::read_dir(&current) {
-            Ok(entries) => entries,
-            Err(_) => continue,
-        };
-        for entry in entries.flatten() {
-            let entry_path = entry.path();
-            let metadata = match entry.metadata() {
-                Ok(meta) => meta,
-                Err(_) => continue,
-            };
-            if metadata.is_dir() {
-                queue.push_back(entry_path);
-                continue;
-            }
-            if metadata.is_file() {
-                let relative_path = entry_path
-                    .strip_prefix(memory_root)
-                    .unwrap_or(&entry_path)
-                    .to_string_lossy()
-                    .to_string();
-                files.push(MemoryFile {
-                    path: entry_path.to_string_lossy().to_string(),
-                    relative_path,
-                    size_bytes: metadata.len(),
-                });
-            }
-        }
-    }
-    files.sort_by(|a, b| b.size_bytes.cmp(&a.size_bytes));
-    Ok(files)
-}
-
 fn list_session_files_detailed(base_dir: &Path) -> Result<Vec<SessionFile>, String> {
     let agents_root = base_dir.join("agents");
     if !agents_root.exists() {
@@ -2727,53 +2605,6 @@ fn collect_session_files_in_scope(
         }
     }
     Ok(())
-}
-
-fn resolve_child_path(root: &Path, target: &str) -> Result<PathBuf, String> {
-    if target.trim().is_empty() {
-        return Err("path is required".into());
-    }
-    let candidate = if Path::new(target).is_absolute() {
-        PathBuf::from(target)
-    } else {
-        root.join(target)
-    };
-    let root_abs = if root.exists() {
-        fs::canonicalize(root).map_err(|e| e.to_string())?
-    } else {
-        return Err("root directory not found".into());
-    };
-    let target_abs = fs::canonicalize(&candidate).map_err(|e| e.to_string())?;
-    if !target_abs.starts_with(&root_abs) {
-        return Err("path is outside managed directory".into());
-    }
-    Ok(target_abs)
-}
-
-fn count_files_recursive(root: &Path) -> usize {
-    if !root.exists() {
-        return 0;
-    }
-    let mut queue = VecDeque::new();
-    let mut total = 0usize;
-    queue.push_back(root.to_path_buf());
-    while let Some(current) = queue.pop_front() {
-        let entries = match fs::read_dir(&current) {
-            Ok(entries) => entries,
-            Err(_) => continue,
-        };
-        for entry in entries.flatten() {
-            if let Ok(metadata) = entry.metadata() {
-                let entry_path = entry.path();
-                if metadata.is_dir() {
-                    queue.push_back(entry_path);
-                } else if metadata.is_file() {
-                    total = total.saturating_add(1);
-                }
-            }
-        }
-    }
-    total
 }
 
 fn clear_agent_and_global_sessions(agents_root: &Path, agent_id: Option<&str>) -> Result<usize, String> {

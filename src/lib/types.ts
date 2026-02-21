@@ -116,12 +116,6 @@ export interface SystemStatus {
   };
 }
 
-export interface MemoryFile {
-  path: string;
-  relativePath: string;
-  sizeBytes: number;
-}
-
 export interface SessionFile {
   path: string;
   relativePath: string;
