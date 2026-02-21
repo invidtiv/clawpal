@@ -4,8 +4,7 @@ import { useTranslation } from "react-i18next";
 import { check } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { getVersion } from "@tauri-apps/api/app";
-import { api } from "@/lib/api";
-import { useInstance } from "@/lib/instance-context";
+import { useApi } from "@/lib/use-api";
 import type { ModelCatalogProvider, ModelProfile, ProviderAuthSuggestion, ResolvedApiKey } from "@/lib/types";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -131,7 +130,7 @@ export function Settings({ onDataChange, hasAppUpdate, onAppUpdateSeen }: {
   onAppUpdateSeen?: () => void;
 }) {
   const { t, i18n } = useTranslation();
-  const { instanceId, isRemote, isConnected } = useInstance();
+  const ua = useApi();
   const [profiles, setProfiles] = useState<ModelProfile[] | null>(null);
   const [catalog, setCatalog] = useState<ModelCatalogProvider[]>([]);
   const [apiKeys, setApiKeys] = useState<ResolvedApiKey[]>([]);
@@ -203,53 +202,32 @@ export function Settings({ onDataChange, hasAppUpdate, onAppUpdateSeen }: {
     }
   }, [hasAppUpdate, handleCheckForUpdates, onAppUpdateSeen]);
 
-  // Extract profiles from remote config on first load
+  // Extract profiles from config on first load
   useEffect(() => {
-    if (!isRemote || !isConnected) return;
-    api.remoteExtractModelProfilesFromConfig(instanceId)
-      .catch((e) => console.error("Failed to extract remote profiles:", e));
-  }, [isRemote, isConnected, instanceId]);
+    ua.extractModelProfilesFromConfig()
+      .catch((e) => console.error("Failed to extract profiles:", e));
+  }, [ua]);
 
   const refreshProfiles = () => {
-    if (isRemote) {
-      if (!isConnected) return;
-      api.remoteListModelProfiles(instanceId).then(setProfiles).catch((e) => console.error("Failed to load remote profiles:", e));
-      api.remoteResolveApiKeys(instanceId).then(setApiKeys).catch((e) => console.error("Failed to resolve remote API keys:", e));
-    } else {
-      api.listModelProfiles().then(setProfiles).catch((e) => console.error("Failed to load profiles:", e));
-      api.resolveApiKeys().then(setApiKeys).catch((e) => console.error("Failed to resolve API keys:", e));
-    }
+    ua.listModelProfiles().then(setProfiles).catch((e) => console.error("Failed to load profiles:", e));
+    ua.resolveApiKeys().then(setApiKeys).catch((e) => console.error("Failed to resolve API keys:", e));
   };
 
-  useEffect(refreshProfiles, [isRemote, isConnected, instanceId]);
+  useEffect(refreshProfiles, [ua]);
 
-  // Load catalog from cache instantly (no CLI calls)
+  // Load catalog on mount
   useEffect(() => {
     setCatalogRefreshed(false);
-    if (isRemote) {
-      // For remote, load catalog on mount (no local cache)
-      if (isConnected) {
-        api.remoteRefreshModelCatalog(instanceId).then(setCatalog).catch((e) => console.error("Failed to load remote model catalog:", e));
-      }
-    } else {
-      api.getCachedModelCatalog().then(setCatalog).catch((e) => console.error("Failed to load model catalog:", e));
-    }
-  }, [isRemote, isConnected, instanceId]);
+    ua.refreshModelCatalog().then(setCatalog).catch((e) => console.error("Failed to load model catalog:", e));
+  }, [ua]);
 
   // Refresh catalog from CLI when user focuses provider/model input
   const ensureCatalog = () => {
     if (catalogRefreshed) return;
     setCatalogRefreshed(true);
-    if (isRemote) {
-      if (!isConnected) return;
-      api.remoteRefreshModelCatalog(instanceId).then((fresh) => {
-        if (fresh.length > 0) setCatalog(fresh);
-      }).catch((e) => console.error("Failed to refresh remote model catalog:", e));
-    } else {
-      api.refreshModelCatalog().then((fresh) => {
-        if (fresh.length > 0) setCatalog(fresh);
-      }).catch((e) => console.error("Failed to refresh model catalog:", e));
-    }
+    ua.refreshModelCatalog().then((fresh) => {
+      if (fresh.length > 0) setCatalog(fresh);
+    }).catch((e) => console.error("Failed to refresh model catalog:", e));
   };
 
   const maskedKeyMap = useMemo(() => {
@@ -266,26 +244,26 @@ export function Settings({ onDataChange, hasAppUpdate, onAppUpdateSeen }: {
       setAuthSuggestion(null);
       return;
     }
-    if (isRemote) {
-      // For remote: check if any existing profile with the same provider already has a key
-      const sameProviderProfile = (profiles || []).find(
+    if (ua.isRemote) {
+      // For remote: infer from existing profiles
+      const existing = (profiles || []).find(
         (p) => p.provider === form.provider && maskedKeyMap.has(p.id) && maskedKeyMap.get(p.id) !== "..."
       );
-      if (sameProviderProfile) {
+      if (existing) {
         setAuthSuggestion({
           hasKey: true,
-          source: `existing profile (${sameProviderProfile.provider}/${sameProviderProfile.model})`,
-          authRef: sameProviderProfile.authRef || "",
+          source: `existing profile (${existing.provider}/${existing.model})`,
+          authRef: existing.authRef || "",
         });
       } else {
         setAuthSuggestion(null);
       }
     } else {
-      api.resolveProviderAuth(form.provider)
+      ua.resolveProviderAuth(form.provider)
         .then(setAuthSuggestion)
         .catch((e) => { console.error("Failed to resolve provider auth:", e); setAuthSuggestion(null); });
     }
-  }, [form.provider, form.id, isRemote, profiles, maskedKeyMap]);
+  }, [form.provider, form.id, ua, profiles, maskedKeyMap]);
 
   const modelCandidates = useMemo(() => {
     const found = catalog.find((c) => c.provider === form.provider);
@@ -298,7 +276,7 @@ export function Settings({ onDataChange, hasAppUpdate, onAppUpdateSeen }: {
       setMessage(t('settings.providerModelRequired'));
       return;
     }
-    if (!isRemote && !form.apiKey && !form.id && !authSuggestion?.hasKey) {
+    if (!ua.isRemote && !form.apiKey && !form.id && !authSuggestion?.hasKey) {
       setMessage(t('settings.apiKeyRequired'));
       return;
     }
@@ -312,10 +290,7 @@ export function Settings({ onDataChange, hasAppUpdate, onAppUpdateSeen }: {
       baseUrl: form.useCustomUrl && form.baseUrl ? form.baseUrl : undefined,
       enabled: form.enabled,
     };
-    const upsertPromise = isRemote
-      ? api.remoteUpsertModelProfile(instanceId, profileData)
-      : api.upsertModelProfile(profileData);
-    upsertPromise
+    ua.upsertModelProfile(profileData)
       .then(() => {
         setMessage(t('settings.profileSaved'));
         setForm(emptyForm());
@@ -338,10 +313,7 @@ export function Settings({ onDataChange, hasAppUpdate, onAppUpdateSeen }: {
   };
 
   const deleteProfile = (id: string) => {
-    const deletePromise = isRemote
-      ? api.remoteDeleteModelProfile(instanceId, id)
-      : api.deleteModelProfile(id);
-    deletePromise
+    ua.deleteModelProfile(id)
       .then(() => {
         setMessage(t('settings.profileDeleted'));
         if (form.id === id) {
@@ -358,7 +330,7 @@ export function Settings({ onDataChange, hasAppUpdate, onAppUpdateSeen }: {
       <h2 className="text-2xl font-bold mb-4">{t('settings.title')}</h2>
 
       {/* ---- Model Profiles ---- */}
-      {!isRemote && (
+      {!ua.isRemote && (
         <p className="text-sm text-muted-foreground mb-4">
           {t('settings.oauthHint')}
           <code className="mx-1 px-1.5 py-0.5 bg-muted rounded text-xs">openclaw models auth login</code>
