@@ -42,8 +42,13 @@ use crate::commands::{
     read_app_log, read_error_log, remote_read_app_log, remote_read_error_log,
     RemoteConfigBaselines,
 };
+use crate::cli_runner::{
+    queue_command, remove_queued_command, list_queued_commands,
+    discard_queued_commands, queued_commands_count, CommandQueue,
+};
 use crate::ssh::SshConnectionPool;
 
+pub mod cli_runner;
 pub mod commands;
 pub mod config_io;
 pub mod doctor;
@@ -59,6 +64,7 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .manage(SshConnectionPool::new())
         .manage(RemoteConfigBaselines::new())
+        .manage(CommandQueue::new())
         .invoke_handler(tauri::generate_handler![
             get_system_status,
             get_status_light,
@@ -182,6 +188,11 @@ pub fn run() {
             read_error_log,
             remote_read_app_log,
             remote_read_error_log,
+            queue_command,
+            remove_queued_command,
+            list_queued_commands,
+            discard_queued_commands,
+            queued_commands_count,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run app");
