@@ -13,6 +13,7 @@ import { Cron } from "./pages/Cron";
 import { Chat } from "./components/Chat";
 import logoUrl from "./assets/logo.png";
 import { DiffViewer } from "./components/DiffViewer";
+import { PendingChangesBar } from "./components/PendingChangesBar";
 import { InstanceTabBar } from "./components/InstanceTabBar";
 import { InstanceContext } from "./lib/instance-context";
 import { api } from "./lib/api";
@@ -287,6 +288,7 @@ export function App() {
         onSelect={handleInstanceSelect}
         onHostsChange={refreshHosts}
       />
+      <InstanceContext.Provider value={{ instanceId: activeInstance, isRemote, isConnected, discordGuildChannels }}>
       <div className="flex flex-1 overflow-hidden">
       <aside className="w-[200px] min-w-[200px] bg-muted border-r border-border flex flex-col py-4">
         <h1 className="px-4 text-lg font-bold mb-4 flex items-center gap-2">
@@ -413,8 +415,11 @@ export function App() {
             </Button>
           </div>
         )}
+        <PendingChangesBar
+          showToast={showToast}
+          onApplied={bumpConfigVersion}
+        />
       </aside>
-      <InstanceContext.Provider value={{ instanceId: activeInstance, isRemote, isConnected, discordGuildChannels }}>
       <main className="flex-1 overflow-y-auto p-4 relative">
         {/* Chat toggle -- top-right corner */}
         {!chatOpen && (
@@ -496,8 +501,8 @@ export function App() {
           </div>
         </aside>
       )}
-      </InstanceContext.Provider>
       </div>
+      </InstanceContext.Provider>
     </div>
 
     {/* Apply Changes Dialog */}

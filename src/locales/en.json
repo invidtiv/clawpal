@@ -384,5 +384,21 @@
   "watchdog.startSuccess": "Watchdog started",
   "watchdog.stopSuccess": "Watchdog stopped",
   "watchdog.actionFailed": "Watchdog action failed: {{error}}",
-  "watchdog.startingHint": "Waiting for first health check..."
+  "watchdog.startingHint": "Waiting for first health check...",
+
+  "queue.pendingCount_one": "{{count}} pending change",
+  "queue.pendingCount_other": "{{count}} pending changes",
+  "queue.remove": "Remove",
+  "queue.preview": "Preview Changes",
+  "queue.previewing": "Previewing...",
+  "queue.previewTitle": "Preview Queued Changes",
+  "queue.previewDescription": "Review {{count}} queued command(s). Applying will execute them and restart the gateway.",
+  "queue.applyAndRestart": "Apply & Restart Gateway",
+  "queue.applySuccess": "Changes applied, gateway restarted",
+  "queue.applyFailed": "Apply failed: {{error}}",
+  "queue.rolledBack": "(changes rolled back)",
+  "queue.discarded": "Queued changes discarded",
+  "queue.discardFailed": "Discard failed: {{error}}",
+  "queue.discardTitle": "Discard all queued changes?",
+  "queue.discardDescription": "This will remove {{count}} queued command(s). No changes will be applied."
 }
