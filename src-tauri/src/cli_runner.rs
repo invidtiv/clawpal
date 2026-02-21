@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::process::Command;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -148,14 +148,15 @@ pub struct PendingCommand {
     pub created_at: String,
 }
 
+#[derive(Clone)]
 pub struct CommandQueue {
-    commands: Mutex<Vec<PendingCommand>>,
+    commands: Arc<Mutex<Vec<PendingCommand>>>,
 }
 
 impl CommandQueue {
     pub fn new() -> Self {
         Self {
-            commands: Mutex::new(Vec::new()),
+            commands: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -260,111 +261,112 @@ pub struct PreviewQueueResult {
 }
 
 #[tauri::command]
-pub fn preview_queued_commands(
-    queue: tauri::State<CommandQueue>,
+pub async fn preview_queued_commands(
+    queue: tauri::State<'_, CommandQueue>,
 ) -> Result<PreviewQueueResult, String> {
     let commands = queue.list();
     if commands.is_empty() {
         return Err("No pending commands to preview".into());
     }
 
-    let paths = resolve_paths();
+    tauri::async_runtime::spawn_blocking(move || {
+        let paths = resolve_paths();
 
-    // Read current config
-    let config_before = crate::config_io::read_text(&paths.config_path)?;
+        // Read current config
+        let config_before = crate::config_io::read_text(&paths.config_path)?;
 
-    // Set up sandbox: symlink all entries from real .openclaw/ into sandbox,
-    // but copy openclaw.json so commands modify the copy, not the original.
-    // This ensures the CLI can find extensions, plugins, etc. for validation.
-    let sandbox_root = paths.clawpal_dir.join("preview");
-    let preview_dir = sandbox_root.join(".openclaw");
-    // Clean previous sandbox if any
-    let _ = std::fs::remove_dir_all(&sandbox_root);
-    std::fs::create_dir_all(&preview_dir).map_err(|e| e.to_string())?;
+        // Set up sandbox: symlink all entries from real .openclaw/ into sandbox,
+        // but copy openclaw.json so commands modify the copy, not the original.
+        // This ensures the CLI can find extensions, plugins, etc. for validation.
+        let sandbox_root = paths.clawpal_dir.join("preview");
+        let preview_dir = sandbox_root.join(".openclaw");
+        // Clean previous sandbox if any
+        let _ = std::fs::remove_dir_all(&sandbox_root);
+        std::fs::create_dir_all(&preview_dir).map_err(|e| e.to_string())?;
 
-    // Symlink all sibling entries from real .openclaw/
-    if let Ok(entries) = std::fs::read_dir(&paths.base_dir) {
-        for entry in entries.flatten() {
-            let name = entry.file_name();
-            if name == "openclaw.json" { continue; } // will be copied instead
-            let target = preview_dir.join(&name);
-            #[cfg(unix)]
-            { let _ = std::os::unix::fs::symlink(entry.path(), &target); }
-        }
-    }
-
-    // Copy config file (the one we want to modify in-place)
-    let preview_config = preview_dir.join("openclaw.json");
-    std::fs::copy(&paths.config_path, &preview_config).map_err(|e| e.to_string())?;
-
-    let mut env = HashMap::new();
-    env.insert(
-        "OPENCLAW_HOME".to_string(),
-        sandbox_root.to_string_lossy().to_string(),
-    );
-
-    // Execute each command in sandbox
-    let mut errors = Vec::new();
-    for cmd in &commands {
-        let args: Vec<&str> = cmd.command.iter().skip(1).map(|s| s.as_str()).collect();
-        let result = run_openclaw_with_env(&args, Some(&env));
-        match result {
-            Ok(output) if output.exit_code != 0 => {
-                let detail = if !output.stderr.is_empty() {
-                    output.stderr.clone()
-                } else {
-                    output.stdout.clone()
-                };
-                errors.push(format!("{}: {}", cmd.label, detail));
-                // Don't break — continue to show cumulative diff even with errors
+        // Symlink all sibling entries from real .openclaw/
+        if let Ok(entries) = std::fs::read_dir(&paths.base_dir) {
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                if name == "openclaw.json" { continue; }
+                let target = preview_dir.join(&name);
+                #[cfg(unix)]
+                { let _ = std::os::unix::fs::symlink(entry.path(), &target); }
             }
-            Err(e) => {
-                errors.push(format!("{}: {}", cmd.label, e));
-                break;
+        }
+
+        // Copy config file (the one we want to modify in-place)
+        let preview_config = preview_dir.join("openclaw.json");
+        std::fs::copy(&paths.config_path, &preview_config).map_err(|e| e.to_string())?;
+
+        let mut env = HashMap::new();
+        env.insert(
+            "OPENCLAW_HOME".to_string(),
+            sandbox_root.to_string_lossy().to_string(),
+        );
+
+        // Execute each command in sandbox
+        let mut errors = Vec::new();
+        for cmd in &commands {
+            let args: Vec<&str> = cmd.command.iter().skip(1).map(|s| s.as_str()).collect();
+            let result = run_openclaw_with_env(&args, Some(&env));
+            match result {
+                Ok(output) if output.exit_code != 0 => {
+                    let detail = if !output.stderr.is_empty() {
+                        output.stderr.clone()
+                    } else {
+                        output.stdout.clone()
+                    };
+                    errors.push(format!("{}: {}", cmd.label, detail));
+                }
+                Err(e) => {
+                    errors.push(format!("{}: {}", cmd.label, e));
+                    break;
+                }
+                _ => {}
             }
-            _ => {}
         }
-    }
 
-    // Always read result config from sandbox (commands may have partially succeeded)
-    let config_after_raw = crate::config_io::read_text(&preview_config)
-        .unwrap_or_else(|_| config_before.clone());
+        // Always read result config from sandbox (commands may have partially succeeded)
+        let config_after_raw = crate::config_io::read_text(&preview_config)
+            .unwrap_or_else(|_| config_before.clone());
 
-    // Normalize both configs to sorted-key pretty JSON so the diff only
-    // shows semantic changes, not key reordering by the CLI.
-    fn sort_value(v: &Value) -> Value {
-        match v {
-            Value::Object(map) => {
-                let sorted: serde_json::Map<String, Value> = map.iter()
-                    .collect::<std::collections::BTreeMap<_, _>>()
-                    .into_iter()
-                    .map(|(k, v)| (k.clone(), sort_value(v)))
-                    .collect();
-                Value::Object(sorted)
+        // Normalize both configs to sorted-key pretty JSON so the diff only
+        // shows semantic changes, not key reordering by the CLI.
+        fn sort_value(v: &Value) -> Value {
+            match v {
+                Value::Object(map) => {
+                    let sorted: serde_json::Map<String, Value> = map.iter()
+                        .collect::<std::collections::BTreeMap<_, _>>()
+                        .into_iter()
+                        .map(|(k, v)| (k.clone(), sort_value(v)))
+                        .collect();
+                    Value::Object(sorted)
+                }
+                Value::Array(arr) => Value::Array(arr.iter().map(sort_value).collect()),
+                other => other.clone(),
             }
-            Value::Array(arr) => Value::Array(arr.iter().map(sort_value).collect()),
-            other => other.clone(),
         }
-    }
-    let normalize_json = |s: &str| -> String {
-        match serde_json::from_str::<Value>(s) {
-            Ok(v) => serde_json::to_string_pretty(&sort_value(&v))
-                .unwrap_or_else(|_| s.to_string()),
-            Err(_) => s.to_string(),
-        }
-    };
-    let config_before = normalize_json(&config_before);
-    let config_after = normalize_json(&config_after_raw);
+        let normalize_json = |s: &str| -> String {
+            match serde_json::from_str::<Value>(s) {
+                Ok(v) => serde_json::to_string_pretty(&sort_value(&v))
+                    .unwrap_or_else(|_| s.to_string()),
+                Err(_) => s.to_string(),
+            }
+        };
+        let config_before = normalize_json(&config_before);
+        let config_after = normalize_json(&config_after_raw);
 
-    // Cleanup sandbox
-    let _ = std::fs::remove_dir_all(paths.clawpal_dir.join("preview"));
+        // Cleanup sandbox
+        let _ = std::fs::remove_dir_all(paths.clawpal_dir.join("preview"));
 
-    Ok(PreviewQueueResult {
-        commands,
-        config_before,
-        config_after,
-        errors,
-    })
+        Ok(PreviewQueueResult {
+            commands,
+            config_before,
+            config_after,
+            errors,
+        })
+    }).await.map_err(|e| e.to_string())?
 }
 
 // ---------------------------------------------------------------------------
@@ -382,99 +384,104 @@ pub struct ApplyQueueResult {
 }
 
 #[tauri::command]
-pub fn apply_queued_commands(
-    queue: tauri::State<CommandQueue>,
-    cache: tauri::State<CliCache>,
+pub async fn apply_queued_commands(
+    queue: tauri::State<'_, CommandQueue>,
+    cache: tauri::State<'_, CliCache>,
 ) -> Result<ApplyQueueResult, String> {
     let commands = queue.list();
     if commands.is_empty() {
         return Err("No pending commands to apply".into());
     }
 
-    let paths = resolve_paths();
-    let total_count = commands.len();
+    let queue_handle = queue.inner().clone();
+    let cache_handle = cache.inner().clone();
 
-    // Save snapshot before applying (for rollback)
-    let config_before = crate::config_io::read_text(&paths.config_path)?;
-    let _ = crate::history::add_snapshot(
-        &paths.history_dir,
-        &paths.metadata_path,
-        Some("pre-apply".to_string()),
-        "queue-apply",
-        true,
-        &config_before,
-        None,
-    );
+    tauri::async_runtime::spawn_blocking(move || {
+        let paths = resolve_paths();
+        let total_count = commands.len();
 
-    // Execute each command for real
-    let mut applied_count = 0;
-    for cmd in &commands {
-        let args: Vec<&str> = cmd.command.iter().skip(1).map(|s| s.as_str()).collect();
-        let result = run_openclaw(&args);
-        match result {
-            Ok(output) if output.exit_code != 0 => {
-                let detail = if !output.stderr.is_empty() {
-                    output.stderr.clone()
-                } else {
-                    output.stdout.clone()
-                };
+        // Save snapshot before applying (for rollback)
+        let config_before = crate::config_io::read_text(&paths.config_path)?;
+        let _ = crate::history::add_snapshot(
+            &paths.history_dir,
+            &paths.metadata_path,
+            Some("pre-apply".to_string()),
+            "queue-apply",
+            true,
+            &config_before,
+            None,
+        );
 
-                // Rollback: restore config from snapshot
-                let _ = crate::config_io::write_text(&paths.config_path, &config_before);
+        // Execute each command for real
+        let mut applied_count = 0;
+        for cmd in &commands {
+            let args: Vec<&str> = cmd.command.iter().skip(1).map(|s| s.as_str()).collect();
+            let result = run_openclaw(&args);
+            match result {
+                Ok(output) if output.exit_code != 0 => {
+                    let detail = if !output.stderr.is_empty() {
+                        output.stderr.clone()
+                    } else {
+                        output.stdout.clone()
+                    };
 
-                queue.clear();
-                return Ok(ApplyQueueResult {
-                    ok: false,
-                    applied_count,
-                    total_count,
-                    error: Some(format!(
-                        "Step {} failed ({}): {}",
-                        applied_count + 1,
-                        cmd.label,
-                        detail
-                    )),
-                    rolled_back: true,
-                });
-            }
-            Err(e) => {
-                let _ = crate::config_io::write_text(&paths.config_path, &config_before);
-                queue.clear();
-                return Ok(ApplyQueueResult {
-                    ok: false,
-                    applied_count,
-                    total_count,
-                    error: Some(format!(
-                        "Step {} failed ({}): {}",
-                        applied_count + 1,
-                        cmd.label,
-                        e
-                    )),
-                    rolled_back: true,
-                });
-            }
-            Ok(_) => {
-                applied_count += 1;
+                    // Rollback: restore config from snapshot
+                    let _ = crate::config_io::write_text(&paths.config_path, &config_before);
+
+                    queue_handle.clear();
+                    return Ok(ApplyQueueResult {
+                        ok: false,
+                        applied_count,
+                        total_count,
+                        error: Some(format!(
+                            "Step {} failed ({}): {}",
+                            applied_count + 1,
+                            cmd.label,
+                            detail
+                        )),
+                        rolled_back: true,
+                    });
+                }
+                Err(e) => {
+                    let _ = crate::config_io::write_text(&paths.config_path, &config_before);
+                    queue_handle.clear();
+                    return Ok(ApplyQueueResult {
+                        ok: false,
+                        applied_count,
+                        total_count,
+                        error: Some(format!(
+                            "Step {} failed ({}): {}",
+                            applied_count + 1,
+                            cmd.label,
+                            e
+                        )),
+                        rolled_back: true,
+                    });
+                }
+                Ok(_) => {
+                    applied_count += 1;
+                }
             }
         }
-    }
 
-    // All succeeded — clear queue, invalidate cache, restart gateway
-    queue.clear();
-    cache.invalidate_all();
+        // All succeeded — clear queue, invalidate cache, restart gateway
+        queue_handle.clear();
+        cache_handle.invalidate_all();
 
-    // Restart gateway (best effort, don't fail the whole apply)
-    let gateway_result = run_openclaw(&["gateway", "restart"]);
-    if let Err(e) = &gateway_result {
-        eprintln!("Warning: gateway restart failed after apply: {e}");
-    }
+        // Restart gateway (best effort, don't fail the whole apply)
+        let gateway_result = run_openclaw(&["gateway", "restart"]);
+        if let Err(e) = &gateway_result {
+            eprintln!("Warning: gateway restart failed after apply: {e}");
+        }
 
-    Ok(ApplyQueueResult {
-        ok: true,
-        applied_count,
-        total_count,
-        error: None,
-        rolled_back: false,
-    })
+        Ok(ApplyQueueResult {
+            ok: true,
+            applied_count,
+            total_count,
+            error: None,
+            rolled_back: false,
+        })
+    }).await.map_err(|e| e.to_string())?
 }
 
 // ---------------------------------------------------------------------------
@@ -770,14 +777,15 @@ pub async fn remote_apply_queued_commands(
 // Read Cache — invalidated on Apply
 // ---------------------------------------------------------------------------
 
+#[derive(Clone)]
 pub struct CliCache {
-    cache: Mutex<HashMap<String, (std::time::Instant, String)>>,
+    cache: Arc<Mutex<HashMap<String, (std::time::Instant, String)>>>,
 }
 
 impl CliCache {
     pub fn new() -> Self {
         Self {
-            cache: Mutex::new(HashMap::new()),
+            cache: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
