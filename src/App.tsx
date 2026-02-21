@@ -119,13 +119,25 @@ export function App() {
   const handleInstanceSelect = useCallback((id: string) => {
     setActiveInstance(id);
     if (id !== "local") {
-      // Always set to disconnected first, then attempt (re)connect
+      // Check if backend still has a live connection before reconnecting
       setConnectionStatus((prev) => ({ ...prev, [id]: "disconnected" }));
-      api.sshConnect(id)
-        .then(() => setConnectionStatus((prev) => ({ ...prev, [id]: "connected" })))
+      api.sshStatus(id)
+        .then((status) => {
+          if (status === "connected") {
+            setConnectionStatus((prev) => ({ ...prev, [id]: "connected" }));
+          } else {
+            return api.sshConnect(id)
+              .then(() => setConnectionStatus((prev) => ({ ...prev, [id]: "connected" })));
+          }
+        })
         .catch((e) => {
-          setConnectionStatus((prev) => ({ ...prev, [id]: "error" }));
-          showToast(t('config.sshFailed', { error: String(e) }), "error");
+          // sshStatus failed or reconnect failed — try fresh connect
+          api.sshConnect(id)
+            .then(() => setConnectionStatus((prev) => ({ ...prev, [id]: "connected" })))
+            .catch((e2) => {
+              setConnectionStatus((prev) => ({ ...prev, [id]: "error" }));
+              showToast(t('config.sshFailed', { error: String(e2) }), "error");
+            });
         });
     }
   }, [showToast, t]);

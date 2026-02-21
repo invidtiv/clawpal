@@ -81,13 +81,26 @@ struct SshConnection {
 /// A global pool of SSH connections keyed by instance ID.
 pub struct SshConnectionPool {
     connections: Mutex<HashMap<String, SshConnection>>,
+    /// Per-connection reconnect locks to prevent concurrent reconnect storms.
+    /// When multiple requests detect a dead connection simultaneously, only one
+    /// performs the reconnect while others wait.
+    reconnect_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 impl SshConnectionPool {
     pub fn new() -> Self {
         Self {
             connections: Mutex::new(HashMap::new()),
+            reconnect_locks: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Get or create a per-connection reconnect lock.
+    async fn reconnect_lock(&self, id: &str) -> Arc<tokio::sync::Mutex<()>> {
+        let mut locks = self.reconnect_locks.lock().await;
+        locks.entry(id.to_string())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
     }
 
     // -- connect ----------------------------------------------------------
@@ -351,18 +364,45 @@ impl SshConnectionPool {
     /// Check if the connection is alive. If stale, attempt to reconnect
     /// automatically using the stored config. Returns an error only if
     /// reconnection also fails.
+    /// Check if the connection is alive. If stale (or `force` is true),
+    /// attempt to reconnect using the stored config. Uses a per-connection
+    /// lock so concurrent callers wait for a single reconnect rather than
+    /// all racing to reconnect simultaneously.
     async fn ensure_alive(&self, id: &str) -> Result<(), String> {
-        // Atomically check liveness and remove stale entry in one lock acquisition
-        // to prevent TOCTOU races where two callers both try to reconnect.
+        self.ensure_alive_inner(id, false).await
+    }
+
+    async fn force_reconnect(&self, id: &str) -> Result<(), String> {
+        self.ensure_alive_inner(id, true).await
+    }
+
+    async fn ensure_alive_inner(&self, id: &str, force: bool) -> Result<(), String> {
+        // Quick check: is reconnect needed?
+        let needs_reconnect = {
+            let pool = self.connections.lock().await;
+            match pool.get(id) {
+                Some(conn) => force || conn.handle.is_closed(),
+                None => return Err(format!("No connection for id: {id}")),
+            }
+        };
+
+        if !needs_reconnect {
+            return Ok(());
+        }
+
+        // Acquire per-connection reconnect lock so only one caller reconnects
+        let lock = self.reconnect_lock(id).await;
+        let _guard = lock.lock().await;
+
+        // Re-check under the lock — another caller may have already reconnected
         let stale_config = {
             let mut pool = self.connections.lock().await;
             match pool.get(id) {
-                Some(conn) if conn.handle.is_closed() => {
-                    // Remove stale entry while we still hold the lock
+                Some(conn) if force || conn.handle.is_closed() => {
                     let conn = pool.remove(id).unwrap();
                     Some(conn.config)
                 }
-                Some(_) => None, // connection is alive
+                Some(_) => None, // another caller already reconnected
                 None => return Err(format!("No connection for id: {id}")),
             }
         };
@@ -383,7 +423,6 @@ impl SshConnectionPool {
     pub async fn exec(&self, id: &str, command: &str) -> Result<SshExecResult, String> {
         self.ensure_alive(id).await?;
 
-        // Clone the handle so we don't hold the pool lock across network .await
         let handle = {
             let pool = self.connections.lock().await;
             let conn = pool.get(id).ok_or_else(|| format!("No connection for id: {id}"))?;
@@ -393,11 +432,16 @@ impl SshConnectionPool {
         let mut channel = match handle.channel_open_session().await {
             Ok(ch) => ch,
             Err(e) => {
-                // Channel open failed even after ensure_alive — connection
-                // may have died between the check and now. Remove stale entry.
-                let mut pool = self.connections.lock().await;
-                pool.remove(id);
-                return Err(format!("Failed to open channel: {e}"));
+                // Channel open failed — force reconnect and retry once
+                eprintln!("[ssh] exec channel_open failed for {id}: {e}, forcing reconnect...");
+                self.force_reconnect(id).await?;
+                let handle = {
+                    let pool = self.connections.lock().await;
+                    let conn = pool.get(id).ok_or_else(|| format!("No connection for id: {id}"))?;
+                    Arc::clone(&conn.handle)
+                };
+                handle.channel_open_session().await
+                    .map_err(|e2| format!("Failed to open channel after reconnect: {e2}"))?
             }
         };
 
@@ -490,9 +534,16 @@ impl SshConnectionPool {
         let channel = match handle.channel_open_session().await {
             Ok(ch) => ch,
             Err(e) => {
-                let mut pool = self.connections.lock().await;
-                pool.remove(id);
-                return Err(format!("Failed to open SFTP channel: {e}"));
+                // Channel open failed — force reconnect and retry once
+                eprintln!("[ssh] SFTP channel_open failed for {id}: {e}, forcing reconnect...");
+                self.force_reconnect(id).await?;
+                let handle = {
+                    let pool = self.connections.lock().await;
+                    let conn = pool.get(id).ok_or_else(|| format!("No connection for id: {id}"))?;
+                    Arc::clone(&conn.handle)
+                };
+                handle.channel_open_session().await
+                    .map_err(|e2| format!("Failed to open SFTP channel after reconnect: {e2}"))?
             }
         };
 
