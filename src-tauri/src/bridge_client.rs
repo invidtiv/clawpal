@@ -100,7 +100,6 @@ impl BridgeClient {
                         if line.is_empty() {
                             continue;
                         }
-                        eprintln!("[bridge] <<< {}", &line[..line.len().min(500)]);
                         match serde_json::from_str::<Value>(&line) {
                             Ok(frame) => {
                                 Self::handle_frame(
@@ -113,9 +112,7 @@ impl BridgeClient {
                                 )
                                 .await;
                             }
-                            Err(e) => {
-                                eprintln!("[bridge] invalid JSON frame: {e}");
-                            }
+                            Err(_) => {}
                         }
                     }
                     Ok(None) => {
@@ -208,7 +205,6 @@ impl BridgeClient {
         let inner = guard.as_mut().ok_or("Bridge not connected")?;
         let mut data = serde_json::to_string(frame).map_err(|e| format!("JSON serialize error: {e}"))?;
         data.push('\n');
-        eprintln!("[bridge] >>> {}", &data[..data.len().min(500)]);
         inner
             .writer
             .write_all(data.as_bytes())
@@ -241,7 +237,7 @@ impl BridgeClient {
                 "nodeId": node_id,
                 "displayName": "ClawPal",
                 "token": token,
-                "platform": "macos",
+                "platform": std::env::consts::OS,
                 "version": version,
                 "deviceFamily": "desktop",
                 "commands": commands,
@@ -270,7 +266,7 @@ impl BridgeClient {
                 "type": "pair-request",
                 "nodeId": node_id,
                 "displayName": "ClawPal",
-                "platform": "macos",
+                "platform": std::env::consts::OS,
                 "version": version,
                 "deviceFamily": "desktop",
                 "commands": commands,
@@ -311,7 +307,7 @@ impl BridgeClient {
                 "nodeId": node_id,
                 "displayName": "ClawPal",
                 "token": token,
-                "platform": "macos",
+                "platform": std::env::consts::OS,
                 "version": version,
                 "deviceFamily": "desktop",
                 "commands": commands,
@@ -375,7 +371,6 @@ impl BridgeClient {
                 if let Some(inner) = guard.as_mut() {
                     let mut data = serde_json::to_string(&pong).unwrap_or_default();
                     data.push('\n');
-                    eprintln!("[bridge] >>> {}", &data[..data.len().min(500)]);
                     let _ = inner.writer.write_all(data.as_bytes()).await;
                     let _ = inner.writer.flush().await;
                 }
@@ -430,7 +425,6 @@ impl BridgeClient {
                 let _ = app.emit("doctor:error", json!({"message": message}));
             }
             _ => {
-                eprintln!("[bridge] unhandled frame type: {frame_type}");
             }
         }
     }
@@ -462,7 +456,5 @@ fn save_token(token: &str) {
         let _ = std::fs::create_dir_all(parent);
     }
     let data = json!({"token": token});
-    if let Err(e) = std::fs::write(&path, serde_json::to_string_pretty(&data).unwrap_or_default()) {
-        eprintln!("[bridge] failed to save token to {:?}: {e}", path);
-    }
+    let _ = std::fs::write(&path, serde_json::to_string_pretty(&data).unwrap_or_default());
 }
