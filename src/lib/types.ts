@@ -334,6 +334,25 @@ export interface PreviewQueueResult {
   errors: string[];
 }
 
+// Doctor Agent
+
+export interface DoctorInvoke {
+  id: string;
+  command: string;
+  args: Record<string, unknown>;
+  type: "read" | "write";
+}
+
+export interface DoctorChatMessage {
+  id: string;
+  role: "assistant" | "user" | "tool-call" | "tool-result";
+  content: string;
+  invoke?: DoctorInvoke;
+  invokeResult?: unknown;
+  invokeId?: string;
+  status?: "pending" | "approved" | "rejected" | "auto";
+}
+
 export interface ApplyQueueResult {
   ok: boolean;
   appliedCount: number;

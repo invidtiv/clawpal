@@ -4,6 +4,7 @@
   "nav.channels": "频道",
   "nav.history": "历史",
   "nav.doctor": "诊断",
+  "nav.sessions": "会话管理",
   "nav.settings": "设置",
   "nav.website": "官网",
   "nav.chat": "聊天",
@@ -112,6 +113,7 @@
 
   "doctor.title": "诊断",
   "doctor.healthScore": "健康评分：{{score}}",
+  "doctor.healthSummary": "健康度: {{score}}",
   "doctor.fix": "修复",
   "doctor.fixAll": "修复所有自动问题",
   "doctor.refresh": "刷新",

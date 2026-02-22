@@ -3,7 +3,6 @@ import { useTranslation } from "react-i18next";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import { cn } from "@/lib/utils";
 import type { DoctorChatMessage } from "@/lib/types";
 
@@ -28,10 +27,11 @@ export function DoctorChat({
 }: DoctorChatProps) {
   const { t } = useTranslation();
   const [input, setInput] = useState("");
-  const bottomRef = useRef<HTMLDivElement>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+    const el = scrollRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
   }, [messages, loading]);
 
   const handleSend = () => {
@@ -41,7 +41,7 @@ export function DoctorChat({
   };
 
   return (
-    <div className="flex flex-col h-full min-h-[400px]">
+    <div className="flex flex-col">
       {/* Connection status */}
       <div className="flex items-center gap-2 mb-2 text-xs">
         <span className={cn(
@@ -55,7 +55,10 @@ export function DoctorChat({
       </div>
 
       {/* Message list */}
-      <ScrollArea className="flex-1 mb-2 border rounded-md p-3 bg-muted/30">
+      <div
+        ref={scrollRef}
+        className="h-[420px] mb-2 border rounded-md p-3 bg-muted/30 overflow-y-auto"
+      >
         <div className="space-y-3">
           {messages.map((msg) => (
             <MessageBubble
@@ -70,9 +73,8 @@ export function DoctorChat({
               {t("doctor.agentThinking")}
             </div>
           )}
-          <div ref={bottomRef} />
         </div>
-      </ScrollArea>
+      </div>
 
       {/* Input area */}
       <div className="flex gap-2">
@@ -80,7 +82,7 @@ export function DoctorChat({
           value={input}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={(e) => {
-            if (e.key === "Enter" && !e.shiftKey) {
+            if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
               e.preventDefault();
               handleSend();
             }
@@ -148,7 +150,7 @@ function MessageBubble({
             : <Badge variant="secondary" className="text-xs">{t("doctor.awaitingApproval")}</Badge>;
 
     return (
-      <div className="border rounded-md p-3 bg-card text-sm">
+      <div className="rounded-md p-3 text-sm border-l-[3px] border-l-primary/40 border border-border bg-[oklch(0.96_0_0)]">
         <div className="flex items-center justify-between mb-1">
           <span className="font-mono font-medium text-xs">{inv.command}</span>
           <div className="flex items-center gap-2">
@@ -181,7 +183,7 @@ function MessageBubble({
 
   if (message.role === "tool-result") {
     return (
-      <div className="border rounded-md bg-muted/50 text-sm">
+      <div className="rounded-md text-sm border-l-[3px] border-l-border border border-border bg-[oklch(0.95_0_0)]">
         <button
           className="w-full text-left px-3 py-2 text-xs text-muted-foreground hover:text-foreground"
           onClick={() => setExpanded(!expanded)}

@@ -270,10 +270,10 @@ export const api = {
     invoke("doctor_connect", { url }),
   doctorDisconnect: (): Promise<void> =>
     invoke("doctor_disconnect"),
-  doctorStartDiagnosis: (context: string): Promise<void> =>
-    invoke("doctor_start_diagnosis", { context }),
-  doctorSendMessage: (message: string): Promise<void> =>
-    invoke("doctor_send_message", { message }),
+  doctorStartDiagnosis: (context: string, sessionKey: string): Promise<void> =>
+    invoke("doctor_start_diagnosis", { context, sessionKey }),
+  doctorSendMessage: (message: string, sessionKey: string): Promise<void> =>
+    invoke("doctor_send_message", { message, sessionKey }),
   doctorApproveInvoke: (invokeId: string, target: string): Promise<Record<string, unknown>> =>
     invoke("doctor_approve_invoke", { invokeId, target }),
   doctorRejectInvoke: (invokeId: string, reason: string): Promise<void> =>
@@ -282,8 +282,8 @@ export const api = {
     invoke("collect_doctor_context"),
   collectDoctorContextRemote: (hostId: string): Promise<string> =>
     invoke("collect_doctor_context_remote", { hostId }),
-  doctorBridgeConnect: (addr: string): Promise<void> =>
-    invoke("doctor_bridge_connect", { addr }),
+  doctorBridgeConnect: (url: string): Promise<void> =>
+    invoke("doctor_bridge_connect", { url }),
   doctorBridgeDisconnect: (): Promise<void> =>
     invoke("doctor_bridge_disconnect"),
 

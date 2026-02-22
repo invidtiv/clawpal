@@ -44,7 +44,7 @@ const emptyHost: Omit<SshHost, "id"> = {
   label: "",
   host: "",
   port: 22,
-  username: "",
+  username: "root",
   authMethod: "ssh_config",
   keyPath: undefined,
   password: undefined,
@@ -62,6 +62,7 @@ export function InstanceTabBar({
   const [editingHost, setEditingHost] = useState<SshHost | null>(null);
   const [form, setForm] = useState<Omit<SshHost, "id">>(emptyHost);
   const [saving, setSaving] = useState(false);
+  const [keyGuideOpen, setKeyGuideOpen] = useState(false);
 
   const openAddDialog = () => {
     setEditingHost(null);
@@ -248,7 +249,6 @@ export function InstanceTabBar({
                 id="ssh-username"
                 value={form.username}
                 onChange={(e) => setForm((f) => ({ ...f, username: e.target.value }))}
-                placeholder={t('instance.usernamePlaceholder')}
                 autoCapitalize="off"
                 autoCorrect="off"
                 spellCheck={false}
@@ -274,6 +274,13 @@ export function InstanceTabBar({
                   <SelectItem value="key">{t('instance.authKey')}</SelectItem>
                 </SelectContent>
               </Select>
+              <button
+                type="button"
+                className="text-xs text-muted-foreground hover:text-foreground underline underline-offset-2 mt-1"
+                onClick={() => setKeyGuideOpen(true)}
+              >
+                {t('instance.keyGuideLink')}
+              </button>
             </div>
             {form.authMethod === "key" && (
               <div className="space-y-1.5">
@@ -300,6 +307,65 @@ export function InstanceTabBar({
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* SSH Key Setup Guide Dialog */}
+      <Dialog open={keyGuideOpen} onOpenChange={setKeyGuideOpen}>
+        <DialogContent className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle>{t('instance.keyGuideTitle')}</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-5 text-sm">
+            {/* Step 1 */}
+            <div className="space-y-1.5">
+              <p className="font-medium">{t('instance.keyGuideStep1Title')}</p>
+              <CopyBlock text="ssh-keygen -t ed25519" />
+              <p className="text-xs text-muted-foreground">{t('instance.keyGuideStep1Hint')}</p>
+            </div>
+            {/* Step 2 */}
+            <div className="space-y-1.5">
+              <p className="font-medium">{t('instance.keyGuideStep2Title')}</p>
+              <CopyBlock text={`ssh-copy-id ${form.username || "root"}@${form.host || "your-host"} -p ${form.port || 22}`} />
+              <p className="text-xs text-muted-foreground">{t('instance.keyGuideStep2Hint')}</p>
+            </div>
+            {/* Step 3 */}
+            <div className="space-y-1.5">
+              <p className="font-medium">{t('instance.keyGuideStep3Title')}</p>
+              <ul className="list-disc list-inside text-muted-foreground text-xs space-y-0.5">
+                <li>{t('instance.keyGuideStep3Auth')}</li>
+                <li>{t('instance.keyGuideStep3Path')}</li>
+              </ul>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setKeyGuideOpen(false)}>
+              {t('instance.keyGuideClose')}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </>
+  );
+}
+
+function CopyBlock({ text }: { text: string }) {
+  const { t } = useTranslation();
+  const [copied, setCopied] = useState(false);
+  const handleCopy = () => {
+    navigator.clipboard.writeText(text).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    });
+  };
+  return (
+    <div className="flex items-center gap-2 bg-muted rounded px-3 py-1.5 font-mono text-xs">
+      <code className="flex-1 break-all">{text}</code>
+      <button
+        type="button"
+        className="shrink-0 text-muted-foreground hover:text-foreground text-xs"
+        onClick={handleCopy}
+      >
+        {copied ? t('instance.keyGuideCopied') : t('instance.keyGuideCopy')}
+      </button>
+    </div>
   );
 }

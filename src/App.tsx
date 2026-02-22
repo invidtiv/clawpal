@@ -8,6 +8,7 @@ import { Cook } from "./pages/Cook";
 import { History } from "./pages/History";
 import { Settings } from "./pages/Settings";
 import { Doctor } from "./pages/Doctor";
+import { Sessions } from "./pages/Sessions";
 import { Channels } from "./pages/Channels";
 import { Cron } from "./pages/Cron";
 import { Chat } from "./components/Chat";
@@ -23,7 +24,7 @@ import type { DiscordGuildChannel, SshHost } from "./lib/types";
 
 const PING_URL = "https://api.clawpal.zhixian.io/ping";
 
-type Route = "home" | "recipes" | "cook" | "history" | "channels" | "cron" | "doctor" | "settings";
+type Route = "home" | "recipes" | "cook" | "history" | "channels" | "cron" | "doctor" | "sessions" | "settings";
 
 interface ToastItem {
   id: number;
@@ -32,6 +33,23 @@ interface ToastItem {
 }
 
 let toastIdCounter = 0;
+
+const SSH_ERROR_MAP: Array<[RegExp, string]> = [
+  [/connection refused/i, "ssh.errorConnectionRefused"],
+  [/no such file/i, "ssh.errorNoSuchFile"],
+  [/permission denied/i, "ssh.errorPermissionDenied"],
+  [/host key verification failed/i, "ssh.errorHostKey"],
+  [/timed?\s*out/i, "ssh.errorTimeout"],
+];
+
+function friendlySshError(raw: string, t: (key: string, opts?: Record<string, string>) => string): string {
+  for (const [pattern, key] of SSH_ERROR_MAP) {
+    if (pattern.test(raw)) {
+      return `${t(key)}\n(${raw})`;
+    }
+  }
+  return t('config.sshFailed', { error: raw });
+}
 
 export function App() {
   const { t } = useTranslation();
@@ -117,7 +135,9 @@ export function App() {
             .then(() => setConnectionStatus((prev) => ({ ...prev, [id]: "connected" })))
             .catch((e2) => {
               setConnectionStatus((prev) => ({ ...prev, [id]: "error" }));
-              showToast(t('config.sshFailed', { error: String(e2) }), "error");
+              const raw = String(e2);
+              const friendly = friendlySshError(raw, t);
+              showToast(friendly, "error");
             });
         });
     }
@@ -251,6 +271,16 @@ export function App() {
           >
             {t('nav.doctor')}
           </Button>
+          <Button
+            variant="ghost"
+            className={cn(
+              "justify-start hover:bg-accent",
+              (route === "sessions") && "bg-accent text-accent-foreground border-l-[3px] border-primary"
+            )}
+            onClick={() => setRoute("sessions")}
+          >
+            {t('nav.sessions')}
+          </Button>
           <Separator className="my-2" />
           <Button
             variant="ghost"
@@ -341,7 +371,8 @@ export function App() {
         )}
         {route === "cron" && <Cron key={`${activeInstance}`} />}
         {route === "history" && <History key={`${activeInstance}-${configVersion}`} />}
-        {route === "doctor" && <Doctor />}
+        <div className={route === "doctor" ? undefined : "hidden"}><Doctor /></div>
+        {route === "sessions" && <Sessions />}
         {route === "settings" && (
           <Settings
             key={`${activeInstance}-${configVersion}`}

@@ -4251,7 +4251,8 @@ pub async fn remote_get_system_status(pool: State<'_, SshConnectionPool>, host_i
     };
 
     // 3. Check gateway health — pgrep is most reliable via SSH; HTTP as fallback
-    let pgrep_result = pool.exec(&host_id, "pgrep -f openclaw-gateway >/dev/null 2>&1").await;
+    // Bracket trick: [o]penclaw-gateway prevents pgrep from matching its own sh -c process
+    let pgrep_result = pool.exec(&host_id, "pgrep -f '[o]penclaw-gateway' >/dev/null 2>&1").await;
     let healthy = match pgrep_result {
         Ok(r) => r.exit_code == 0,
         Err(_) => false,

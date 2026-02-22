@@ -2,7 +2,7 @@ use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, State};
 
 use crate::node_client::NodeClient;
-use crate::bridge_client::BridgeClient;
+use crate::bridge_client::{BridgeClient, extract_shell_command};
 use crate::models::resolve_paths;
 use crate::ssh::SshConnectionPool;
 
@@ -28,9 +28,9 @@ pub async fn doctor_disconnect(
 pub async fn doctor_bridge_connect(
     bridge: State<'_, BridgeClient>,
     app: AppHandle,
-    addr: String,
+    url: String,
 ) -> Result<(), String> {
-    bridge.connect(&addr, app).await
+    bridge.connect(&url, app).await
 }
 
 #[tauri::command]
@@ -44,6 +44,7 @@ pub async fn doctor_bridge_disconnect(
 pub async fn doctor_start_diagnosis(
     client: State<'_, NodeClient>,
     context: String,
+    session_key: String,
 ) -> Result<(), String> {
     let idempotency_key = uuid::Uuid::new_v4().to_string();
 
@@ -52,7 +53,7 @@ pub async fn doctor_start_diagnosis(
         "message": context,
         "idempotencyKey": idempotency_key,
         "agentId": "main",
-        "sessionKey": "agent:main:clawpal-doctor",
+        "sessionKey": session_key,
     })).await
 }
 
@@ -60,6 +61,7 @@ pub async fn doctor_start_diagnosis(
 pub async fn doctor_send_message(
     client: State<'_, NodeClient>,
     message: String,
+    session_key: String,
 ) -> Result<(), String> {
     let idempotency_key = uuid::Uuid::new_v4().to_string();
 
@@ -68,43 +70,75 @@ pub async fn doctor_send_message(
         "message": message,
         "idempotencyKey": idempotency_key,
         "agentId": "main",
-        "sessionKey": "agent:main:clawpal-doctor",
+        "sessionKey": session_key,
     })).await
 }
 
 #[tauri::command]
 pub async fn doctor_approve_invoke(
-    client: State<'_, NodeClient>,
     bridge: State<'_, BridgeClient>,
     pool: State<'_, SshConnectionPool>,
     app: AppHandle,
     invoke_id: String,
     target: String,
 ) -> Result<Value, String> {
-    // Try bridge first (invokes come from bridge in dual-connection mode)
-    // Fall back to operator client (for operator-only mode)
-    let invoke = match bridge.take_invoke(&invoke_id).await {
-        Some(inv) => inv,
-        None => client.take_invoke(&invoke_id).await
-            .ok_or_else(|| format!("No pending invoke with id: {invoke_id}"))?,
-    };
+    // Invokes come from the node connection (BridgeClient)
+    let invoke = bridge.take_invoke(&invoke_id).await
+        .ok_or_else(|| format!("No pending invoke with id: {invoke_id}"))?;
 
     let command = invoke.get("command").and_then(|v| v.as_str()).unwrap_or("");
     let args = invoke.get("args").cloned().unwrap_or(Value::Null);
+    // Use the gateway-assigned nodeId from the invoke request (not our hostname).
+    // Mismatch here causes the gateway to ignore the result → agent sees "timeout".
+    let node_id = invoke.get("nodeId").and_then(|v| v.as_str()).unwrap_or("").to_string();
 
-    // Route to local or remote execution
-    let result = if target == "local" {
-        execute_local_command(command, &args).await?
-    } else {
-        execute_remote_command(&pool, &target, command, &args).await?
+    // Map standard node commands to internal execution.
+    // Security: commands reach here only after user approval in the UI
+    // (write → "Execute" button, read → "Allow" button).
+    // User approval is the security boundary, not command validation.
+    let result = match command {
+        "system.run" => {
+            // Gateway sends command as string or array ["/bin/sh", "-lc", "actual cmd"]
+            let shell_cmd = extract_shell_command(&args);
+            if shell_cmd.is_empty() {
+                return Err("system.run: missing 'command' argument".into());
+            }
+            // Execute directly — user already approved this command.
+            // Include executedOn metadata so the agent knows WHERE the command ran
+            // (prevents it from claiming "command ran locally" on remote targets).
+            if target == "local" {
+                let mut v = run_command_local(&shell_cmd).await?;
+                v["executedOn"] = json!("local");
+                v
+            } else {
+                // If SSH fails, return the error as a command result so the agent
+                // knows what went wrong instead of getting no response and guessing.
+                match run_command_remote(&pool, &target, &shell_cmd).await {
+                    Ok(mut v) => {
+                        v["executedOn"] = json!(format!("{target} (remote)"));
+                        v
+                    }
+                    Err(e) => json!({
+                        "stdout": "",
+                        "stderr": format!("Remote execution failed on '{target}': {e}. Ask the user to reconnect in the Instance tab."),
+                        "exitCode": 255,
+                        "executedOn": format!("{target} (connection lost)"),
+                    }),
+                }
+            }
+        }
+        // Fallback: pass through to internal handlers (for legacy/custom commands)
+        _ => {
+            if target == "local" {
+                execute_local_command(command, &args).await?
+            } else {
+                execute_remote_command(&pool, &target, command, &args).await?
+            }
+        }
     };
 
-    // Send result back via bridge if connected, otherwise via operator
-    if bridge.is_connected().await {
-        bridge.send_invoke_result(&invoke_id, result.clone()).await?;
-    } else {
-        client.send_response(&invoke_id, result.clone()).await?;
-    }
+    // Send result back to the gateway via the node connection
+    bridge.send_invoke_result(&invoke_id, &node_id, result.clone()).await?;
 
     let _ = app.emit("doctor:invoke-result", json!({
         "id": invoke_id,
@@ -116,23 +150,15 @@ pub async fn doctor_approve_invoke(
 
 #[tauri::command]
 pub async fn doctor_reject_invoke(
-    client: State<'_, NodeClient>,
     bridge: State<'_, BridgeClient>,
     invoke_id: String,
     reason: String,
 ) -> Result<(), String> {
-    // Remove from whichever client holds it
-    let _invoke = match bridge.take_invoke(&invoke_id).await {
-        Some(inv) => inv,
-        None => client.take_invoke(&invoke_id).await
-            .ok_or_else(|| format!("No pending invoke with id: {invoke_id}"))?,
-    };
+    let invoke = bridge.take_invoke(&invoke_id).await
+        .ok_or_else(|| format!("No pending invoke with id: {invoke_id}"))?;
+    let node_id = invoke.get("nodeId").and_then(|v| v.as_str()).unwrap_or("");
 
-    if bridge.is_connected().await {
-        bridge.send_invoke_error(&invoke_id, "REJECTED", &format!("Rejected by user: {reason}")).await
-    } else {
-        client.send_error_response(&invoke_id, &format!("Rejected by user: {reason}")).await
-    }
+    bridge.send_invoke_error(&invoke_id, node_id, "REJECTED", &format!("Rejected by user: {reason}")).await
 }
 
 #[tauri::command]
@@ -152,6 +178,15 @@ pub async fn collect_doctor_context() -> Result<String, String> {
     let error_log = crate::logging::read_log_tail("error.log", 100)
         .unwrap_or_default();
 
+    // Check if gateway process is running
+    let gateway_running = std::process::Command::new("pgrep")
+        .args(["-f", "openclaw-gateway"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+
     let context = json!({
         "openclawVersion": version.trim(),
         "configPath": paths.config_path.to_string_lossy(),
@@ -165,6 +200,7 @@ pub async fn collect_doctor_context() -> Result<String, String> {
                 "message": i.message,
             })).collect::<Vec<_>>(),
         },
+        "gatewayProcessRunning": gateway_running,
         "errorLog": error_log,
         "platform": std::env::consts::OS,
         "arch": std::env::consts::ARCH,
@@ -182,24 +218,29 @@ pub async fn collect_doctor_context_remote(
     let version_result = pool.exec_login(&host_id, "openclaw --version 2>/dev/null || echo unknown").await?;
     let version = version_result.stdout.trim().to_string();
 
-    // Collect config path and content
-    let config_path_result = pool.exec_login(&host_id, "openclaw config-path 2>/dev/null || echo ~/.config/openclaw/openclaw.json").await?;
+    // Resolve config path: check OPENCLAW_STATE_DIR / OPENCLAW_HOME, fallback to ~/.openclaw
+    let config_path_result = pool.exec_login(&host_id,
+        "echo \"${OPENCLAW_STATE_DIR:-${OPENCLAW_HOME:-$HOME/.openclaw}}/openclaw.json\""
+    ).await?;
     let config_path = config_path_result.stdout.trim().to_string();
     validate_not_sensitive(&config_path)?;
     let config_content = pool.sftp_read(&host_id, &config_path).await
         .unwrap_or_else(|_| "(unable to read remote config)".into());
 
-    // Run doctor on remote
-    let doctor_result = pool.exec_login(&host_id, "openclaw doctor --json 2>/dev/null").await?;
-    let doctor_report: Value = serde_json::from_str(&doctor_result.stdout)
-        .unwrap_or_else(|_| json!({
-            "ok": false,
-            "error": "Failed to parse doctor output",
-            "raw": doctor_result.stdout.trim(),
-        }));
+    // Use `openclaw gateway status` — always returns useful text even when gateway is stopped.
+    // `openclaw health --json` requires a running gateway + auth token and returns empty otherwise.
+    let status_result = pool.exec_login(&host_id, "openclaw gateway status 2>&1").await?;
+    let gateway_status = status_result.stdout.trim().to_string();
 
-    // Collect recent error log
-    let error_log_result = pool.exec(&host_id, "tail -100 ~/.config/openclaw/error.log 2>/dev/null || echo ''").await?;
+    // Check if gateway process is running (reliable even when health RPC fails)
+    // Bracket trick: [o]penclaw-gateway prevents pgrep from matching its own sh -c process
+    let pgrep_result = pool.exec(&host_id, "pgrep -f '[o]penclaw-gateway' >/dev/null 2>&1").await;
+    let gateway_running = matches!(pgrep_result, Ok(r) if r.exit_code == 0);
+
+    // Collect recent error log (logs live under $OPENCLAW_STATE_DIR/logs/)
+    let error_log_result = pool.exec_login(&host_id,
+        "tail -100 \"${OPENCLAW_STATE_DIR:-${OPENCLAW_HOME:-$HOME/.openclaw}}/logs/gateway.err.log\" 2>/dev/null || echo ''"
+    ).await?;
     let error_log = error_log_result.stdout;
 
     // System info
@@ -210,7 +251,8 @@ pub async fn collect_doctor_context_remote(
         "openclawVersion": version,
         "configPath": config_path,
         "configContent": config_content,
-        "doctorReport": doctor_report,
+        "gatewayStatus": gateway_status,
+        "gatewayProcessRunning": gateway_running,
         "errorLog": error_log,
         "platform": platform_result.stdout.trim().to_lowercase(),
         "arch": arch_result.stdout.trim(),
@@ -385,6 +427,40 @@ fn truncate_output(s: &[u8]) -> String {
     }
 }
 
+/// Run a shell command locally (user-approved, no validate_command).
+async fn run_command_local(cmd: &str) -> Result<Value, String> {
+    let child = tokio::process::Command::new("sh")
+        .arg("-c")
+        .arg(cmd)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|e| format!("Failed to spawn command: {e}"))?;
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(COMMAND_TIMEOUT_SECS),
+        child.wait_with_output(),
+    )
+    .await
+    .map_err(|_| format!("Command timed out after {COMMAND_TIMEOUT_SECS}s"))?
+    .map_err(|e| format!("Failed to run command: {e}"))?;
+    Ok(json!({
+        "stdout": truncate_output(&output.stdout),
+        "stderr": truncate_output(&output.stderr),
+        "exitCode": output.status.code().unwrap_or(1),
+    }))
+}
+
+/// Run a shell command on a remote host via SSH (user-approved, no validate_command).
+async fn run_command_remote(pool: &SshConnectionPool, host_id: &str, cmd: &str) -> Result<Value, String> {
+    let result = pool.exec(host_id, cmd).await?;
+    Ok(json!({
+        "stdout": truncate_output(result.stdout.as_bytes()),
+        "stderr": truncate_output(result.stderr.as_bytes()),
+        "exitCode": result.exit_code,
+    }))
+}
+
 /// Execute a command locally on behalf of the doctor agent.
 async fn execute_local_command(command: &str, args: &Value) -> Result<Value, String> {
     match command {
@@ -522,7 +598,9 @@ async fn execute_remote_command(
             })).collect::<Vec<_>>()}))
         }
         "read_config" => {
-            let result = pool.exec_login(host_id, "openclaw config-path 2>/dev/null || echo ~/.config/openclaw/openclaw.json").await?;
+            let result = pool.exec_login(host_id,
+                "echo \"${OPENCLAW_STATE_DIR:-${OPENCLAW_HOME:-$HOME/.openclaw}}/openclaw.json\""
+            ).await?;
             let config_path = result.stdout.trim().to_string();
             validate_not_sensitive(&config_path)?;
             let content = pool.sftp_read(host_id, &config_path).await
@@ -543,11 +621,11 @@ async fn execute_remote_command(
             }))
         }
         "validate_config" => {
-            let result = pool.exec_login(host_id, "openclaw doctor --json 2>/dev/null").await?;
+            let result = pool.exec_login(host_id, "openclaw health --json 2>/dev/null").await?;
             if result.exit_code != 0 {
                 return Ok(json!({
                     "ok": false,
-                    "error": format!("openclaw doctor failed: {}", result.stderr.trim()),
+                    "error": format!("openclaw health failed: {}", result.stderr.trim()),
                     "raw": result.stdout,
                 }));
             }

@@ -4,6 +4,7 @@
   "nav.channels": "Channels",
   "nav.history": "History",
   "nav.doctor": "Doctor",
+  "nav.sessions": "Sessions",
   "nav.settings": "Settings",
   "nav.website": "Website",
   "nav.chat": "Chat",
@@ -112,6 +113,7 @@
 
   "doctor.title": "Doctor",
   "doctor.healthScore": "Health score: {{score}}",
+  "doctor.healthSummary": "Health: {{score}}",
   "doctor.fix": "fix",
   "doctor.fixAll": "Fix all auto issues",
   "doctor.refresh": "Refresh",

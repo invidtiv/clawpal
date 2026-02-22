@@ -26,18 +26,17 @@ struct NodeClientInner {
     challenge_nonce: Option<String>,
 }
 
+/// WebSocket operator client — connects to the gateway with `role: "operator"`.
+/// Used for sending agent requests and receiving chat streaming events.
+/// Tool invocations are handled by BridgeClient (node connection).
 pub struct NodeClient {
     inner: Arc<Mutex<Option<NodeClientInner>>>,
-    /// Pending invoke requests from the gateway, keyed by request ID.
-    /// Value is the full invoke payload (command, args, type).
-    pending_invokes: Arc<Mutex<HashMap<String, Value>>>,
 }
 
 impl NodeClient {
     pub fn new() -> Self {
         Self {
             inner: Arc::new(Mutex::new(None)),
-            pending_invokes: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -65,7 +64,6 @@ impl NodeClient {
 
         // Spawn reader task
         let inner_ref = Arc::clone(&self.inner);
-        let invokes_ref = Arc::clone(&self.pending_invokes);
         let app_clone = app.clone();
 
         tokio::spawn(async move {
@@ -76,7 +74,6 @@ impl NodeClient {
                             Self::handle_frame(
                                 frame,
                                 &inner_ref,
-                                &invokes_ref,
                                 &app_clone,
                             )
                             .await;
@@ -112,8 +109,6 @@ impl NodeClient {
         if let Some(mut inner) = guard.take() {
             let _ = inner.tx.close().await;
         }
-        // Clear pending invokes
-        self.pending_invokes.lock().await.clear();
         Ok(())
     }
 
@@ -207,52 +202,6 @@ impl NodeClient {
         Ok(())
     }
 
-    pub async fn send_response(&self, req_id: &str, result: Value) -> Result<(), String> {
-        let mut guard = self.inner.lock().await;
-        let inner = guard.as_mut().ok_or("Not connected")?;
-
-        let frame = json!({
-            "type": "res",
-            "id": req_id,
-            "ok": true,
-            "payload": result,
-        });
-
-        inner
-            .tx
-            .send(Message::Text(frame.to_string()))
-            .await
-            .map_err(|e| format!("Failed to send response: {e}"))?;
-
-        Ok(())
-    }
-
-    pub async fn send_error_response(&self, req_id: &str, error: &str) -> Result<(), String> {
-        let mut guard = self.inner.lock().await;
-        let inner = guard.as_mut().ok_or("Not connected")?;
-
-        let frame = json!({
-            "type": "res",
-            "id": req_id,
-            "ok": false,
-            "error": { "message": error },
-        });
-
-        inner
-            .tx
-            .send(Message::Text(frame.to_string()))
-            .await
-            .map_err(|e| format!("Failed to send error response: {e}"))?;
-
-        Ok(())
-    }
-
-    const MAX_PENDING_INVOKES: usize = 50;
-
-    pub async fn take_invoke(&self, id: &str) -> Option<Value> {
-        self.pending_invokes.lock().await.remove(id)
-    }
-
     async fn do_handshake(&self, _app: &AppHandle) -> Result<(), String> {
         let paths = resolve_paths();
 
@@ -273,32 +222,12 @@ impl NodeClient {
         let (device_id, signing_key, public_key_b64) =
             load_device_identity(&paths.openclaw_dir)?;
 
-        // Load device-auth token and scopes
-        let auth_path = paths.openclaw_dir.join("identity").join("device-auth.json");
-        let auth_json: Value = std::fs::read_to_string(&auth_path)
-            .map_err(|e| format!("Failed to read device-auth.json: {e}"))?
-            .parse()
-            .map_err(|e| format!("Failed to parse device-auth.json: {e}"))?;
-
-        let operator_token = auth_json
-            .get("tokens")
-            .and_then(|t| t.get("operator"))
-            .and_then(|o| o.get("token"))
-            .and_then(|t| t.as_str())
-            .ok_or("Missing operator token in device-auth.json")?
-            .to_string();
-
-        let scopes: Vec<String> = auth_json
-            .get("tokens")
-            .and_then(|t| t.get("operator"))
-            .and_then(|o| o.get("scopes"))
-            .and_then(|s| s.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                    .collect()
-            })
-            .unwrap_or_else(|| vec!["operator.admin".into(), "operator.write".into()]);
+        // Scopes for operator role
+        let scopes: Vec<String> = vec![
+            "operator.admin".into(),
+            "operator.read".into(),
+            "operator.write".into(),
+        ];
 
         // Wait for challenge nonce from the reader task (poll every 100ms, up to 3s)
         let mut nonce = None;
@@ -327,11 +256,21 @@ impl NodeClient {
             &device_id,
             &scopes,
             signed_at,
-            &operator_token,
+            &token,  // gateway auth token, same as connect.params.auth.token
             &nonce,
         );
 
         let version = env!("CARGO_PKG_VERSION");
+
+        let mut device = json!({
+            "id": device_id,
+            "publicKey": public_key_b64,
+            "signature": signature_b64,
+            "signedAt": signed_at,
+        });
+        if !nonce.is_empty() {
+            device["nonce"] = json!(nonce);
+        }
 
         let _result = self.send_request("connect", json!({
             "minProtocol": 3,
@@ -339,15 +278,10 @@ impl NodeClient {
             "auth": { "token": token },
             "role": "operator",
             "scopes": scopes,
-            "device": {
-                "id": device_id,
-                "publicKey": public_key_b64,
-                "signature": signature_b64,
-                "signedAt": signed_at,
-                "nonce": nonce,
-            },
+            "device": device,
             "client": {
-                "id": "clawpal",
+                "id": "cli",
+                "displayName": "ClawPal",
                 "platform": std::env::consts::OS,
                 "mode": "cli",
                 "version": version,
@@ -360,7 +294,6 @@ impl NodeClient {
     async fn handle_frame(
         frame: Value,
         inner_ref: &Arc<Mutex<Option<NodeClientInner>>>,
-        invokes_ref: &Arc<Mutex<HashMap<String, Value>>>,
         app: &AppHandle,
     ) {
         let frame_type = frame.get("type").and_then(|v| v.as_str()).unwrap_or("");
@@ -409,43 +342,8 @@ impl NodeClient {
                 }
             }
             "req" => {
-                // Request from gateway (e.g. node.invoke)
-                let method = frame.get("method").and_then(|v| v.as_str()).unwrap_or("");
-                let id = frame.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                let params = frame.get("params").cloned().unwrap_or(Value::Null);
-
-                if method == "node.invoke" {
-                    let command = params.get("command").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                    let args = params.get("args").cloned().unwrap_or(Value::Null);
-
-                    // Determine type from command name
-                    let cmd_type = match command.as_str() {
-                        "read_file" | "list_files" | "read_config" | "system_info" | "validate_config" => "read",
-                        _ => "write",
-                    };
-
-                    let invoke_payload = json!({
-                        "id": id,
-                        "command": command,
-                        "args": args,
-                        "type": cmd_type,
-                    });
-
-                    // Store for later approval/rejection (bounded to MAX_PENDING_INVOKES)
-                    {
-                        let mut map = invokes_ref.lock().await;
-                        if map.len() >= Self::MAX_PENDING_INVOKES {
-                            // Evict arbitrary entries to make room (likely stale)
-                            let keys: Vec<String> = map.keys().take(10).cloned().collect();
-                            for k in keys {
-                                map.remove(&k);
-                            }
-                        }
-                        map.insert(id.clone(), invoke_payload.clone());
-                    }
-
-                    let _ = app.emit("doctor:invoke", invoke_payload);
-                }
+                // Operator connection does not receive requests from the gateway.
+                // Tool invocations go to the node connection (BridgeClient).
             }
             _ => {}
         }
@@ -479,13 +377,13 @@ fn load_device_identity(
 
     // Extract raw 32-byte public key from the signing key and base64-encode it
     let raw_public = signing_key.verifying_key().to_bytes();
-    let public_key_b64 = base64::engine::general_purpose::STANDARD.encode(raw_public);
+    let public_key_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(raw_public);
 
     Ok((device_id, signing_key, public_key_b64))
 }
 
 /// Sign the challenge payload using Ed25519.
-/// Payload: `v2|<deviceId>|clawpal|cli|operator|<scopes>|<signedAt>|<token>|<nonce>`
+/// Payload: `v2|<deviceId>|cli|cli|operator|<scopes>|<signedAt>|<token>|<nonce>`
 fn sign_challenge(
     signing_key: &SigningKey,
     device_id: &str,
@@ -496,10 +394,10 @@ fn sign_challenge(
 ) -> String {
     let scopes_str = scopes.join(",");
     let payload = format!(
-        "v2|{device_id}|clawpal|cli|operator|{scopes_str}|{signed_at}|{operator_token}|{nonce}"
+        "v2|{device_id}|cli|cli|operator|{scopes_str}|{signed_at}|{operator_token}|{nonce}"
     );
     let signature = signing_key.sign(payload.as_bytes());
-    base64::engine::general_purpose::STANDARD.encode(signature.to_bytes())
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(signature.to_bytes())
 }
 
 impl Default for NodeClient {
