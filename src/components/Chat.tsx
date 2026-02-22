@@ -18,7 +18,6 @@ interface Message {
   content: string;
 }
 
-const AGENT_ID = "main";
 const SESSION_KEY_PREFIX = "clawpal_chat_session_";
 
 function loadSessionId(instanceId: string, agent: string): string | undefined {
@@ -46,28 +45,31 @@ export function Chat() {
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [agents, setAgents] = useState<string[]>([]);
-  const [agentId, setAgentId] = useState(AGENT_ID);
+  const [agentId, setAgentId] = useState("");
   const [sessionId, setSessionId] = useState<string | undefined>(undefined);
   const bottomRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     setMessages([]);
-    setAgentId(AGENT_ID);
-    setSessionId(loadSessionId(ua.instanceId, AGENT_ID));
-  }, [ua.instanceId]);
-
-  useEffect(() => {
+    setAgentId("");
+    setSessionId(undefined);
     ua.listAgents()
-      .then((agents) => setAgents(agents.map((a) => a.id)))
+      .then((list) => {
+        const ids = list.map((a) => a.id);
+        setAgents(ids);
+        const first = ids[0] || "";
+        setAgentId(first);
+        if (first) setSessionId(loadSessionId(ua.instanceId, first));
+      })
       .catch((e) => console.error("Failed to load agent IDs:", e));
-  }, [ua]);
+  }, [ua.instanceId, ua]);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, loading]);
 
   const send = useCallback(async () => {
-    if (!input.trim() || loading) return;
+    if (!input.trim() || loading || !agentId) return;
     if (ua.isRemote && !ua.isConnected) return;
 
     const userMsg: Message = { role: "user", content: input.trim() };
@@ -121,6 +123,9 @@ export function Chat() {
         </Button>
       </div>
       <ScrollArea className="flex-1 mb-2 overflow-hidden">
+        {agents.length === 0 && (
+          <div className="text-sm text-muted-foreground p-4 text-center">{t('chat.noAgents')}</div>
+        )}
         {messages.map((msg, i) => (
           <div key={i} className={cn("mb-2", msg.role === "user" ? "text-right" : "text-left")}>
             <div className={cn(
@@ -144,7 +149,7 @@ export function Chat() {
         />
         <Button
           onClick={send}
-          disabled={loading}
+          disabled={loading || !agentId}
         >
           {t('chat.send')}
         </Button>
