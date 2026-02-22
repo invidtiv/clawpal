@@ -26,13 +26,14 @@ pub async fn doctor_start_diagnosis(
     client: State<'_, NodeClient>,
     context: String,
 ) -> Result<(), String> {
-    let context_value: Value = serde_json::from_str(&context)
-        .unwrap_or_else(|_| Value::String(context.clone()));
+    let idempotency_key = uuid::Uuid::new_v4().to_string();
 
     // Fire-and-forget: results arrive via streaming chat events
     client.send_request_fire("agent", json!({
-        "action": "diagnose",
-        "context": context_value,
+        "message": context,
+        "idempotencyKey": idempotency_key,
+        "agentId": "main",
+        "sessionKey": "agent:main:clawpal-doctor",
     })).await
 }
 
@@ -41,10 +42,14 @@ pub async fn doctor_send_message(
     client: State<'_, NodeClient>,
     message: String,
 ) -> Result<(), String> {
+    let idempotency_key = uuid::Uuid::new_v4().to_string();
+
     // Fire-and-forget: results arrive via streaming chat events
     client.send_request_fire("agent", json!({
-        "action": "message",
-        "text": message,
+        "message": message,
+        "idempotencyKey": idempotency_key,
+        "agentId": "main",
+        "sessionKey": "agent:main:clawpal-doctor",
     })).await
 }
 

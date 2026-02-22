@@ -390,8 +390,15 @@ impl NodeClient {
                         }
                     }
                     "chat" => {
-                        let is_final = payload.get("final").and_then(|v| v.as_bool()).unwrap_or(false);
-                        let text = payload.get("text").and_then(|v| v.as_str()).unwrap_or("");
+                        let state = payload.get("state").and_then(|v| v.as_str()).unwrap_or("");
+                        let is_final = state == "final";
+                        let text = payload.get("message")
+                            .and_then(|m| m.get("content"))
+                            .and_then(|c| c.as_array())
+                            .and_then(|arr| arr.first())
+                            .and_then(|item| item.get("text"))
+                            .and_then(|t| t.as_str())
+                            .unwrap_or("");
                         if is_final {
                             let _ = app.emit("doctor:chat-final", json!({"text": text}));
                         } else {
