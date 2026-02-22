@@ -236,14 +236,8 @@ export function Doctor() {
 
           {!doctor.connected ? (
             <>
-              {/* Target display */}
-              <div className="flex items-center gap-2 mb-3 text-sm">
-                <span className="text-muted-foreground">{t("doctor.target")}:</span>
-                <span className="font-medium">
-                  {doctor.target === "local" ? t("doctor.localMachine") : doctor.target}
-                </span>
-              </div>
               {/* Source radio */}
+              <div className="text-sm text-muted-foreground mb-2">{t("doctor.agentSourceHint")}</div>
               <div className="flex items-center gap-4 mb-4">
                 <label className="flex items-center gap-1.5 text-sm cursor-pointer">
                   <input
