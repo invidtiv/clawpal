@@ -410,3 +410,93 @@ async fn execute_local_command(command: &str, args: &Value) -> Result<Value, Str
         _ => Err(format!("Unknown command: {command}")),
     }
 }
+
+/// Execute a command on a remote SSH host on behalf of the doctor agent.
+async fn execute_remote_command(
+    pool: &SshConnectionPool,
+    host_id: &str,
+    command: &str,
+    args: &Value,
+) -> Result<Value, String> {
+    match command {
+        "read_file" => {
+            let path = args.get("path").and_then(|v| v.as_str())
+                .ok_or("read_file: missing 'path' argument")?;
+            validate_not_sensitive(path)?;
+            let content = pool.sftp_read(host_id, path).await?;
+            Ok(json!({"content": content}))
+        }
+        "list_files" => {
+            let path = args.get("path").and_then(|v| v.as_str())
+                .ok_or("list_files: missing 'path' argument")?;
+            validate_not_sensitive(path)?;
+            let entries = pool.sftp_list(host_id, path).await?;
+            Ok(json!({"entries": entries.iter().map(|e| json!({
+                "name": e.name,
+                "isDir": e.is_dir,
+                "size": e.size,
+            })).collect::<Vec<_>>()}))
+        }
+        "read_config" => {
+            let result = pool.exec_login(host_id, "openclaw config-path 2>/dev/null || echo ~/.config/openclaw/openclaw.json").await?;
+            let config_path = result.stdout.trim().to_string();
+            validate_not_sensitive(&config_path)?;
+            let content = pool.sftp_read(host_id, &config_path).await
+                .unwrap_or_else(|_| "(unable to read remote config)".into());
+            Ok(json!({"content": content, "path": config_path}))
+        }
+        "system_info" => {
+            let version_result = pool.exec_login(host_id, "openclaw --version 2>/dev/null || echo unknown").await?;
+            let platform_result = pool.exec(host_id, "uname -s").await?;
+            let arch_result = pool.exec(host_id, "uname -m").await?;
+            let hostname_result = pool.exec(host_id, "hostname").await?;
+            Ok(json!({
+                "platform": platform_result.stdout.trim().to_lowercase(),
+                "arch": arch_result.stdout.trim(),
+                "openclawVersion": version_result.stdout.trim(),
+                "hostname": hostname_result.stdout.trim(),
+                "remote": true,
+            }))
+        }
+        "validate_config" => {
+            let result = pool.exec_login(host_id, "openclaw doctor --json 2>/dev/null").await?;
+            if result.exit_code != 0 {
+                return Ok(json!({
+                    "ok": false,
+                    "error": format!("openclaw doctor failed: {}", result.stderr.trim()),
+                    "raw": result.stdout,
+                }));
+            }
+            let parsed: Value = serde_json::from_str(&result.stdout)
+                .unwrap_or_else(|_| json!({"raw": result.stdout.trim()}));
+            Ok(parsed)
+        }
+        "write_file" => {
+            let path = args.get("path").and_then(|v| v.as_str())
+                .ok_or("write_file: missing 'path' argument")?;
+            let content = args.get("content").and_then(|v| v.as_str())
+                .ok_or("write_file: missing 'content' argument")?;
+            validate_not_sensitive(path)?;
+            // Check for symlink on remote before writing
+            let resolved = pool.resolve_path(host_id, path).await?;
+            let stat_result = pool.exec(host_id, &format!("test -L '{}' && echo SYMLINK || echo OK", resolved.replace('\'', "'\\''"))).await?;
+            if stat_result.stdout.trim() == "SYMLINK" {
+                return Err(format!("write_file: refusing to write through symlink at {path}"));
+            }
+            pool.sftp_write(host_id, path, content).await?;
+            Ok(json!({"ok": true}))
+        }
+        "run_command" => {
+            let cmd = args.get("command").and_then(|v| v.as_str())
+                .ok_or("run_command: missing 'command' argument")?;
+            validate_command(cmd)?;
+            let result = pool.exec(host_id, cmd).await?;
+            Ok(json!({
+                "stdout": truncate_output(result.stdout.as_bytes()),
+                "stderr": truncate_output(result.stderr.as_bytes()),
+                "exitCode": result.exit_code,
+            }))
+        }
+        _ => Err(format!("Unknown command: {command}")),
+    }
+}
