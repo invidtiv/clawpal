@@ -27,7 +27,7 @@ export const api = {
   upsertModelProfile: (profile: ModelProfile): Promise<ModelProfile> =>
     invoke("upsert_model_profile", { profile }),
   deleteModelProfile: (profileId: string): Promise<boolean> =>
-    invoke("delete_model_profile", { profile_id: profileId }),
+    invoke("delete_model_profile", { profileId }),
   resolveProviderAuth: (provider: string): Promise<ProviderAuthSuggestion> =>
     invoke("resolve_provider_auth", { provider }),
   resolveApiKeys: (): Promise<ResolvedApiKey[]> =>

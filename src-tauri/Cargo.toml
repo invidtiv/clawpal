@@ -26,7 +26,7 @@ tauri-plugin-process = "2"
 fix-path-env = { git = "https://github.com/tauri-apps/fix-path-env-rs" }
 
 [target.'cfg(unix)'.dependencies]
-openssh = { version = "0.11", features = ["native-mux"] }
+openssh = { version = "0.11", features = ["process-mux"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }

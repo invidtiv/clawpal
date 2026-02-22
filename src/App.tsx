@@ -87,11 +87,9 @@ export function App() {
   const showToast = useCallback((message: string, type: "success" | "error" = "success") => {
     const id = ++toastIdCounter;
     setToasts((prev) => [...prev, { id, message, type }]);
-    if (type !== "error") {
-      setTimeout(() => {
-        setToasts((prev) => prev.filter((t) => t.id !== id));
-      }, 3000);
-    }
+    setTimeout(() => {
+      setToasts((prev) => prev.filter((t) => t.id !== id));
+    }, type === "error" ? 5000 : 3000);
   }, []);
 
   const dismissToast = useCallback((id: number) => {
