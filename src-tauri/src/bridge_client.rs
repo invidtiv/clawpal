@@ -146,11 +146,8 @@ impl BridgeClient {
             }).collect()
         };
         for (id, nid) in &stale_invokes {
-            eprintln!("[bridge] rejecting stale invoke: {id}");
             let _ = self.send_invoke_error(id, nid, "STALE", "Node reconnected, rejecting stale invoke").await;
         }
-
-        eprintln!("[bridge] connected as node, id={node_id}");
         let _ = app.emit("doctor:bridge-connected", json!({}));
         Ok(())
     }
@@ -171,7 +168,6 @@ impl BridgeClient {
     /// Send a successful invoke result back to the gateway via `node.invoke.result`.
     /// `node_id` should be the gateway-assigned nodeId from the original invoke request.
     pub async fn send_invoke_result(&self, invoke_id: &str, node_id: &str, result: Value) -> Result<(), String> {
-        eprintln!("[bridge] sending invoke result: id={invoke_id}, nodeId={node_id}, ok=true");
         self.send_request_fire("node.invoke.result", json!({
             "id": invoke_id,
             "nodeId": node_id,
@@ -189,7 +185,6 @@ impl BridgeClient {
         code: &str,
         message: &str,
     ) -> Result<(), String> {
-        eprintln!("[bridge] sending invoke error: id={invoke_id}, nodeId={node_id}, code={code}");
         self.send_request_fire("node.invoke.result", json!({
             "id": invoke_id,
             "nodeId": node_id,
@@ -421,7 +416,6 @@ impl BridgeClient {
                         }
                     }
                     "node.invoke.request" => {
-                        eprintln!("[bridge] invoke request payload: {payload}");
                         // Agent wants to invoke a command on this node
                         let id = payload.get("id")
                             .and_then(|v| v.as_str())

@@ -201,8 +201,6 @@ impl NodeClient {
         inner.req_counter += 1;
         let id = format!("c{}", inner.req_counter);
 
-        eprintln!("[operator] fire request: method={method}, id={id}");
-
         let frame = json!({
             "type": "req",
             "id": id,
@@ -315,7 +313,6 @@ impl NodeClient {
             },
         })).await?;
 
-        eprintln!("[operator] connected, handshake ok");
         let _ = result;
         Ok(())
     }
@@ -331,20 +328,6 @@ impl NodeClient {
             "res" => {
                 // Response to a request we sent
                 if let Some(id) = frame.get("id").and_then(|v| v.as_str()) {
-                    let ok = frame.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
-                    let has_pending = {
-                        let guard = inner_ref.lock().await;
-                        guard.as_ref().map_or(false, |i| i.pending.contains_key(id))
-                    };
-                    if !has_pending {
-                        // Response to fire-and-forget request — log it
-                        if !ok {
-                            let err = frame.get("error").cloned().unwrap_or(Value::Null);
-                            eprintln!("[operator] fire-and-forget res FAILED: id={id}, error={err}");
-                        } else {
-                            eprintln!("[operator] fire-and-forget res OK: id={id}");
-                        }
-                    }
                     let mut guard = inner_ref.lock().await;
                     if let Some(inner) = guard.as_mut() {
                         if let Some(sender) = inner.pending.remove(id) {
@@ -356,7 +339,6 @@ impl NodeClient {
             "event" => {
                 let event_name = frame.get("event").and_then(|v| v.as_str()).unwrap_or("");
                 let payload = frame.get("payload").cloned().unwrap_or(Value::Null);
-                eprintln!("[operator] event: {event_name}");
                 match event_name {
                     "connect.challenge" => {
                         if let Some(nonce) = payload.get("nonce").and_then(|v| v.as_str()) {
