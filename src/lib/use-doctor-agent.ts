@@ -148,7 +148,13 @@ export function useDoctorAgent() {
       await api.doctorBridgeConnect(bridgeAddr);
 
       // Then connect operator (for agent method)
-      await api.doctorConnect(url);
+      try {
+        await api.doctorConnect(url);
+      } catch (err) {
+        // Clean up bridge if operator connect fails
+        try { await api.doctorBridgeDisconnect(); } catch {}
+        throw err;
+      }
     } catch (err) {
       const msg = `Connection failed: ${err}`;
       setError(msg);

@@ -346,16 +346,23 @@ impl BridgeClient {
                 let token = frame
                     .get("token")
                     .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string());
 
-                // Signal the handshake task that pairing succeeded
-                if let Some(tx) = pair_ok_tx.lock().await.take() {
-                    let _ = tx.send(token);
+                match token {
+                    Some(t) => {
+                        if let Some(tx) = pair_ok_tx.lock().await.take() {
+                            let _ = tx.send(t);
+                        }
+                    }
+                    None => {
+                        let _ = app.emit("doctor:error", json!({"message": "pair-ok received without token"}));
+                    }
                 }
             }
             "hello-ok" => {
-                // Signal the handshake task that hello succeeded
+                // Signal the handshake task that hello succeeded.
+                // do_handshake emits doctor:bridge-connected after receiving this signal.
                 if let Some(tx) = hello_ok_tx.lock().await.take() {
                     let _ = tx.send(frame.clone());
                 }
@@ -457,4 +464,9 @@ fn save_token(token: &str) {
     }
     let data = json!({"token": token});
     let _ = std::fs::write(&path, serde_json::to_string_pretty(&data).unwrap_or_default());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    }
 }
