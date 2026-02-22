@@ -17,6 +17,7 @@ use tokio_tungstenite::{
 };
 
 use crate::models::resolve_paths;
+use crate::node_client::GatewayCredentials;
 
 type WsSink = SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>;
 
@@ -47,6 +48,7 @@ struct BridgeClientInner {
 pub struct BridgeClient {
     inner: Arc<Mutex<Option<BridgeClientInner>>>,
     pending_invokes: Arc<Mutex<HashMap<String, Value>>>,
+    credentials: Arc<Mutex<Option<GatewayCredentials>>>,
 }
 
 impl BridgeClient {
@@ -54,13 +56,17 @@ impl BridgeClient {
         Self {
             inner: Arc::new(Mutex::new(None)),
             pending_invokes: Arc::new(Mutex::new(HashMap::new())),
+            credentials: Arc::new(Mutex::new(None)),
         }
     }
 
     /// Connect to the gateway as a node via WebSocket.
     /// Uses the same URL as the operator connection but with `role: "node"`.
-    pub async fn connect(&self, url: &str, app: AppHandle) -> Result<(), String> {
+    pub async fn connect(&self, url: &str, app: AppHandle, creds: Option<GatewayCredentials>) -> Result<(), String> {
         self.disconnect().await?;
+
+        // Store credentials for use in handshake
+        *self.credentials.lock().await = creds;
 
         let (ws_stream, _) = connect_async(url)
             .await
@@ -281,24 +287,33 @@ impl BridgeClient {
 
     /// Perform the connect handshake as a node.
     async fn do_handshake(&self, _app: &AppHandle) -> Result<(), String> {
-        let paths = resolve_paths();
+        let creds = self.credentials.lock().await.clone();
 
-        // Read gateway auth token
-        let token = std::fs::read_to_string(&paths.config_path)
-            .ok()
-            .and_then(|text| serde_json::from_str::<Value>(&text).ok())
-            .and_then(|config| {
-                config.get("gateway")?
-                    .get("auth")?
-                    .get("token")?
-                    .as_str()
-                    .map(|s| s.to_string())
-            })
-            .unwrap_or_default();
-
-        // Load device identity
-        let (device_id, signing_key, public_key_b64) =
-            load_device_identity(&paths.openclaw_dir)?;
+        let (token, device_id, signing_key, public_key_b64) = if let Some(c) = creds {
+            // Use remote gateway credentials (connecting via SSH tunnel)
+            let signing_key = SigningKey::from_pkcs8_pem(&c.private_key_pem)
+                .map_err(|e| format!("Failed to parse remote Ed25519 private key: {e}"))?;
+            let raw_public = signing_key.verifying_key().to_bytes();
+            let public_key_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(raw_public);
+            (c.token, c.device_id, signing_key, public_key_b64)
+        } else {
+            // Use local credentials
+            let paths = resolve_paths();
+            let token = std::fs::read_to_string(&paths.config_path)
+                .ok()
+                .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+                .and_then(|config| {
+                    config.get("gateway")?
+                        .get("auth")?
+                        .get("token")?
+                        .as_str()
+                        .map(|s| s.to_string())
+                })
+                .unwrap_or_default();
+            let (device_id, signing_key, public_key_b64) =
+                load_device_identity(&paths.openclaw_dir)?;
+            (token, device_id, signing_key, public_key_b64)
+        };
 
         // Wait for challenge nonce from the reader task
         let mut nonce = None;

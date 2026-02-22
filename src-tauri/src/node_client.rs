@@ -19,6 +19,17 @@ use tokio_tungstenite::{
 
 type WsSink = SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>;
 
+/// Credentials for authenticating with a remote gateway.
+/// When connecting to a non-local gateway (via SSH tunnel), we need the
+/// remote host's auth token and device identity instead of the local ones.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GatewayCredentials {
+    pub token: String,
+    pub device_id: String,
+    pub private_key_pem: String,
+}
+
 struct NodeClientInner {
     tx: WsSink,
     req_counter: u64,
@@ -31,18 +42,23 @@ struct NodeClientInner {
 /// Tool invocations are handled by BridgeClient (node connection).
 pub struct NodeClient {
     inner: Arc<Mutex<Option<NodeClientInner>>>,
+    credentials: Arc<Mutex<Option<GatewayCredentials>>>,
 }
 
 impl NodeClient {
     pub fn new() -> Self {
         Self {
             inner: Arc::new(Mutex::new(None)),
+            credentials: Arc::new(Mutex::new(None)),
         }
     }
 
-    pub async fn connect(&self, url: &str, app: AppHandle) -> Result<(), String> {
+    pub async fn connect(&self, url: &str, app: AppHandle, creds: Option<GatewayCredentials>) -> Result<(), String> {
         // Disconnect existing connection if any
         self.disconnect().await?;
+
+        // Store credentials for use in handshake
+        *self.credentials.lock().await = creds;
 
         let (ws_stream, _) = connect_async(url)
             .await
@@ -203,24 +219,33 @@ impl NodeClient {
     }
 
     async fn do_handshake(&self, _app: &AppHandle) -> Result<(), String> {
-        let paths = resolve_paths();
+        let creds = self.credentials.lock().await.clone();
 
-        // Read gateway auth token from local openclaw config
-        let token = std::fs::read_to_string(&paths.config_path)
-            .ok()
-            .and_then(|text| serde_json::from_str::<Value>(&text).ok())
-            .and_then(|config| {
-                config.get("gateway")?
-                    .get("auth")?
-                    .get("token")?
-                    .as_str()
-                    .map(|s| s.to_string())
-            })
-            .unwrap_or_default();
-
-        // Load device identity
-        let (device_id, signing_key, public_key_b64) =
-            load_device_identity(&paths.openclaw_dir)?;
+        let (token, device_id, signing_key, public_key_b64) = if let Some(c) = creds {
+            // Use remote gateway credentials (connecting via SSH tunnel)
+            let signing_key = SigningKey::from_pkcs8_pem(&c.private_key_pem)
+                .map_err(|e| format!("Failed to parse remote Ed25519 private key: {e}"))?;
+            let raw_public = signing_key.verifying_key().to_bytes();
+            let public_key_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(raw_public);
+            (c.token, c.device_id, signing_key, public_key_b64)
+        } else {
+            // Use local credentials
+            let paths = resolve_paths();
+            let token = std::fs::read_to_string(&paths.config_path)
+                .ok()
+                .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+                .and_then(|config| {
+                    config.get("gateway")?
+                        .get("auth")?
+                        .get("token")?
+                        .as_str()
+                        .map(|s| s.to_string())
+                })
+                .unwrap_or_default();
+            let (device_id, signing_key, public_key_b64) =
+                load_device_identity(&paths.openclaw_dir)?;
+            (token, device_id, signing_key, public_key_b64)
+        };
 
         // Scopes for operator role
         let scopes: Vec<String> = vec![

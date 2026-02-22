@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import i18n from "../i18n";
 import { api } from "./api";
-import type { DoctorChatMessage, DoctorInvoke } from "./types";
+import type { DoctorChatMessage, DoctorInvoke, GatewayCredentials } from "./types";
 
 let msgCounter = 0;
 function nextMsgId(): string {
@@ -184,15 +184,15 @@ export function useDoctorAgent() {
   }, [target]);
   autoApproveRef.current = autoApprove;
 
-  const connect = useCallback(async (url: string) => {
+  const connect = useCallback(async (url: string, credentials?: GatewayCredentials) => {
     setError(null);
     try {
       // Connect operator first (essential — for agent method + chat events)
-      await api.doctorConnect(url);
+      await api.doctorConnect(url, credentials);
 
       // Then connect as node (same URL, different role — for receiving tool calls)
       try {
-        await api.doctorBridgeConnect(url);
+        await api.doctorBridgeConnect(url, credentials);
       } catch (bridgeErr) {
         console.warn("Node connection failed (operator-only mode):", bridgeErr);
         setError(`Node registration failed: ${bridgeErr}`);

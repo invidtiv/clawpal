@@ -88,17 +88,19 @@ export function Doctor({ sshHosts }: DoctorProps) {
     setDiagnosing(true);
     try {
       let url: string;
+      let credentials;
       if (agentSource === "remote") {
         url = "wss://doctor.openclaw.ai";
       } else if (agentSource === "local") {
         url = "ws://localhost:18789";
       } else {
-        // Remote gateway: SSH tunnel to its port 18789
+        // Remote gateway: read its credentials, then SSH tunnel to its port 18789
+        credentials = await api.doctorReadRemoteCredentials(agentSource);
         const localPort = await api.doctorPortForward(agentSource);
         url = `ws://localhost:${localPort}`;
       }
 
-      await doctor.connect(url);
+      await doctor.connect(url, credentials);
 
       const context = doctor.target === "local"
         ? await ua.collectDoctorContext()

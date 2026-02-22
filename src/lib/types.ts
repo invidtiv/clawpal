@@ -336,6 +336,12 @@ export interface PreviewQueueResult {
 
 // Doctor Agent
 
+export interface GatewayCredentials {
+  token: string;
+  deviceId: string;
+  privateKeyPem: string;
+}
+
 export interface DoctorInvoke {
   id: string;
   command: string;

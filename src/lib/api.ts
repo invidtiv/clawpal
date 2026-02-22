@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { AgentOverview, AgentSessionAnalysis, ApplyQueueResult, ApplyResult, BackupInfo, Binding, ChannelNode, CronJob, CronRun, DiscordGuildChannel, HistoryItem, InstanceStatus, ModelCatalogProvider, ModelProfile, PendingCommand, PreviewQueueResult, PreviewResult, ProviderAuthSuggestion, Recipe, ResolvedApiKey, SystemStatus, DoctorReport, SessionFile, SshHost, WatchdogStatus } from "./types";
+import type { AgentOverview, AgentSessionAnalysis, ApplyQueueResult, ApplyResult, BackupInfo, Binding, ChannelNode, CronJob, CronRun, DiscordGuildChannel, GatewayCredentials, HistoryItem, InstanceStatus, ModelCatalogProvider, ModelProfile, PendingCommand, PreviewQueueResult, PreviewResult, ProviderAuthSuggestion, Recipe, ResolvedApiKey, SystemStatus, DoctorReport, SessionFile, SshHost, WatchdogStatus } from "./types";
 
 export const api = {
   getSystemStatus: (): Promise<SystemStatus> =>
@@ -268,8 +268,10 @@ export const api = {
   // Doctor Agent
   doctorPortForward: (hostId: string): Promise<number> =>
     invoke("doctor_port_forward", { hostId }),
-  doctorConnect: (url: string): Promise<void> =>
-    invoke("doctor_connect", { url }),
+  doctorReadRemoteCredentials: (hostId: string): Promise<GatewayCredentials> =>
+    invoke("doctor_read_remote_credentials", { hostId }),
+  doctorConnect: (url: string, credentials?: GatewayCredentials): Promise<void> =>
+    invoke("doctor_connect", { url, credentials: credentials ?? null }),
   doctorDisconnect: (): Promise<void> =>
     invoke("doctor_disconnect"),
   doctorStartDiagnosis: (context: string, sessionKey: string): Promise<void> =>
@@ -284,8 +286,8 @@ export const api = {
     invoke("collect_doctor_context"),
   collectDoctorContextRemote: (hostId: string): Promise<string> =>
     invoke("collect_doctor_context_remote", { hostId }),
-  doctorBridgeConnect: (url: string): Promise<void> =>
-    invoke("doctor_bridge_connect", { url }),
+  doctorBridgeConnect: (url: string, credentials?: GatewayCredentials): Promise<void> =>
+    invoke("doctor_bridge_connect", { url, credentials: credentials ?? null }),
   doctorBridgeDisconnect: (): Promise<void> =>
     invoke("doctor_bridge_disconnect"),
 

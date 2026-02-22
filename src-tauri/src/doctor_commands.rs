@@ -1,7 +1,7 @@
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, State};
 
-use crate::node_client::NodeClient;
+use crate::node_client::{NodeClient, GatewayCredentials};
 use crate::bridge_client::{BridgeClient, extract_shell_command};
 use crate::models::resolve_paths;
 use crate::ssh::SshConnectionPool;
@@ -16,13 +16,55 @@ pub async fn doctor_port_forward(
     pool.request_port_forward(&host_id, 18789).await
 }
 
+/// Read gateway auth token and device identity from a remote host via SSH.
+/// Returns credentials needed to authenticate with that host's gateway.
+#[tauri::command]
+pub async fn doctor_read_remote_credentials(
+    pool: State<'_, SshConnectionPool>,
+    host_id: String,
+) -> Result<GatewayCredentials, String> {
+    // Read auth token from remote config
+    let config_result = pool.exec_login(&host_id,
+        "cat \"${OPENCLAW_STATE_DIR:-${OPENCLAW_HOME:-$HOME/.openclaw}}/openclaw.json\" 2>/dev/null || echo '{}'"
+    ).await?;
+    let token = serde_json::from_str::<Value>(config_result.stdout.trim())
+        .ok()
+        .and_then(|config| {
+            config.get("gateway")?
+                .get("auth")?
+                .get("token")?
+                .as_str()
+                .map(|s| s.to_string())
+        })
+        .unwrap_or_default();
+
+    // Read device identity
+    let device_result = pool.exec_login(&host_id,
+        "cat \"${OPENCLAW_STATE_DIR:-${OPENCLAW_HOME:-$HOME/.openclaw}}/identity/device.json\" 2>/dev/null"
+    ).await?;
+    let device_json: Value = serde_json::from_str(device_result.stdout.trim())
+        .map_err(|e| format!("Failed to parse remote device.json: {e}"))?;
+
+    let device_id = device_json.get("deviceId")
+        .and_then(|v| v.as_str())
+        .ok_or("Missing deviceId in remote device.json")?
+        .to_string();
+    let private_key_pem = device_json.get("privateKeyPem")
+        .and_then(|v| v.as_str())
+        .ok_or("Missing privateKeyPem in remote device.json")?
+        .to_string();
+
+    Ok(GatewayCredentials { token, device_id, private_key_pem })
+}
+
 #[tauri::command]
 pub async fn doctor_connect(
     client: State<'_, NodeClient>,
     app: AppHandle,
     url: String,
+    credentials: Option<GatewayCredentials>,
 ) -> Result<(), String> {
-    client.connect(&url, app).await
+    client.connect(&url, app, credentials).await
 }
 
 #[tauri::command]
@@ -39,8 +81,9 @@ pub async fn doctor_bridge_connect(
     bridge: State<'_, BridgeClient>,
     app: AppHandle,
     url: String,
+    credentials: Option<GatewayCredentials>,
 ) -> Result<(), String> {
-    bridge.connect(&url, app).await
+    bridge.connect(&url, app, credentials).await
 }
 
 #[tauri::command]
