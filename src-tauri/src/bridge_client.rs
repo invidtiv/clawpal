@@ -6,6 +6,7 @@ use ed25519_dalek::pkcs8::DecodePrivateKey;
 use ed25519_dalek::{Signer, SigningKey};
 use futures_util::stream::SplitSink;
 use futures_util::{SinkExt, StreamExt};
+use indexmap::IndexMap;
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter};
 use tokio::net::TcpStream;
@@ -47,7 +48,7 @@ struct BridgeClientInner {
 /// a different role.
 pub struct BridgeClient {
     inner: Arc<Mutex<Option<BridgeClientInner>>>,
-    pending_invokes: Arc<Mutex<HashMap<String, Value>>>,
+    pending_invokes: Arc<Mutex<IndexMap<String, Value>>>,
     credentials: Arc<Mutex<Option<GatewayCredentials>>>,
 }
 
@@ -55,7 +56,7 @@ impl BridgeClient {
     pub fn new() -> Self {
         Self {
             inner: Arc::new(Mutex::new(None)),
-            pending_invokes: Arc::new(Mutex::new(HashMap::new())),
+            pending_invokes: Arc::new(Mutex::new(IndexMap::new())),
             credentials: Arc::new(Mutex::new(None)),
         }
     }
@@ -140,7 +141,7 @@ impl BridgeClient {
         // them — the gateway would ignore unauthenticated frames. Now that we're
         // authenticated, reject them so the agent session can unblock.
         let stale_invokes: Vec<(String, String)> = {
-            self.pending_invokes.lock().await.drain().map(|(id, inv)| {
+            self.pending_invokes.lock().await.drain(..).map(|(id, inv)| {
                 let nid = inv.get("nodeId").and_then(|v| v.as_str()).unwrap_or("").to_string();
                 (id, nid)
             }).collect()
@@ -198,7 +199,7 @@ impl BridgeClient {
 
     /// Take a pending invoke request by ID (removes it from the map).
     pub async fn take_invoke(&self, id: &str) -> Option<Value> {
-        self.pending_invokes.lock().await.remove(id)
+        self.pending_invokes.lock().await.shift_remove(id)
     }
 
     // ── Private helpers ──────────────────────────────────────────────
@@ -385,7 +386,7 @@ impl BridgeClient {
     async fn handle_frame(
         frame: Value,
         inner_ref: &Arc<Mutex<Option<BridgeClientInner>>>,
-        invokes_ref: &Arc<Mutex<HashMap<String, Value>>>,
+        invokes_ref: &Arc<Mutex<IndexMap<String, Value>>>,
         app: &AppHandle,
     ) {
         let frame_type = frame.get("type").and_then(|v| v.as_str()).unwrap_or("");
@@ -476,22 +477,48 @@ impl BridgeClient {
                             "nodeId": request_node_id,
                         });
 
-                        // Store for later approval/rejection (bounded, deduplicated)
-                        let is_dup = {
+                        // Store for later approval/rejection (bounded, deduplicated).
+                        // IndexMap preserves insertion order so eviction removes oldest first.
+                        let (is_dup, evicted) = {
                             let mut map = invokes_ref.lock().await;
                             if map.contains_key(&id) {
-                                true
+                                (true, Vec::new())
                             } else {
-                                if map.len() >= MAX_PENDING_INVOKES {
-                                    let keys: Vec<String> = map.keys().take(10).cloned().collect();
-                                    for k in keys {
-                                        map.remove(&k);
+                                // Collect oldest entries to evict
+                                let mut to_evict = Vec::new();
+                                while map.len() >= MAX_PENDING_INVOKES {
+                                    if let Some((eid, einv)) = map.shift_remove_index(0) {
+                                        let nid = einv.get("nodeId")
+                                            .and_then(|v| v.as_str()).unwrap_or("").to_string();
+                                        to_evict.push((eid, nid));
+                                    } else {
+                                        break;
                                     }
                                 }
                                 map.insert(id.clone(), invoke_payload.clone());
-                                false
+                                (false, to_evict)
                             }
                         };
+                        // Send errors for evicted invokes outside the lock
+                        for (eid, nid) in &evicted {
+                            let mut guard = inner_ref.lock().await;
+                            if let Some(inner) = guard.as_mut() {
+                                inner.req_counter += 1;
+                                let rid = format!("n{}", inner.req_counter);
+                                let frame = json!({
+                                    "type": "req",
+                                    "id": rid,
+                                    "method": "node.invoke.result",
+                                    "params": {
+                                        "id": eid,
+                                        "nodeId": nid,
+                                        "ok": false,
+                                        "error": { "code": "EVICTED", "message": "Too many pending invokes, oldest evicted" },
+                                    },
+                                });
+                                let _ = inner.tx.send(Message::Text(frame.to_string())).await;
+                            }
+                        }
                         if is_dup {
                             // Duplicate invoke — gateway sent the same request twice.
                             // Skip emitting to frontend to avoid duplicate UI entries.

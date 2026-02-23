@@ -270,6 +270,8 @@ export const api = {
     invoke("doctor_port_forward", { hostId }),
   doctorReadRemoteCredentials: (hostId: string): Promise<GatewayCredentials> =>
     invoke("doctor_read_remote_credentials", { hostId }),
+  doctorAutoPair: (hostId: string): Promise<number> =>
+    invoke("doctor_auto_pair", { hostId }),
   doctorConnect: (url: string, credentials?: GatewayCredentials): Promise<void> =>
     invoke("doctor_connect", { url, credentials: credentials ?? null }),
   doctorDisconnect: (): Promise<void> =>

@@ -110,7 +110,22 @@ export function Doctor({ sshHosts }: DoctorProps) {
         url = `ws://localhost:${localPort}`;
       }
 
-      await doctor.connect(url, credentials);
+      const isRemoteGateway = agentSource !== "local" && agentSource !== "remote";
+      try {
+        await doctor.connect(url, credentials, isRemoteGateway ? agentSource : undefined);
+      } catch (connectErr) {
+        // Auto-fix NOT_PAIRED: approve pending device requests via SSH and retry
+        if (String(connectErr).includes("NOT_PAIRED") && isRemoteGateway) {
+          const approved = await api.doctorAutoPair(agentSource);
+          if (approved > 0) {
+            await doctor.connect(url, credentials, agentSource);
+          } else {
+            throw connectErr;
+          }
+        } else {
+          throw connectErr;
+        }
+      }
 
       const context = doctor.target === "local"
         ? await ua.collectDoctorContext()
@@ -256,7 +271,7 @@ export function Doctor({ sshHosts }: DoctorProps) {
 
           {message && <p className="text-sm text-muted-foreground mb-3">{message}</p>}
 
-          {!doctor.connected ? (
+          {!doctor.connected && doctor.messages.length === 0 ? (
             <>
               {/* Source radio — instance gateways (excluding current target) + remote doctor */}
               <div className="text-sm text-muted-foreground mb-2">{t("doctor.agentSourceHint")}</div>
@@ -302,11 +317,48 @@ export function Doctor({ sshHosts }: DoctorProps) {
                 </label>
               </div>
               {doctor.error && (
-                <div className="mb-3 text-sm text-destructive">{doctor.error}</div>
+                <div className="mb-3 text-sm text-destructive">
+                  {doctor.error}
+                  {doctor.error.includes("NOT_PAIRED") && (
+                    <p className="mt-1 text-muted-foreground">
+                      {t("doctor.notPairedHint", {
+                        host: agentSource === "local"
+                          ? "localhost"
+                          : sshHosts.find((h) => h.id === agentSource)?.label || agentSource,
+                      })}
+                    </p>
+                  )}
+                </div>
               )}
               <Button onClick={handleStartDiagnosis} disabled={diagnosing}>
                 {diagnosing ? t("doctor.connecting") : t("doctor.startDiagnosis")}
               </Button>
+            </>
+          ) : !doctor.connected && doctor.messages.length > 0 ? (
+            <>
+              {/* Disconnected mid-session — show chat with reconnect banner */}
+              <div className="flex items-center justify-between mb-3 p-2 rounded-md bg-destructive/10 border border-destructive/20">
+                <span className="text-sm text-destructive">
+                  {doctor.error || t("doctor.disconnected")}
+                </span>
+                <div className="flex items-center gap-2">
+                  <Button size="sm" onClick={() => doctor.reconnect()}>
+                    {t("doctor.reconnect")}
+                  </Button>
+                  <Button variant="outline" size="sm" onClick={handleStopDiagnosis}>
+                    {t("doctor.stopDiagnosis")}
+                  </Button>
+                </div>
+              </div>
+              <DoctorChat
+                messages={doctor.messages}
+                loading={false}
+                error={null}
+                connected={false}
+                onSendMessage={doctor.sendMessage}
+                onApproveInvoke={doctor.approveInvoke}
+                onRejectInvoke={doctor.rejectInvoke}
+              />
             </>
           ) : (
             <>

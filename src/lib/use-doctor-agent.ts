@@ -34,6 +34,9 @@ export function useDoctorAgent() {
   // Unique session key per diagnosis — avoids inheriting stale state
   const sessionKeyRef = useRef("");
   const agentIdRef = useRef("main");
+  // Last connection params for reconnect
+  const lastUrlRef = useRef("");
+  const lastCredsRef = useRef<GatewayCredentials | undefined>(undefined);
 
   // Gate: only process invokes after startDiagnosis has been called.
   // Prevents stale invokes (replayed by the gateway on node reconnect)
@@ -185,8 +188,10 @@ export function useDoctorAgent() {
   }, [target]);
   autoApproveRef.current = autoApprove;
 
-  const connect = useCallback(async (url: string, credentials?: GatewayCredentials) => {
+  const connect = useCallback(async (url: string, credentials?: GatewayCredentials, autoPairHostId?: string) => {
     setError(null);
+    lastUrlRef.current = url;
+    lastCredsRef.current = credentials;
     try {
       // Connect operator first (essential — for agent method + chat events)
       await api.doctorConnect(url, credentials);
@@ -195,13 +200,42 @@ export function useDoctorAgent() {
       try {
         await api.doctorBridgeConnect(url, credentials);
       } catch (bridgeErr) {
-        console.warn("Node connection failed (operator-only mode):", bridgeErr);
-        setError(`Node registration failed: ${bridgeErr}`);
+        // Auto-fix NOT_PAIRED for bridge connection
+        if (autoPairHostId && String(bridgeErr).includes("NOT_PAIRED")) {
+          const approved = await api.doctorAutoPair(autoPairHostId);
+          if (approved > 0) {
+            await api.doctorBridgeConnect(url, credentials);
+          } else {
+            throw bridgeErr;
+          }
+        } else {
+          console.warn("Node connection failed (operator-only mode):", bridgeErr);
+          setError(`Node registration failed: ${bridgeErr}`);
+        }
       }
     } catch (err) {
       const msg = `Connection failed: ${err}`;
       setError(msg);
       throw new Error(msg);
+    }
+  }, []);
+
+  const reconnect = useCallback(async () => {
+    if (!lastUrlRef.current) {
+      setError("No previous connection to reconnect to");
+      return;
+    }
+    setError(null);
+    try {
+      await api.doctorConnect(lastUrlRef.current, lastCredsRef.current);
+      try {
+        await api.doctorBridgeConnect(lastUrlRef.current, lastCredsRef.current);
+      } catch (bridgeErr) {
+        console.warn("Node reconnection failed:", bridgeErr);
+        setError(`Node registration failed: ${bridgeErr}`);
+      }
+    } catch (err) {
+      setError(`Reconnect failed: ${err}`);
     }
   }, []);
 
@@ -333,6 +367,7 @@ export function useDoctorAgent() {
     setTarget,
     approvedPatterns,
     connect,
+    reconnect,
     disconnect,
     startDiagnosis,
     sendMessage,

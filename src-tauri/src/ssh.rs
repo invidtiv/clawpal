@@ -405,12 +405,15 @@ mod inner {
 
     pub struct SshConnectionPool {
         connections: Mutex<HashMap<String, SshConnection>>,
+        /// Tracked port-forward processes (killed on disconnect or new forward).
+        port_forwards: Mutex<HashMap<String, tokio::process::Child>>,
     }
 
     impl SshConnectionPool {
         pub fn new() -> Self {
             Self {
                 connections: Mutex::new(HashMap::new()),
+                port_forwards: Mutex::new(HashMap::new()),
             }
         }
 
@@ -454,6 +457,11 @@ mod inner {
         pub async fn disconnect(&self, id: &str) -> Result<(), String> {
             let mut pool = self.connections.lock().await;
             pool.remove(id);
+            // Kill any tracked port-forward process for this host
+            let mut fwd = self.port_forwards.lock().await;
+            if let Some(mut child) = fwd.remove(id) {
+                let _ = child.kill().await;
+            }
             Ok(())
         }
 
@@ -478,8 +486,15 @@ mod inner {
         }
 
         /// Create a local port forward via `ssh -L -N`. Returns the local port.
-        /// The ssh process runs in the background (spawned, not awaited).
+        /// The ssh process is tracked and killed on disconnect or next forward request.
         pub async fn request_port_forward(&self, id: &str, remote_port: u16) -> Result<u16, String> {
+            // Kill any existing port forward for this host
+            {
+                let mut fwd = self.port_forwards.lock().await;
+                if let Some(mut child) = fwd.remove(id) {
+                    let _ = child.kill().await;
+                }
+            }
             let args = {
                 let pool = self.connections.lock().await;
                 let conn = pool.get(id).ok_or_else(|| format!("No connection for id: {id}"))?;
@@ -495,13 +510,14 @@ mod inner {
                 "-N".into(),
             ];
             cmd_args.extend(args);
-            ssh_command()
+            let child = ssh_command()
                 .args(&cmd_args)
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
                 .spawn()
                 .map_err(|e| format!("SSH port forward failed: {e}"))?;
+            self.port_forwards.lock().await.insert(id.to_string(), child);
             // Give the tunnel a moment to establish
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
             Ok(local_port)

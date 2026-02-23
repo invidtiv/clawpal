@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { SimpleMarkdown } from "@/components/SimpleMarkdown";
 import { cn } from "@/lib/utils";
 import type { DoctorChatMessage } from "@/lib/types";
 
@@ -96,7 +97,7 @@ export function DoctorChat({
           disabled={!connected || loading || !input.trim()}
           size="sm"
         >
-          {t("chat.send")}
+          {t("chat.send")} <kbd className="ml-1 text-xs opacity-60">{navigator.platform.includes("Mac") ? "⌘↵" : "Ctrl↵"}</kbd>
         </Button>
       </div>
     </div>
@@ -117,8 +118,8 @@ function MessageBubble({
 
   if (message.role === "user") {
     return (
-      <div className="text-right">
-        <div className="inline-block px-3 py-2 rounded-lg max-w-[90%] text-left bg-muted border border-border">
+      <div className="flex justify-end">
+        <div className="px-3 py-2 rounded-lg max-w-[85%] bg-[oklch(0.205_0_0)] text-white">
           <div className="whitespace-pre-wrap text-sm">{message.content}</div>
         </div>
       </div>
@@ -127,9 +128,9 @@ function MessageBubble({
 
   if (message.role === "assistant") {
     return (
-      <div className="text-left">
-        <div className="inline-block px-3 py-2 rounded-lg max-w-[90%] bg-card border border-border">
-          <div className="whitespace-pre-wrap text-sm">{message.content}</div>
+      <div className="flex justify-start">
+        <div className="px-3 py-2 rounded-lg max-w-[85%] bg-[oklch(0.93_0_0)]">
+          <div className="text-sm"><SimpleMarkdown content={message.content} /></div>
         </div>
       </div>
     );

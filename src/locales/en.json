@@ -192,6 +192,8 @@
   "doctor.connecting": "Connecting...",
   "doctor.connected": "Connected",
   "doctor.disconnected": "Disconnected",
+  "doctor.reconnect": "Reconnect",
+  "doctor.notPairedHint": "The device on {{host}} is not paired with its gateway. SSH into that machine and run: openclaw devices list, then approve the pending request with: openclaw devices approve <request-id>",
   "doctor.autoExecuted": "auto",
   "doctor.awaitingApproval": "awaiting approval",
   "doctor.execute": "Execute",

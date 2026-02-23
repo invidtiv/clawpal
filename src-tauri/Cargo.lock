@@ -332,6 +332,7 @@ dependencies = [
  "futures",
  "futures-util",
  "hostname",
+ "indexmap 2.13.0",
  "json5",
  "openssh",
  "portpicker",

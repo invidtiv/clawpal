@@ -42,7 +42,7 @@ use crate::commands::{
 };
 use crate::bridge_client::BridgeClient;
 use crate::doctor_commands::{
-    doctor_port_forward, doctor_read_remote_credentials,
+    doctor_port_forward, doctor_read_remote_credentials, doctor_auto_pair,
     doctor_connect, doctor_disconnect,
     doctor_start_diagnosis, doctor_send_message,
     doctor_approve_invoke, doctor_reject_invoke, collect_doctor_context,
@@ -218,6 +218,7 @@ pub fn run() {
             remote_apply_queued_commands,
             doctor_port_forward,
             doctor_read_remote_credentials,
+            doctor_auto_pair,
             doctor_connect,
             doctor_disconnect,
             doctor_start_diagnosis,

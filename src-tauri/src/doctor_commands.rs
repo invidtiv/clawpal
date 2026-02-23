@@ -57,6 +57,43 @@ pub async fn doctor_read_remote_credentials(
     Ok(GatewayCredentials { token, device_id, private_key_pem })
 }
 
+/// Auto-approve pending device pairing requests on a remote host.
+/// When ClawPal connects to a remote gateway using the host's own device identity,
+/// the gateway may require re-pairing (e.g. token rotation, repair).
+/// This command SSHes into the host, lists pending requests, and approves them.
+/// Returns the number of requests approved.
+#[tauri::command]
+pub async fn doctor_auto_pair(
+    pool: State<'_, SshConnectionPool>,
+    host_id: String,
+) -> Result<u32, String> {
+    let result = pool.exec_login(&host_id, "openclaw devices list --json 2>/dev/null").await?;
+    if result.exit_code != 0 {
+        return Err(format!("openclaw devices list failed: {}", result.stderr.trim()));
+    }
+    let list: Value = serde_json::from_str(result.stdout.trim())
+        .map_err(|e| format!("Failed to parse devices list: {e}"))?;
+
+    let pending = list.get("pending").and_then(|v| v.as_array());
+    let Some(pending) = pending else {
+        return Ok(0);
+    };
+
+    let mut approved = 0u32;
+    for req in pending {
+        let request_id = req.get("requestId").and_then(|v| v.as_str()).unwrap_or("");
+        if request_id.is_empty() { continue; }
+        let approve_result = pool.exec_login(
+            &host_id,
+            &format!("openclaw devices approve {request_id} 2>&1"),
+        ).await;
+        if approve_result.is_ok() {
+            approved += 1;
+        }
+    }
+    Ok(approved)
+}
+
 #[tauri::command]
 pub async fn doctor_connect(
     client: State<'_, NodeClient>,
@@ -585,13 +622,16 @@ async fn execute_local_command(command: &str, args: &Value) -> Result<Value, Str
             let content = args.get("content").and_then(|v| v.as_str())
                 .ok_or("write_file: missing 'content' argument")?;
             let validated = validate_write_path(path)?;
-            // Refuse to write through symlinks to prevent escaping allowed directories
-            if validated.is_symlink() {
-                return Err(format!("write_file: refusing to write through symlink at {path}"));
-            }
-            tokio::fs::write(&validated, content)
+            // Atomic write: write to temp file then rename to avoid symlink TOCTOU
+            let parent = validated.parent()
+                .ok_or_else(|| format!("Invalid path: {path}"))?;
+            let tmp = parent.join(format!(".clawpal-tmp-{}", uuid::Uuid::new_v4()));
+            tokio::fs::write(&tmp, content)
                 .await
-                .map_err(|e| format!("Failed to write {path}: {e}"))?;
+                .map_err(|e| { let _ = std::fs::remove_file(&tmp); format!("Failed to write {path}: {e}") })?;
+            tokio::fs::rename(&tmp, &validated)
+                .await
+                .map_err(|e| { let _ = std::fs::remove_file(&tmp); format!("Failed to rename temp file to {path}: {e}") })?;
             Ok(json!({"ok": true}))
         }
         "run_command" => {
@@ -694,13 +734,33 @@ async fn execute_remote_command(
             let content = args.get("content").and_then(|v| v.as_str())
                 .ok_or("write_file: missing 'content' argument")?;
             validate_not_sensitive(path)?;
-            // Best-effort symlink check (TOCTOU gap: file could change between check and write)
+            // Atomic write via temp file + mv to avoid symlink TOCTOU
+            let tmp_name = format!(".clawpal-tmp-{}", uuid::Uuid::new_v4());
             let resolved = pool.resolve_path(host_id, path).await?;
-            let stat_result = pool.exec(host_id, &format!("test -L '{}' && echo SYMLINK || echo OK", resolved.replace('\'', "'\\''"))).await?;
-            if stat_result.stdout.trim() == "SYMLINK" {
-                return Err(format!("write_file: refusing to write through symlink at {path}"));
+            let esc = resolved.replace('\'', "'\\''");
+            let parent_dir = std::path::Path::new(&resolved)
+                .parent()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_else(|| "/tmp".to_string());
+            let tmp_path = format!("{}/{}", parent_dir, tmp_name);
+            let tmp_esc = tmp_path.replace('\'', "'\\''");
+            // Write content to temp file via SFTP
+            if let Err(e) = pool.sftp_write(host_id, &tmp_path, content).await {
+                let _ = pool.exec(host_id, &format!("rm -f '{tmp_esc}'")).await;
+                return Err(format!("Failed to write temp file for {path}: {e}"));
             }
-            pool.sftp_write(host_id, path, content).await?;
+            // Atomic rename: mv temp -> target (overwrites without following symlinks)
+            match pool.exec(host_id, &format!("mv -f '{tmp_esc}' '{esc}'")).await {
+                Ok(mv_result) if mv_result.exit_code != 0 => {
+                    let _ = pool.exec(host_id, &format!("rm -f '{tmp_esc}'")).await;
+                    return Err(format!("Failed to rename temp file to {path}: {}", mv_result.stderr.trim()));
+                }
+                Err(e) => {
+                    let _ = pool.exec(host_id, &format!("rm -f '{tmp_esc}'")).await;
+                    return Err(format!("Failed to rename temp file to {path}: {e}"));
+                }
+                _ => {}
+            }
             Ok(json!({"ok": true}))
         }
         "run_command" => {

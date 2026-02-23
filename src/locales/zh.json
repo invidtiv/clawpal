@@ -192,6 +192,8 @@
   "doctor.connecting": "连接中...",
   "doctor.connected": "已连接",
   "doctor.disconnected": "未连接",
+  "doctor.reconnect": "重新连接",
+  "doctor.notPairedHint": "{{host}} 上的设备未与其 gateway 配对。请 SSH 到该机器执行：openclaw devices list，然后批准待处理的请求：openclaw devices approve <request-id>",
   "doctor.autoExecuted": "自动执行",
   "doctor.awaitingApproval": "等待审批",
   "doctor.execute": "执行",
