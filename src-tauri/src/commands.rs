@@ -2762,10 +2762,19 @@ fn model_profiles_path(paths: &crate::models::OpenClawPaths) -> std::path::PathB
 
 
 fn profile_to_model_value(profile: &ModelProfile) -> String {
-    if profile.model.contains('/') {
-        profile.model.clone()
+    let provider = profile.provider.trim();
+    let model = profile.model.trim();
+    if provider.is_empty() {
+        return model.to_string();
+    }
+    if model.is_empty() {
+        return format!("{provider}/");
+    }
+    let normalized_prefix = format!("{}/", provider.to_lowercase());
+    if model.to_lowercase().starts_with(&normalized_prefix) {
+        model.to_string()
     } else {
-        format!("{}/{}", profile.provider, profile.model)
+        format!("{provider}/{model}")
     }
 }
 
@@ -3227,6 +3236,34 @@ mod model_catalog_cache_tests {
         };
         let selected = select_catalog_from_cache(Some(&cached), "1.2.3");
         assert!(selected.is_none(), "version mismatch must force CLI refresh");
+    }
+}
+
+#[cfg(test)]
+mod model_value_tests {
+    use super::*;
+
+    fn profile(provider: &str, model: &str) -> ModelProfile {
+        ModelProfile {
+            id: "p1".into(),
+            name: "p".into(),
+            provider: provider.into(),
+            model: model.into(),
+            auth_ref: "".into(),
+            api_key: None,
+            base_url: None,
+            description: None,
+            enabled: true,
+        }
+    }
+
+    #[test]
+    fn test_profile_to_model_value_keeps_provider_prefix_for_nested_model_id() {
+        let p = profile("openrouter", "moonshotai/kimi-k2.5");
+        assert_eq!(
+            profile_to_model_value(&p),
+            "openrouter/moonshotai/kimi-k2.5",
+        );
     }
 }
 

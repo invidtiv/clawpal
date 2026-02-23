@@ -28,6 +28,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import type { InstanceStatus, StatusExtra, AgentOverview, Recipe, BackupInfo, ModelProfile } from "../lib/types";
 import { formatTime, formatBytes } from "@/lib/utils";
 import { useApi } from "@/lib/use-api";
+import { profileToModelValue } from "@/lib/model-value";
 
 interface AgentGroup {
   identity: string;
@@ -85,9 +86,7 @@ export function Home({
     if (!profileId) return null;
     const profile = modelProfiles.find((p) => p.id === profileId);
     if (!profile) return profileId;
-    return profile.model.includes("/")
-      ? profile.model
-      : `${profile.provider}/${profile.model}`;
+    return profileToModelValue(profile);
   };
 
   // Skip polling refreshes while there are queued commands (to preserve optimistic UI)
@@ -246,7 +245,7 @@ export function Home({
     if (!modelVal) return null;
     const normalized = modelVal.toLowerCase();
     for (const p of modelProfiles) {
-      const profileVal = p.model.includes("/") ? p.model : `${p.provider}/${p.model}`;
+      const profileVal = profileToModelValue(p);
       if (profileVal.toLowerCase() === normalized || p.model.toLowerCase() === normalized) {
         return p.id;
       }
@@ -548,7 +547,7 @@ export function Home({
                               if (!agent.model) return "__none__";
                               const normalized = agent.model.toLowerCase();
                               for (const p of modelProfiles) {
-                                const profileVal = p.model.includes("/") ? p.model : `${p.provider}/${p.model}`;
+                                const profileVal = profileToModelValue(p);
                                 if (profileVal.toLowerCase() === normalized || p.model.toLowerCase() === normalized) {
                                   return p.id;
                                 }
