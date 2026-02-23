@@ -373,11 +373,16 @@ pub struct StatusLight {
     pub openclaw_version: Option<String>,
 }
 
+/// Clear cached openclaw version — call after upgrade so status shows new version.
+pub fn clear_openclaw_version_cache() {
+    *OPENCLAW_VERSION_CACHE.lock().unwrap() = None;
+}
+
+static OPENCLAW_VERSION_CACHE: std::sync::Mutex<Option<Option<String>>> = std::sync::Mutex::new(None);
+
 /// Fast status: reads config + quick TCP probe of gateway port.
 #[tauri::command]
 pub fn get_status_light() -> Result<StatusLight, String> {
-    use std::sync::OnceLock;
-    static OPENCLAW_VERSION: OnceLock<Option<String>> = OnceLock::new();
 
     let paths = resolve_paths();
     let cfg = read_openclaw_config(&paths)?;
@@ -409,15 +414,21 @@ pub fn get_status_light() -> Result<StatusLight, String> {
         std::time::Duration::from_millis(200),
     ).is_ok();
 
-    // Cache openclaw version (doesn't change during app lifetime)
-    let openclaw_version = OPENCLAW_VERSION.get_or_init(|| {
-        std::process::Command::new(resolve_openclaw_bin())
-            .arg("--version")
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-    }).clone();
+    // Cache openclaw version — cleared by clear_openclaw_version_cache() after upgrade
+    let openclaw_version = {
+        let mut cache = OPENCLAW_VERSION_CACHE.lock().unwrap();
+        if cache.is_none() {
+            *cache = Some(
+                std::process::Command::new(resolve_openclaw_bin())
+                    .arg("--version")
+                    .output()
+                    .ok()
+                    .filter(|o| o.status.success())
+                    .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()),
+            );
+        }
+        cache.as_ref().unwrap().clone()
+    };
 
     Ok(StatusLight {
         healthy,
@@ -5361,6 +5372,7 @@ pub async fn run_openclaw_upgrade() -> Result<String, String> {
         format!("{stdout}\n{stderr}")
     };
     if output.status.success() {
+        clear_openclaw_version_cache();
         Ok(combined)
     } else {
         Err(combined)
