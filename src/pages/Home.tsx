@@ -491,8 +491,25 @@ export function Home({
                                 const list: Record<string, unknown>[] = cfg?.agents?.list ?? [];
                                 const entry = list.find((a) => a.id === agent.id);
                                 if (entry) {
-                                  if (modelValue) entry.model = modelValue;
-                                  else delete entry.model;
+                                  if (modelValue) {
+                                    // Preserve fallbacks if model is already an object
+                                    const existing = entry.model;
+                                    if (existing && typeof existing === "object" && !Array.isArray(existing)) {
+                                      (existing as Record<string, unknown>).primary = modelValue;
+                                    } else {
+                                      entry.model = modelValue;
+                                    }
+                                  } else {
+                                    // Clear only primary, keep fallbacks if they exist
+                                    const existing = entry.model;
+                                    if (existing && typeof existing === "object" && !Array.isArray(existing)) {
+                                      delete (existing as Record<string, unknown>).primary;
+                                      // If no fields left, remove model entirely
+                                      if (Object.keys(existing as object).length === 0) delete entry.model;
+                                    } else {
+                                      delete entry.model;
+                                    }
+                                  }
                                 } else if (modelValue) {
                                   list.push({ id: agent.id, model: modelValue });
                                 }
