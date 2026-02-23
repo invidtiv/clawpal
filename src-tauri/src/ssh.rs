@@ -712,8 +712,17 @@ mod inner {
             timeout_secs: u64,
             context: &str,
         ) -> Result<std::process::Output, String> {
-            let _permit = self.exec_limit.acquire().await
-                .map_err(|_| "SSH executor is shutting down".to_string())?;
+            let _permit = tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                self.exec_limit.acquire(),
+            )
+            .await
+            .map_err(|_| {
+                format!(
+                    "{context}: SSH executor busy (queued >10s), please retry"
+                )
+            })?
+            .map_err(|_| "SSH executor is shutting down".to_string())?;
             tokio::time::timeout(
                 std::time::Duration::from_secs(timeout_secs),
                 ssh_command().args(args).output(),

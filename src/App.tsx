@@ -159,6 +159,51 @@ export function App() {
   const isRemote = activeInstance !== "local";
   const isConnected = !isRemote || connectionStatus[activeInstance] === "connected";
 
+  // Keep active remote instance self-healed: detect dropped SSH and reconnect.
+  useEffect(() => {
+    if (!isRemote) return;
+    let cancelled = false;
+    let inFlight = false;
+    const hostId = activeInstance;
+
+    const checkAndHeal = async () => {
+      if (cancelled || inFlight) return;
+      inFlight = true;
+      try {
+        const status = await api.sshStatus(hostId);
+        if (cancelled) return;
+        if (status === "connected") {
+          setConnectionStatus((prev) => ({ ...prev, [hostId]: "connected" }));
+          return;
+        }
+        setConnectionStatus((prev) => ({ ...prev, [hostId]: "disconnected" }));
+        try {
+          await api.sshConnect(hostId);
+          if (!cancelled) {
+            setConnectionStatus((prev) => ({ ...prev, [hostId]: "connected" }));
+          }
+        } catch {
+          if (!cancelled) {
+            setConnectionStatus((prev) => ({ ...prev, [hostId]: "error" }));
+          }
+        }
+      } catch {
+        if (!cancelled) {
+          setConnectionStatus((prev) => ({ ...prev, [hostId]: "error" }));
+        }
+      } finally {
+        inFlight = false;
+      }
+    };
+
+    checkAndHeal();
+    const timer = setInterval(checkAndHeal, 15_000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [activeInstance, isRemote]);
+
   // Load Discord data + extract profiles on startup or instance change
   useEffect(() => {
     setDiscordGuildChannels([]);
