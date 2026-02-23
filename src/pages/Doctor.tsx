@@ -154,9 +154,9 @@ export function Doctor({ sshHosts }: DoctorProps) {
       <h2 className="text-2xl font-bold mb-4">{t("doctor.title")}</h2>
 
       <Card>
-        <CardHeader>
+        <CardHeader className="pb-2">
           <div className="flex items-center justify-between">
-            <CardTitle>{t("doctor.agentSource")}</CardTitle>
+            <CardTitle className="text-base">{t("doctor.agentSource")}</CardTitle>
             <div className="flex items-center gap-1">
               <Button variant="ghost" size="sm" onClick={() => openLogs("clawpal")}>
                 {t("doctor.clawpalLogs")}

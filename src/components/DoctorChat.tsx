@@ -4,7 +4,6 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { SimpleMarkdown } from "@/components/SimpleMarkdown";
-import { cn } from "@/lib/utils";
 import type { DoctorChatMessage } from "@/lib/types";
 
 interface DoctorChatProps {
@@ -43,18 +42,6 @@ export function DoctorChat({
 
   return (
     <div className="flex flex-col">
-      {/* Connection status */}
-      <div className="flex items-center gap-2 mb-2 text-xs">
-        <span className={cn(
-          "inline-block w-2 h-2 rounded-full",
-          connected ? "bg-green-500" : "bg-gray-400"
-        )} />
-        <span className="text-muted-foreground">
-          {connected ? t("doctor.connected") : t("doctor.disconnected")}
-        </span>
-        {error && <span className="text-destructive ml-2">{error}</span>}
-      </div>
-
       {/* Message list */}
       <div
         ref={scrollRef}
