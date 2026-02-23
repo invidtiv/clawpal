@@ -3,6 +3,7 @@ use std::ffi::OsString;
 use std::fs;
 use std::path::PathBuf;
 
+#[cfg(target_os = "macos")]
 use crate::logging::{log_error, log_info};
 
 /// Ensure `openclaw` and `node` are discoverable on PATH.

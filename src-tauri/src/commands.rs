@@ -370,8 +370,12 @@ pub struct StatusLight {
     pub active_agents: u32,
     pub global_default_model: Option<String>,
     pub fallback_models: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StatusExtra {
     pub openclaw_version: Option<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub duplicate_installs: Vec<String>,
 }
 
@@ -416,7 +420,17 @@ pub fn get_status_light() -> Result<StatusLight, String> {
         std::time::Duration::from_millis(200),
     ).is_ok();
 
-    // Cache openclaw version — cleared by clear_openclaw_version_cache() after upgrade
+    Ok(StatusLight {
+        healthy,
+        active_agents,
+        global_default_model,
+        fallback_models,
+    })
+}
+
+/// Local status extra: openclaw version (cached) + no duplicate detection needed locally.
+#[tauri::command]
+pub fn get_status_extra() -> Result<StatusExtra, String> {
     let openclaw_version = {
         let mut cache = OPENCLAW_VERSION_CACHE.lock().unwrap();
         if cache.is_none() {
@@ -431,12 +445,7 @@ pub fn get_status_light() -> Result<StatusLight, String> {
         }
         cache.as_ref().unwrap().clone()
     };
-
-    Ok(StatusLight {
-        healthy,
-        active_agents,
-        global_default_model,
-        fallback_models,
+    Ok(StatusExtra {
         openclaw_version,
         duplicate_installs: Vec::new(),
     })
@@ -4300,40 +4309,11 @@ pub async fn remote_read_raw_config(pool: State<'_, SshConnectionPool>, host_id:
 
 #[tauri::command]
 pub async fn remote_get_system_status(pool: State<'_, SshConnectionPool>, host_id: String) -> Result<StatusLight, String> {
-    // Run all SSH commands concurrently — critical on Windows where each is a new
-    // SSH process (no ControlMaster). Sequential execution takes 12-20s; parallel ~3-5s.
-
-    let detect_duplicates_script = concat!(
-        "seen=''; for p in $(which -a openclaw 2>/dev/null) ",
-        "\"$HOME/.npm-global/bin/openclaw\" \"/usr/local/bin/openclaw\" \"/opt/homebrew/bin/openclaw\"; do ",
-        "[ -x \"$p\" ] || continue; ",
-        "rp=$(readlink -f \"$p\" 2>/dev/null || echo \"$p\"); ",
-        "echo \"$seen\" | grep -qF \"$rp\" && continue; ",
-        "seen=\"$seen $rp\"; ",
-        "v=$($p --version 2>/dev/null || echo 'unknown'); ",
-        "echo \"$p: $v\"; ",
-        "done"
-    );
-
-    let (version_res, config_res, pgrep_res, dup_res) = tokio::join!(
-        // 1. openclaw version
-        pool.exec_login(&host_id, "openclaw --version"),
-        // 2. agents config via CLI
+    // Tier 1: fast, essential — health check + agents config (2 SSH calls in parallel)
+    let (config_res, pgrep_res) = tokio::join!(
         crate::cli_runner::run_openclaw_remote(&pool, &host_id, &["config", "get", "agents", "--json"]),
-        // 3. gateway health check
         pool.exec(&host_id, "pgrep -f '[o]penclaw-gateway' >/dev/null 2>&1"),
-        // 4. duplicate detection
-        pool.exec_login(&host_id, detect_duplicates_script),
     );
-
-    let openclaw_version = match version_res {
-        Ok(r) if r.exit_code == 0 => Some(r.stdout.trim().to_string()),
-        Ok(r) => {
-            let trimmed = r.stdout.trim().to_string();
-            if trimmed.is_empty() { None } else { Some(trimmed) }
-        }
-        Err(_) => None,
-    };
 
     let (active_agents, global_default_model, fallback_models) = match config_res {
         Ok(ref output) if output.exit_code == 0 => {
@@ -4360,6 +4340,44 @@ pub async fn remote_get_system_status(pool: State<'_, SshConnectionPool>, host_i
         Err(_) => false,
     };
 
+    Ok(StatusLight {
+        healthy,
+        active_agents,
+        global_default_model,
+        fallback_models,
+    })
+}
+
+/// Tier 2: slow, optional — openclaw version + duplicate detection (2 SSH calls in parallel).
+/// Called once on mount and on-demand (e.g., after upgrade), not in poll loop.
+#[tauri::command]
+pub async fn remote_get_status_extra(pool: State<'_, SshConnectionPool>, host_id: String) -> Result<StatusExtra, String> {
+    let detect_duplicates_script = concat!(
+        "seen=''; for p in $(which -a openclaw 2>/dev/null) ",
+        "\"$HOME/.npm-global/bin/openclaw\" \"/usr/local/bin/openclaw\" \"/opt/homebrew/bin/openclaw\"; do ",
+        "[ -x \"$p\" ] || continue; ",
+        "rp=$(readlink -f \"$p\" 2>/dev/null || echo \"$p\"); ",
+        "echo \"$seen\" | grep -qF \"$rp\" && continue; ",
+        "seen=\"$seen $rp\"; ",
+        "v=$($p --version 2>/dev/null || echo 'unknown'); ",
+        "echo \"$p: $v\"; ",
+        "done"
+    );
+
+    let (version_res, dup_res) = tokio::join!(
+        pool.exec_login(&host_id, "openclaw --version"),
+        pool.exec_login(&host_id, detect_duplicates_script),
+    );
+
+    let openclaw_version = match version_res {
+        Ok(r) if r.exit_code == 0 => Some(r.stdout.trim().to_string()),
+        Ok(r) => {
+            let trimmed = r.stdout.trim().to_string();
+            if trimmed.is_empty() { None } else { Some(trimmed) }
+        }
+        Err(_) => None,
+    };
+
     let duplicate_installs = match dup_res {
         Ok(r) => {
             let entries: Vec<String> = r.stdout.lines()
@@ -4371,11 +4389,7 @@ pub async fn remote_get_system_status(pool: State<'_, SshConnectionPool>, host_i
         Err(_) => Vec::new(),
     };
 
-    Ok(StatusLight {
-        healthy,
-        active_agents,
-        global_default_model,
-        fallback_models,
+    Ok(StatusExtra {
         openclaw_version,
         duplicate_installs,
     })

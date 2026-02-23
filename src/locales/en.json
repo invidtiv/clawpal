@@ -3,7 +3,7 @@
   "nav.recipes": "Recipes",
   "nav.channels": "Channels",
   "nav.history": "History",
-  "nav.doctor": "\uD83E\uDD9E helps \uD83E\uDD9E",
+  "nav.doctor": "\uD83E\uDD9E help \uD83E\uDD9E",
   "nav.sessions": "Sessions",
   "nav.settings": "Settings",
   "nav.website": "Website",
@@ -119,7 +119,7 @@
   "settings.themeDark": "Dark",
   "settings.themeSystem": "System",
 
-  "doctor.title": "\uD83E\uDD9E helps \uD83E\uDD9E",
+  "doctor.title": "\uD83E\uDD9E help \uD83E\uDD9E",
   "doctor.healthScore": "Health score: {{score}}",
   "doctor.healthSummary": "Health: {{score}}",
   "doctor.fix": "fix",

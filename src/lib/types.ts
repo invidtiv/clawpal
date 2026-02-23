@@ -223,6 +223,9 @@ export interface InstanceStatus {
   activeAgents: number;
   globalDefaultModel?: string;
   fallbackModels?: string[];
+}
+
+export interface StatusExtra {
   openclawVersion?: string;
   duplicateInstalls?: string[];
 }

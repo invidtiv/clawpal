@@ -123,10 +123,12 @@ mod inner {
 
             builder.server_alive_interval(std::time::Duration::from_secs(30));
             builder.connect_timeout(std::time::Duration::from_secs(15));
-            // Use a short ControlPersist so idle ControlMasters auto-exit
+            // Use a moderate ControlPersist so idle ControlMasters auto-exit
             // instead of living forever (which leaks sshd processes on the remote).
+            // 3 min balances: short enough to limit accumulation, long enough to
+            // survive browser-tab throttling of the 30s poll interval.
             builder.control_persist(ControlPersist::IdleFor(
-                std::num::NonZeroUsize::new(5).unwrap(),
+                std::num::NonZeroUsize::new(3).unwrap(),
             ));
             // Clean up stale ControlMaster temp dirs from previous sessions
             // (e.g., after app crash or force-quit).
@@ -159,11 +161,25 @@ mod inner {
                 let mut pool = self.connections.lock().await;
                 if let Some(old) = pool.remove(&config.id) {
                     // Best-effort close — don't fail the new connection if old close fails
-                    if let Ok(old_session) = Arc::try_unwrap(old.session) {
-                        let _ = old_session.close().await;
+                    match Arc::try_unwrap(old.session) {
+                        Ok(old_session) => {
+                            let _ = old_session.close().await;
+                        }
+                        Err(arc) => {
+                            // In-flight commands hold references — spawn background cleanup
+                            tokio::spawn(async move {
+                                for _ in 0..120 {
+                                    if Arc::strong_count(&arc) <= 1 {
+                                        break;
+                                    }
+                                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                                }
+                                if let Ok(session) = Arc::try_unwrap(arc) {
+                                    let _ = session.close().await;
+                                }
+                            });
+                        }
                     }
-                    // If try_unwrap fails, the Arc drop will trigger Session::Drop
-                    // which sends ssh -O exit to the ControlMaster.
                 }
             }
 
@@ -173,6 +189,9 @@ mod inner {
         }
 
         /// Reconnect an existing SSH connection by re-using its stored config.
+        /// Skips explicit disconnect — connect() already handles old connection
+        /// cleanup internally, which minimises the window where the pool has no
+        /// entry for this id (avoids "No connection for id" from parallel commands).
         pub async fn reconnect(&self, id: &str) -> Result<(), String> {
             let config = {
                 let pool = self.connections.lock().await;
@@ -180,7 +199,6 @@ mod inner {
                     .map(|c| c.config.clone())
                     .ok_or_else(|| format!("No connection for id: {id}"))?
             };
-            let _ = self.disconnect(id).await;
             self.connect(&config).await
         }
 
@@ -195,10 +213,23 @@ mod inner {
                         let _ = session.close().await;
                     }
                     Err(arc) => {
-                        // Other references exist (in-flight exec). Drop the Arc —
-                        // when the last reference drops, Session::Drop will send
-                        // ssh -O exit to the ControlMaster.
-                        drop(arc);
+                        // Other references exist (in-flight exec). Spawn a
+                        // background task that waits for them to finish, then
+                        // explicitly closes the session so the ControlMaster
+                        // is cleaned up instead of lingering for ControlPersist.
+                        tokio::spawn(async move {
+                            // Poll until we're the last reference (in-flight commands done)
+                            for _ in 0..120 {
+                                if Arc::strong_count(&arc) <= 1 {
+                                    break;
+                                }
+                                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                            }
+                            if let Ok(session) = Arc::try_unwrap(arc) {
+                                let _ = session.close().await;
+                            }
+                            // If try_unwrap still fails after 60s, drop triggers Session::Drop
+                        });
                     }
                 }
             }
@@ -559,6 +590,9 @@ mod inner {
         }
 
         /// Reconnect an existing SSH connection by re-using its stored config.
+        /// Skips explicit disconnect — connect() already handles old connection
+        /// cleanup internally, which minimises the window where the pool has no
+        /// entry for this id (avoids "No connection for id" from parallel commands).
         pub async fn reconnect(&self, id: &str) -> Result<(), String> {
             let config = {
                 let pool = self.connections.lock().await;
@@ -566,7 +600,6 @@ mod inner {
                     .map(|c| c.config.clone())
                     .ok_or_else(|| format!("No connection for id: {id}"))?
             };
-            let _ = self.disconnect(id).await;
             self.connect(&config).await
         }
 

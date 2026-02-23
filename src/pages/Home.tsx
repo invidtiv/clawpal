@@ -25,7 +25,7 @@ import { CreateAgentDialog } from "@/components/CreateAgentDialog";
 import { UpgradeDialog } from "@/components/UpgradeDialog";
 import { RecipeCard } from "@/components/RecipeCard";
 import { Skeleton } from "@/components/ui/skeleton";
-import type { InstanceStatus, AgentOverview, Recipe, BackupInfo, ModelProfile } from "../lib/types";
+import type { InstanceStatus, StatusExtra, AgentOverview, Recipe, BackupInfo, ModelProfile } from "../lib/types";
 import { formatTime, formatBytes } from "@/lib/utils";
 import { useApi } from "@/lib/use-api";
 
@@ -64,6 +64,7 @@ export function Home({
   const { t } = useTranslation();
   const ua = useApi();
   const [status, setStatus] = useState<InstanceStatus | null>(null);
+  const [statusExtra, setStatusExtra] = useState<StatusExtra | null>(null);
   const [version, setVersion] = useState<string | null>(null);
   const [updateInfo, setUpdateInfo] = useState<{ available: boolean; latest?: string } | null>(null);
   const [checkingUpdate, setCheckingUpdate] = useState(false);
@@ -103,12 +104,15 @@ export function Home({
   const retriesRef = useRef(0);
   const remoteErrorShownRef = useRef(false);
 
+  const statusInFlightRef = useRef(false);
+
   const fetchStatus = useCallback(() => {
     if (ua.isRemote && !ua.isConnected) return; // Wait for SSH connection
     if (hasPendingRef.current) return; // Don't overwrite optimistic UI
+    if (statusInFlightRef.current) return; // Prevent overlapping polls
+    statusInFlightRef.current = true;
     ua.getInstanceStatus().then((s) => {
       setStatus(s);
-      if (s.openclawVersion) setVersion(s.openclawVersion);
       if (ua.isRemote) {
         setStatusSettled(true);
         remoteErrorShownRef.current = false;
@@ -132,6 +136,8 @@ export function Home({
       } else {
         console.error("Failed to fetch status:", e);
       }
+    }).finally(() => {
+      statusInFlightRef.current = false;
     });
   }, [ua, showToast, t]);
 
@@ -142,6 +148,21 @@ export function Home({
     const interval = setInterval(fetchStatus, ua.isRemote ? 30000 : (statusSettled ? 10000 : 2000));
     return () => clearInterval(interval);
   }, [fetchStatus, statusSettled]);
+
+  // Tier 2: version + duplicate detection — called once on mount (not polled)
+  const fetchStatusExtra = useCallback(() => {
+    if (ua.isRemote && !ua.isConnected) return;
+    ua.getStatusExtra().then((extra) => {
+      setStatusExtra(extra);
+      if (extra.openclawVersion) setVersion(extra.openclawVersion);
+    }).catch((e) => {
+      console.error("Failed to fetch status extra:", e);
+    });
+  }, [ua]);
+
+  useEffect(() => {
+    fetchStatusExtra();
+  }, [fetchStatusExtra]);
 
   const refreshAgents = useCallback(() => {
     if (ua.isRemote && !ua.isConnected) return; // Wait for SSH connection
@@ -285,17 +306,17 @@ export function Home({
                 </>
               )}
             </div>
-            {status?.duplicateInstalls && status.duplicateInstalls.length > 0 && (
+            {statusExtra?.duplicateInstalls && statusExtra.duplicateInstalls.length > 0 && (
               <>
                 <span />
-                <div className="col-span-1 rounded-lg border border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-950/30 px-3 py-2 text-xs">
-                  <p className="font-medium text-amber-800 dark:text-amber-300 mb-1">{t('home.duplicateInstalls')}</p>
-                  <ul className="space-y-0.5 font-mono text-amber-700 dark:text-amber-400">
-                    {status.duplicateInstalls.map((entry, i) => <li key={i}>{entry}</li>)}
+                <div className="col-span-1 rounded-lg border border-orange-400 dark:border-amber-700 bg-orange-50 dark:bg-amber-950/30 px-3 py-2 text-xs">
+                  <p className="font-semibold text-orange-800 dark:text-amber-300 mb-1">{t('home.duplicateInstalls')}</p>
+                  <ul className="space-y-0.5 font-mono text-orange-700 dark:text-amber-400">
+                    {statusExtra.duplicateInstalls.map((entry, i) => <li key={i}>{entry}</li>)}
                   </ul>
                   {onNavigate && (
                     <button
-                      className="mt-1.5 text-amber-800 dark:text-amber-300 underline hover:no-underline"
+                      className="mt-1.5 text-orange-800 dark:text-amber-300 underline hover:no-underline"
                       onClick={() => onNavigate("doctor")}
                     >
                       {t('home.fixInDoctor')}
@@ -745,6 +766,7 @@ export function Home({
           if (!open) {
             // Refresh version + update status after closing upgrade dialog
             fetchStatus();
+            fetchStatusExtra();
             ua.checkOpenclawUpdate()
               .then((u) => setUpdateInfo({ available: u.upgradeAvailable, latest: u.latestVersion ?? undefined }))
               .catch(() => {});

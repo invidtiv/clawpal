@@ -43,6 +43,10 @@ export function useApi() {
         api.getInstanceStatus,
         api.remoteGetInstanceStatus,
       ),
+      getStatusExtra: dispatch(
+        api.getStatusExtra,
+        api.remoteGetStatusExtra,
+      ),
 
       // Agents
       listAgents: dispatch(
