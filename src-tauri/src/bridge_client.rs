@@ -17,7 +17,7 @@ use tokio_tungstenite::{
 };
 
 use crate::models::resolve_paths;
-use crate::node_client::GatewayCredentials;
+use crate::node_client::{GatewayCredentials, load_device_identity};
 
 type WsSink = SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>;
 
@@ -534,38 +534,6 @@ pub fn extract_shell_command(args: &Value) -> String {
         }
     }
     String::new()
-}
-
-// ── Device identity helpers ─────────────────────────────────────────
-
-/// Load device identity from ~/.openclaw/identity/device.json.
-fn load_device_identity(
-    openclaw_dir: &std::path::Path,
-) -> Result<(String, SigningKey, String), String> {
-    let device_path = openclaw_dir.join("identity").join("device.json");
-    let device_json: Value = std::fs::read_to_string(&device_path)
-        .map_err(|e| format!("Failed to read device.json: {e}"))?
-        .parse()
-        .map_err(|e| format!("Failed to parse device.json: {e}"))?;
-
-    let device_id = device_json
-        .get("deviceId")
-        .and_then(|v| v.as_str())
-        .ok_or("Missing deviceId in device.json")?
-        .to_string();
-
-    let private_key_pem = device_json
-        .get("privateKeyPem")
-        .and_then(|v| v.as_str())
-        .ok_or("Missing privateKeyPem in device.json")?;
-
-    let signing_key = SigningKey::from_pkcs8_pem(private_key_pem)
-        .map_err(|e| format!("Failed to parse Ed25519 private key: {e}"))?;
-
-    let raw_public = signing_key.verifying_key().to_bytes();
-    let public_key_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(raw_public);
-
-    Ok((device_id, signing_key, public_key_b64))
 }
 
 /// Sign the challenge payload for node role.

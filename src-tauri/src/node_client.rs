@@ -22,12 +22,22 @@ type WsSink = SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>;
 /// Credentials for authenticating with a remote gateway.
 /// When connecting to a non-local gateway (via SSH tunnel), we need the
 /// remote host's auth token and device identity instead of the local ones.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GatewayCredentials {
     pub token: String,
     pub device_id: String,
     pub private_key_pem: String,
+}
+
+impl std::fmt::Debug for GatewayCredentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GatewayCredentials")
+            .field("device_id", &self.device_id)
+            .field("token", &"[REDACTED]")
+            .field("private_key_pem", &"[REDACTED]")
+            .finish()
+    }
 }
 
 struct NodeClientInner {
@@ -378,7 +388,7 @@ impl NodeClient {
 
 /// Load device identity from ~/.openclaw/identity/device.json.
 /// Returns (device_id, signing_key, base64_raw_public_key).
-fn load_device_identity(
+pub fn load_device_identity(
     openclaw_dir: &std::path::Path,
 ) -> Result<(String, SigningKey, String), String> {
     let device_path = openclaw_dir.join("identity").join("device.json");
