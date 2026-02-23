@@ -4300,8 +4300,33 @@ pub async fn remote_read_raw_config(pool: State<'_, SshConnectionPool>, host_id:
 
 #[tauri::command]
 pub async fn remote_get_system_status(pool: State<'_, SshConnectionPool>, host_id: String) -> Result<StatusLight, String> {
-    // 1. Get openclaw version (use login shell for PATH) — don't fail if binary not found
-    let openclaw_version = match pool.exec_login(&host_id, "openclaw --version").await {
+    // Run all SSH commands concurrently — critical on Windows where each is a new
+    // SSH process (no ControlMaster). Sequential execution takes 12-20s; parallel ~3-5s.
+
+    let detect_duplicates_script = concat!(
+        "seen=''; for p in $(which -a openclaw 2>/dev/null) ",
+        "\"$HOME/.npm-global/bin/openclaw\" \"/usr/local/bin/openclaw\" \"/opt/homebrew/bin/openclaw\"; do ",
+        "[ -x \"$p\" ] || continue; ",
+        "rp=$(readlink -f \"$p\" 2>/dev/null || echo \"$p\"); ",
+        "echo \"$seen\" | grep -qF \"$rp\" && continue; ",
+        "seen=\"$seen $rp\"; ",
+        "v=$($p --version 2>/dev/null || echo 'unknown'); ",
+        "echo \"$p: $v\"; ",
+        "done"
+    );
+
+    let (version_res, config_res, pgrep_res, dup_res) = tokio::join!(
+        // 1. openclaw version
+        pool.exec_login(&host_id, "openclaw --version"),
+        // 2. agents config via CLI
+        crate::cli_runner::run_openclaw_remote(&pool, &host_id, &["config", "get", "agents", "--json"]),
+        // 3. gateway health check
+        pool.exec(&host_id, "pgrep -f '[o]penclaw-gateway' >/dev/null 2>&1"),
+        // 4. duplicate detection
+        pool.exec_login(&host_id, detect_duplicates_script),
+    );
+
+    let openclaw_version = match version_res {
         Ok(r) if r.exit_code == 0 => Some(r.stdout.trim().to_string()),
         Ok(r) => {
             let trimmed = r.stdout.trim().to_string();
@@ -4310,14 +4335,9 @@ pub async fn remote_get_system_status(pool: State<'_, SshConnectionPool>, host_i
         Err(_) => None,
     };
 
-    // 2. Read remote agents config via CLI
-    let config_output = crate::cli_runner::run_openclaw_remote(
-        &pool, &host_id, &["config", "get", "agents", "--json"]
-    ).await;
-    let (active_agents, global_default_model, fallback_models) = match config_output {
+    let (active_agents, global_default_model, fallback_models) = match config_res {
         Ok(ref output) if output.exit_code == 0 => {
             let cfg: Value = crate::cli_runner::parse_json_output(output).unwrap_or(Value::Null);
-            // CLI returns the "agents" subtree directly, so paths are relative to it
             let explicit = cfg.pointer("/list")
                 .and_then(Value::as_array)
                 .map(|a| a.len() as u32)
@@ -4335,30 +4355,12 @@ pub async fn remote_get_system_status(pool: State<'_, SshConnectionPool>, host_i
         _ => (0, None, Vec::new()),
     };
 
-    // 3. Check gateway health — pgrep is most reliable via SSH; HTTP as fallback
-    // Bracket trick: [o]penclaw-gateway prevents pgrep from matching its own sh -c process
-    let pgrep_result = pool.exec(&host_id, "pgrep -f '[o]penclaw-gateway' >/dev/null 2>&1").await;
-    let healthy = match pgrep_result {
+    let healthy = match pgrep_res {
         Ok(r) => r.exit_code == 0,
         Err(_) => false,
     };
 
-    // 4. Detect duplicate openclaw installations (different paths/versions).
-    // Scans PATH via `which -a` plus common install locations, deduplicates by
-    // resolved symlink target, and reports path:version for each unique binary.
-    // Only populated when >1 unique binary is found (indicates version conflict).
-    let detect_duplicates_script = concat!(
-        "seen=''; for p in $(which -a openclaw 2>/dev/null) ",
-        "\"$HOME/.npm-global/bin/openclaw\" \"/usr/local/bin/openclaw\" \"/opt/homebrew/bin/openclaw\"; do ",
-        "[ -x \"$p\" ] || continue; ",
-        "rp=$(readlink -f \"$p\" 2>/dev/null || echo \"$p\"); ",
-        "echo \"$seen\" | grep -qF \"$rp\" && continue; ",
-        "seen=\"$seen $rp\"; ",
-        "v=$($p --version 2>/dev/null || echo 'unknown'); ",
-        "echo \"$p: $v\"; ",
-        "done"
-    );
-    let duplicate_installs = match pool.exec_login(&host_id, detect_duplicates_script).await {
+    let duplicate_installs = match dup_res {
         Ok(r) => {
             let entries: Vec<String> = r.stdout.lines()
                 .map(|l| l.trim().to_string())
