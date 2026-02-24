@@ -371,3 +371,38 @@ export interface ApplyQueueResult {
   error: string | null;
   rolledBack: boolean;
 }
+
+export type InstallMethod = "local" | "wsl2" | "docker" | "remote_ssh";
+
+export type InstallState =
+  | "idle"
+  | "selected_method"
+  | "precheck_running"
+  | "precheck_failed"
+  | "precheck_passed"
+  | "install_running"
+  | "install_failed"
+  | "install_passed"
+  | "init_running"
+  | "init_failed"
+  | "init_passed"
+  | "ready";
+
+export type InstallStep = "precheck" | "install" | "init" | "verify";
+
+export interface InstallLogEntry {
+  at: string;
+  level: string;
+  message: string;
+}
+
+export interface InstallSession {
+  id: string;
+  method: InstallMethod;
+  state: InstallState;
+  current_step: InstallStep | null;
+  logs: InstallLogEntry[];
+  artifacts: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+}

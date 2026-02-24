@@ -66,6 +66,7 @@ pub mod config_io;
 pub mod doctor;
 pub mod doctor_commands;
 pub mod history;
+pub mod install;
 pub mod logging;
 pub mod models;
 pub mod node_client;
