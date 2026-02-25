@@ -43,6 +43,14 @@ impl AccessDiscoveryStore {
 
     pub fn save_experience(&self, experience: ExecutionExperience) -> Result<usize, String> {
         let mut all = self.load_experiences(&experience.instance_id)?;
+        if let Some(existing_idx) = all.iter().position(|item| {
+            item.goal == experience.goal
+                && item.method == experience.method
+                && item.transport == experience.transport
+        }) {
+            // Update matched operation in place and move to tail as most recent.
+            all.remove(existing_idx);
+        }
         all.push(experience.clone());
         if all.len() > MAX_EXPERIENCES_PER_INSTANCE {
             let drop_count = all.len() - MAX_EXPERIENCES_PER_INSTANCE;

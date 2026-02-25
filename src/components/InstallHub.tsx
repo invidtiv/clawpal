@@ -26,6 +26,102 @@ const METHOD_ORDER: InstallMethod[] = ["local", "wsl2", "docker", "remote_ssh"];
 const STEP_ORDER: InstallStep[] = ["precheck", "install", "init", "verify"];
 
 type StepStatus = "pending" | "running" | "success" | "failed";
+type BlockerAction = "resume" | "settings" | "doctor" | "instances";
+
+interface InstallAutoBlocker {
+  code: string;
+  message: string;
+  details?: string;
+  actions: BlockerAction[];
+}
+
+function classifyAutoBlocker(error: string, fallbackMessage: string, errorCode?: string | null): InstallAutoBlocker {
+  if (errorCode === "permission_denied") {
+    return {
+      code: "permission_denied",
+      message: fallbackMessage,
+      details: error,
+      actions: ["doctor", "resume"],
+    };
+  }
+  if (errorCode === "network_error") {
+    return {
+      code: "network_error",
+      message: fallbackMessage,
+      details: error,
+      actions: ["doctor", "resume"],
+    };
+  }
+  if (errorCode === "env_missing") {
+    return {
+      code: "env_missing",
+      message: fallbackMessage,
+      details: error,
+      actions: ["doctor", "resume"],
+    };
+  }
+  const lower = error.toLowerCase();
+  if (
+    lower.includes("no compatible api key found")
+    || lower.includes("no auth profile")
+    || lower.includes("openrouter_api_key")
+    || lower.includes("anthropic_api_key")
+    || lower.includes("openai_api_key")
+  ) {
+    return {
+      code: "auth_missing",
+      message: fallbackMessage,
+      details: error,
+      actions: ["settings", "resume"],
+    };
+  }
+  if (
+    lower.includes("no ssh host config with id")
+    || lower.includes("remote ssh host not found")
+    || lower.includes("remote ssh target missing")
+  ) {
+    return {
+      code: "remote_target_missing",
+      message: fallbackMessage,
+      details: error,
+      actions: ["instances", "resume"],
+    };
+  }
+  if (
+    lower.includes("cannot connect to the docker daemon")
+    || lower.includes("docker: command not found")
+    || lower.includes("command failed: docker")
+  ) {
+    return {
+      code: "docker_unavailable",
+      message: fallbackMessage,
+      details: error,
+      actions: ["doctor", "resume"],
+    };
+  }
+  if (lower.includes("permission denied") || lower.includes("operation not permitted")) {
+    return {
+      code: "permission_denied",
+      message: fallbackMessage,
+      details: error,
+      actions: ["doctor", "resume"],
+    };
+  }
+  if (lower.includes("network") || lower.includes("timed out") || lower.includes("failed to connect")) {
+    return {
+      code: "network_error",
+      message: fallbackMessage,
+      details: error,
+      actions: ["doctor", "resume"],
+    };
+  }
+  return {
+    code: "unknown",
+    message: fallbackMessage,
+    details: error,
+    actions: ["resume"],
+  };
+}
 
 function sortMethods(methods: InstallMethodCapability[]): InstallMethodCapability[] {
   const rank = new Map(METHOD_ORDER.map((method, index) => [method, index]));
@@ -97,6 +193,7 @@ export function InstallHub({
   const [ensuringAccess, setEnsuringAccess] = useState(false);
   const [lastOrchestratorReason, setLastOrchestratorReason] = useState<string>("");
   const [lastOrchestratorSource, setLastOrchestratorSource] = useState<string>("");
+  const [autoBlocker, setAutoBlocker] = useState<InstallAutoBlocker | null>(null);
   const [sshHosts, setSshHosts] = useState<SshHost[]>([]);
   const [selectedSshHostId, setSelectedSshHostId] = useState<string>("");
 
@@ -246,6 +343,9 @@ export function InstallHub({
         showToast?.(result.summary, result.ok ? "success" : "error");
       }
       const next = await refreshSession(targetSession.id);
+      if (result.ok) {
+        setAutoBlocker(null);
+      }
       const target = ensureInstanceByMethod(next);
       appendOrchestratorEvent({
         level: result.ok ? "success" : "error",
@@ -290,6 +390,7 @@ export function InstallHub({
 
   const runAutoInstall = async (startSession: InstallSession) => {
     setAutoRunning(true);
+    setAutoBlocker(null);
     try {
       let current = startSession;
       const goal = `install:${startSession.method}`;
@@ -310,6 +411,11 @@ export function InstallHub({
           setLastOrchestratorReason(decision.reason || "");
           setLastOrchestratorSource(decision.source || "");
           if (decision.source !== "zeroclaw-sidecar") {
+            const blocker = classifyAutoBlocker(
+              decision.reason || "",
+              t("home.install.blocked.orchestratorSource", { source: decision.source }),
+            );
+            setAutoBlocker(blocker);
             const target = ensureInstanceByMethod(current);
             appendOrchestratorEvent({
               level: "error",
@@ -337,6 +443,11 @@ export function InstallHub({
             details: decision.reason,
           });
         } catch (e) {
+          const blocker = classifyAutoBlocker(
+            String(e),
+            t("home.install.blocked.orchestratorUnavailable"),
+          );
+          setAutoBlocker(blocker);
           setLastOrchestratorReason(String(e));
           setLastOrchestratorSource("error");
           const target = ensureInstanceByMethod(current);
@@ -356,12 +467,19 @@ export function InstallHub({
         if (!step) break;
         const { result, session: refreshed } = await runStepAndRefresh(current, step, true);
         if (!result.ok || !refreshed) {
+          const blocker = classifyAutoBlocker(
+            result.details || result.summary,
+            t("home.install.blocked.stepFailed", { step: t(`home.install.step.${step}`) }),
+            result.error_code,
+          );
+          setAutoBlocker(blocker);
           showToast?.(result.summary, "error");
           return;
         }
         current = refreshed;
       }
       if (current.state === "ready") {
+        setAutoBlocker(null);
         showToast?.(t("home.install.autoDone"), "success");
         const target = ensureInstanceByMethod(current);
         appendOrchestratorEvent({
@@ -388,6 +506,7 @@ export function InstallHub({
     setLastResult(null);
     setLastAccessResult(null);
     setLastAccessError(null);
+    setAutoBlocker(null);
     const options = selectedMethod === "remote_ssh"
       ? { ssh_host_id: selectedSshHostId }
       : undefined;
@@ -421,6 +540,39 @@ export function InstallHub({
   const runStep = (step: InstallStep) => {
     if (!session) return;
     void runStepAndRefresh(session, step);
+  };
+
+  const renderBlockerAction = (action: BlockerAction) => {
+    if (!session) return null;
+    if (action === "resume") {
+      return (
+        <Button size="xs" variant="outline" onClick={() => void runAutoInstall(session)}>
+          {t("home.install.resumeAuto")}
+        </Button>
+      );
+    }
+    if (action === "settings") {
+      return (
+        <Button size="xs" variant="outline" onClick={() => onNavigate?.("settings")}>
+          {t("home.install.goSettings")}
+        </Button>
+      );
+    }
+    if (action === "doctor") {
+      return (
+        <Button size="xs" variant="outline" onClick={() => onNavigate?.("doctor")}>
+          {t("home.install.openDoctor")}
+        </Button>
+      );
+    }
+    if (action === "instances") {
+      return (
+        <Button size="xs" variant="outline" onClick={() => onNavigate?.("home")}>
+          {t("home.install.openInstances")}
+        </Button>
+      );
+    }
+    return null;
   };
 
   return (
@@ -579,6 +731,25 @@ export function InstallHub({
                       {t("home.install.nextStep", { step: t(`home.install.step.${lastResult.next_step}`) })}
                     </Button>
                   )}
+                </div>
+              )}
+
+              {autoBlocker && session.state !== "ready" && !autoRunning && (
+                <div className="rounded border border-amber-500/40 bg-amber-500/5 p-2 text-xs space-y-2">
+                  <div className="font-medium">{autoBlocker.message}</div>
+                  <div className="text-muted-foreground">
+                    {t("home.install.blocked.code", { code: autoBlocker.code })}
+                  </div>
+                  {autoBlocker.details && (
+                    <div className="max-h-24 overflow-auto rounded border bg-background/70 p-2 text-muted-foreground whitespace-pre-wrap break-all">
+                      {autoBlocker.details}
+                    </div>
+                  )}
+                  <div className="flex flex-wrap items-center gap-2">
+                    {autoBlocker.actions.map((action) => (
+                      <span key={action}>{renderBlockerAction(action)}</span>
+                    ))}
+                  </div>
                 </div>
               )}
 
