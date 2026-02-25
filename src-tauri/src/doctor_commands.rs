@@ -1,182 +1,118 @@
 use serde_json::{json, Value};
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
 use tauri::{AppHandle, Emitter, State};
 
-use crate::node_client::{NodeClient, GatewayCredentials};
-use crate::bridge_client::{BridgeClient, extract_shell_command};
+use crate::doctor_runtime_bridge::emit_runtime_event;
+use crate::bridge_client::extract_shell_command;
 use crate::models::resolve_paths;
+use crate::runtime::types::{RuntimeAdapter, RuntimeDomain, RuntimeEvent, RuntimeSessionKey};
+use crate::runtime::zeroclaw::adapter::ZeroclawDoctorAdapter;
 use crate::ssh::SshConnectionPool;
 
-/// Create an SSH local port forward to a remote host's gateway (port 18789).
-/// Returns the local port to connect to.
-#[tauri::command]
-pub async fn doctor_port_forward(
-    pool: State<'_, SshConnectionPool>,
-    host_id: String,
-) -> Result<u16, String> {
-    pool.request_port_forward(&host_id, 18789).await
+fn zeroclaw_pending_invokes() -> &'static Mutex<HashMap<String, Value>> {
+    static STORE: OnceLock<Mutex<HashMap<String, Value>>> = OnceLock::new();
+    STORE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// Read gateway auth token and device identity from a remote host via SSH.
-/// Returns credentials needed to authenticate with that host's gateway.
-#[tauri::command]
-pub async fn doctor_read_remote_credentials(
-    pool: State<'_, SshConnectionPool>,
-    host_id: String,
-) -> Result<GatewayCredentials, String> {
-    // Read auth token from remote config
-    let config_result = pool.exec_login(&host_id,
-        "cat \"${OPENCLAW_STATE_DIR:-${OPENCLAW_HOME:-$HOME/.openclaw}}/openclaw.json\" 2>/dev/null || echo '{}'"
-    ).await?;
-    let token = serde_json::from_str::<Value>(config_result.stdout.trim())
-        .ok()
-        .and_then(|config| {
-            config.get("gateway")?
-                .get("auth")?
-                .get("token")?
-                .as_str()
-                .map(|s| s.to_string())
-        })
-        .unwrap_or_default();
-
-    // Read device identity
-    let device_result = pool.exec_login(&host_id,
-        "cat \"${OPENCLAW_STATE_DIR:-${OPENCLAW_HOME:-$HOME/.openclaw}}/identity/device.json\" 2>/dev/null"
-    ).await?;
-    let device_json: Value = serde_json::from_str(device_result.stdout.trim())
-        .map_err(|e| format!("Failed to parse remote device.json: {e}"))?;
-
-    let device_id = device_json.get("deviceId")
-        .and_then(|v| v.as_str())
-        .ok_or("Missing deviceId in remote device.json")?
-        .to_string();
-    let private_key_pem = device_json.get("privateKeyPem")
-        .and_then(|v| v.as_str())
-        .ok_or("Missing privateKeyPem in remote device.json")?
-        .to_string();
-
-    Ok(GatewayCredentials { token, device_id, private_key_pem })
-}
-
-/// Auto-approve pending device pairing requests on a remote host.
-/// When ClawPal connects to a remote gateway using the host's own device identity,
-/// the gateway may require re-pairing (e.g. token rotation, repair).
-/// This command SSHes into the host, lists pending requests, and approves them.
-/// Returns the number of requests approved.
-#[tauri::command]
-pub async fn doctor_auto_pair(
-    pool: State<'_, SshConnectionPool>,
-    host_id: String,
-) -> Result<u32, String> {
-    let result = pool.exec_login(&host_id, "openclaw devices list --json 2>/dev/null").await?;
-    if result.exit_code != 0 {
-        return Err(format!("openclaw devices list failed: {}", result.stderr.trim()));
-    }
-    let list: Value = serde_json::from_str(result.stdout.trim())
-        .map_err(|e| format!("Failed to parse devices list: {e}"))?;
-
-    let pending = list.get("pending").and_then(|v| v.as_array());
-    let Some(pending) = pending else {
-        return Ok(0);
-    };
-
-    let mut approved = 0u32;
-    for req in pending {
-        let request_id = req.get("requestId").and_then(|v| v.as_str()).unwrap_or("");
-        if request_id.is_empty() { continue; }
-        let approve_result = pool.exec_login(
-            &host_id,
-            &format!("openclaw devices approve {request_id} 2>&1"),
-        ).await;
-        if approve_result.is_ok() {
-            approved += 1;
+fn register_runtime_invoke(event: &RuntimeEvent) {
+    if let RuntimeEvent::Invoke { payload } = event {
+        if let Some(id) = payload.get("id").and_then(|v| v.as_str()) {
+            if let Ok(mut guard) = zeroclaw_pending_invokes().lock() {
+                guard.insert(id.to_string(), payload.clone());
+            }
         }
     }
-    Ok(approved)
+}
+
+fn take_zeroclaw_invoke(invoke_id: &str) -> Option<Value> {
+    if let Ok(mut guard) = zeroclaw_pending_invokes().lock() {
+        return guard.remove(invoke_id);
+    }
+    None
 }
 
 #[tauri::command]
 pub async fn doctor_connect(
-    client: State<'_, NodeClient>,
     app: AppHandle,
-    url: String,
-    credentials: Option<GatewayCredentials>,
 ) -> Result<(), String> {
-    client.connect(&url, app, credentials).await
+    let _ = app.emit("doctor:connected", json!({ "engine": "zeroclaw" }));
+    Ok(())
 }
 
 #[tauri::command]
-pub async fn doctor_disconnect(
-    client: State<'_, NodeClient>,
-    bridge: State<'_, BridgeClient>,
-) -> Result<(), String> {
-    let _ = bridge.disconnect().await;
-    client.disconnect().await
-}
-
-#[tauri::command]
-pub async fn doctor_bridge_connect(
-    bridge: State<'_, BridgeClient>,
-    app: AppHandle,
-    url: String,
-    credentials: Option<GatewayCredentials>,
-) -> Result<(), String> {
-    bridge.connect(&url, app, credentials).await
-}
-
-#[tauri::command]
-pub async fn doctor_bridge_disconnect(
-    bridge: State<'_, BridgeClient>,
-) -> Result<(), String> {
-    bridge.disconnect().await
-}
-
-#[tauri::command]
-pub async fn doctor_bridge_node_id(
-    bridge: State<'_, BridgeClient>,
-) -> Result<String, String> {
-    bridge.node_id().await.ok_or_else(|| "Bridge not connected".into())
+pub async fn doctor_disconnect() -> Result<(), String> {
+    Ok(())
 }
 
 #[tauri::command]
 pub async fn doctor_start_diagnosis(
-    client: State<'_, NodeClient>,
+    app: AppHandle,
     context: String,
     session_key: String,
     agent_id: String,
+    instance_id: Option<String>,
 ) -> Result<(), String> {
-    let idempotency_key = uuid::Uuid::new_v4().to_string();
-
-    // Fire-and-forget: results arrive via streaming chat events
-    client.send_request_fire("agent", json!({
-        "message": context,
-        "idempotencyKey": idempotency_key,
-        "agentId": agent_id,
-        "sessionKey": session_key,
-    })).await
+    let instance = instance_id.unwrap_or_else(|| "local".to_string());
+    let key = RuntimeSessionKey::new(
+        "zeroclaw",
+        RuntimeDomain::Doctor,
+        instance,
+        agent_id.clone(),
+        session_key.clone(),
+    );
+    let adapter = ZeroclawDoctorAdapter;
+    match adapter.start(&key, &context) {
+        Ok(events) => {
+            for ev in events {
+                register_runtime_invoke(&ev);
+                emit_runtime_event(&app, ev);
+            }
+            Ok(())
+        }
+        Err(e) => {
+            let code = e.code.as_str();
+            emit_runtime_event(&app, RuntimeEvent::Error { error: e });
+            Err(format!("zeroclaw start failed [{code}]"))
+        }
+    }
 }
 
 #[tauri::command]
 pub async fn doctor_send_message(
-    client: State<'_, NodeClient>,
+    app: AppHandle,
     message: String,
     session_key: String,
     agent_id: String,
+    instance_id: Option<String>,
 ) -> Result<(), String> {
-    let idempotency_key = uuid::Uuid::new_v4().to_string();
-
-    // Fire-and-forget: results arrive via streaming chat events
-    client.send_request_fire("agent", json!({
-        "message": message,
-        "idempotencyKey": idempotency_key,
-        "agentId": agent_id,
-        "sessionKey": session_key,
-    })).await
+    let instance = instance_id.unwrap_or_else(|| "local".to_string());
+    let key = RuntimeSessionKey::new(
+        "zeroclaw",
+        RuntimeDomain::Doctor,
+        instance,
+        agent_id.clone(),
+        session_key.clone(),
+    );
+    let adapter = ZeroclawDoctorAdapter;
+    match adapter.send(&key, &message) {
+        Ok(events) => {
+            for ev in events {
+                register_runtime_invoke(&ev);
+                emit_runtime_event(&app, ev);
+            }
+            Ok(())
+        }
+        Err(e) => {
+            let code = e.code.as_str();
+            emit_runtime_event(&app, RuntimeEvent::Error { error: e });
+            Err(format!("zeroclaw send failed [{code}]"))
+        }
+    }
 }
 
 #[tauri::command]
 pub async fn doctor_approve_invoke(
-    bridge: State<'_, BridgeClient>,
-    client: State<'_, NodeClient>,
     pool: State<'_, SshConnectionPool>,
     app: AppHandle,
     invoke_id: String,
@@ -184,18 +120,11 @@ pub async fn doctor_approve_invoke(
     session_key: String,
     agent_id: String,
 ) -> Result<Value, String> {
-    // Invokes come from the node connection (BridgeClient).
-    // `expired` = true means the invoke was already auto-rejected with USER_PENDING
-    // (gateway 30s timeout approaching), so the result must go via chat message.
-    let (invoke, expired) = bridge.take_invoke(&invoke_id).await
+    let invoke = take_zeroclaw_invoke(&invoke_id)
         .ok_or_else(|| format!("No pending invoke with id: {invoke_id}"))?;
 
     let command = invoke.get("command").and_then(|v| v.as_str()).unwrap_or("");
     let args = invoke.get("args").cloned().unwrap_or(Value::Null);
-    // Use the gateway-assigned nodeId from the invoke request (not our hostname).
-    // Mismatch here causes the gateway to ignore the result → agent sees "timeout".
-    let node_id = invoke.get("nodeId").and_then(|v| v.as_str()).unwrap_or("").to_string();
-
     // Map standard node commands to internal execution.
     // Security: commands reach here only after user approval in the UI
     // (write → "Execute" button, read → "Allow" button).
@@ -258,60 +187,58 @@ pub async fn doctor_approve_invoke(
         }
     };
 
-    if expired {
-        // Invoke was already auto-rejected with USER_PENDING — gateway discards late
-        // invoke results. Send the output as a follow-up chat message instead so the
-        // agent can continue with the information.
-        let result_text = if let Some(stdout) = result.get("stdout").and_then(|v| v.as_str()) {
-            let stderr = result.get("stderr").and_then(|v| v.as_str()).unwrap_or("");
-            let exit_code = result.get("exitCode").and_then(|v| v.as_i64()).unwrap_or(-1);
-            let mut msg = format!("[User executed the previously pending command: `{command}`]\n");
-            if !stdout.is_empty() {
-                msg.push_str(&format!("stdout:\n```\n{stdout}\n```\n"));
-            }
-            if !stderr.is_empty() {
-                msg.push_str(&format!("stderr:\n```\n{stderr}\n```\n"));
-            }
-            msg.push_str(&format!("exitCode: {exit_code}"));
-            msg
-        } else {
-            format!("[User executed the previously pending command: `{command}`]\nResult: {result}")
-        };
-        let idempotency_key = uuid::Uuid::new_v4().to_string();
-        let _ = client.send_request_fire("agent", json!({
-            "message": result_text,
-            "idempotencyKey": idempotency_key,
-            "agentId": agent_id,
-            "sessionKey": session_key,
-        })).await;
-    } else {
-        // Normal path: send result back to the gateway via the node connection
-        bridge.send_invoke_result(&invoke_id, &node_id, result.clone()).await?;
-    }
-
+    // Emit tool result first so UI can render it directly under the tool call
+    // before any zeroclaw follow-up assistant message arrives.
     let _ = app.emit("doctor:invoke-result", json!({
         "id": invoke_id,
         "result": result,
     }));
+
+    // Feed execution result back into zeroclaw session so it can continue the diagnosis.
+    let command = command.to_string();
+    let result_text = if let Some(stdout) = result.get("stdout").and_then(|v| v.as_str()) {
+        let stderr = result.get("stderr").and_then(|v| v.as_str()).unwrap_or("");
+        let exit_code = result.get("exitCode").and_then(|v| v.as_i64()).unwrap_or(-1);
+        let mut msg = format!("[Command executed: `{command}`]\n");
+        if !stdout.is_empty() {
+            msg.push_str(&format!("stdout:\n```\n{stdout}\n```\n"));
+        }
+        if !stderr.is_empty() {
+            msg.push_str(&format!("stderr:\n```\n{stderr}\n```\n"));
+        }
+        msg.push_str(&format!("exitCode: {exit_code}"));
+        msg
+    } else {
+        format!("[Command executed: `{command}`]\nResult: {result}")
+    };
+    let key = RuntimeSessionKey::new(
+        "zeroclaw",
+        RuntimeDomain::Doctor,
+        target.clone(),
+        agent_id.clone(),
+        session_key.clone(),
+    );
+    let adapter = ZeroclawDoctorAdapter;
+    if let Ok(events) = adapter.send(&key, &result_text) {
+        for ev in events {
+            register_runtime_invoke(&ev);
+            emit_runtime_event(&app, ev);
+        }
+    }
 
     Ok(result)
 }
 
 #[tauri::command]
 pub async fn doctor_reject_invoke(
-    bridge: State<'_, BridgeClient>,
     invoke_id: String,
-    reason: String,
+    _reason: String,
 ) -> Result<(), String> {
-    let (invoke, expired) = bridge.take_invoke(&invoke_id).await
-        .ok_or_else(|| format!("No pending invoke with id: {invoke_id}"))?;
-    if expired {
-        // Already auto-rejected with USER_PENDING — no need to send another error
+    if take_zeroclaw_invoke(&invoke_id).is_some() {
+        // zeroclaw local pending invoke: just drop from pending queue.
         return Ok(());
     }
-    let node_id = invoke.get("nodeId").and_then(|v| v.as_str()).unwrap_or("");
-
-    bridge.send_invoke_error(&invoke_id, node_id, "REJECTED", &format!("Rejected by user: {reason}")).await
+    Err(format!("No pending invoke with id: {invoke_id}"))
 }
 
 #[tauri::command]

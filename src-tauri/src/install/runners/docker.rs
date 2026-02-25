@@ -24,19 +24,22 @@ fn docker_openclaw_home() -> String {
         Some(home) => home
             .join(".clawpal")
             .join("docker-local")
-            .join("openclaw")
             .to_string_lossy()
             .to_string(),
-        None => "~/.clawpal/docker-local/openclaw".to_string(),
+        None => "~/.clawpal/docker-local".to_string(),
     }
 }
 
+fn docker_openclaw_state_dir() -> String {
+    format!("{}/.openclaw", docker_openclaw_home())
+}
+
 fn docker_verify_compose_command(repo_str: &str) -> String {
-    let openclaw_home = docker_openclaw_home();
+    let openclaw_state_dir = docker_openclaw_state_dir();
     format!(
         "cd \"{repo}\" && OPENCLAW_CONFIG_DIR=\"{home}\" OPENCLAW_WORKSPACE_DIR=\"{home}/workspace\" OPENCLAW_GATEWAY_TOKEN=\"clawpal-install\" CLAUDE_AI_SESSION_KEY=\"dummy\" CLAUDE_WEB_SESSION_KEY=\"dummy\" CLAUDE_WEB_COOKIE=\"dummy\" docker compose config",
         repo = repo_str
-        ,home = openclaw_home
+        ,home = openclaw_state_dir
     )
 }
 
@@ -84,9 +87,10 @@ pub fn run_step(
         }
         InstallStep::Init => {
             let openclaw_home = docker_openclaw_home();
+            let openclaw_state_dir = docker_openclaw_state_dir();
             let prep_cmd = format!(
-                "mkdir -p \"{home}\" \"{home}/workspace\" && [ -f \"{home}/openclaw.json\" ] || printf '{{}}' > \"{home}/openclaw.json\"",
-                home = openclaw_home
+                "mkdir -p \"{state}\" \"{state}/workspace\" && [ -f \"{state}/openclaw.json\" ] || printf '{{}}' > \"{state}/openclaw.json\"",
+                state = openclaw_state_dir
             );
             let prep = run_command("bash", &["-lc", &prep_cmd])?;
             let build_cmd = format!(

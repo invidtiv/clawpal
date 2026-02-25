@@ -48,6 +48,11 @@ export function DoctorChat({
         className="h-[420px] mb-2 border rounded-md p-3 bg-muted/30 overflow-y-auto"
       >
         <div className="space-y-3">
+          {error && (
+            <div className="text-sm text-destructive border border-destructive/30 rounded-md px-3 py-2 bg-destructive/5">
+              {error}
+            </div>
+          )}
           {messages.map((msg) => (
             <MessageBubble
               key={msg.id}

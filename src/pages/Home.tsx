@@ -270,7 +270,7 @@ export function Home({
 
   // Update check — deferred, runs once (not in poll loop)
   useEffect(() => {
-    const instanceKey = ua.instanceId;
+    const instanceKey = `${ua.instanceId}#${ua.instanceToken}`;
     const latched = OPENCLAW_UPDATE_LATCH.get(instanceKey);
     const now = Date.now();
     if (latched?.available) {

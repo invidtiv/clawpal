@@ -10,6 +10,11 @@ use tauri::{Manager, State};
 use crate::config_io::{ensure_dirs, read_openclaw_config, write_json, write_text};
 use crate::doctor::{apply_auto_fixes, run_doctor, DoctorReport};
 use crate::history::{add_snapshot, list_snapshots, read_snapshot};
+use crate::access_discovery::probe_engine::{build_probe_plan_for_local, run_probe_with_redaction};
+use crate::access_discovery::store::AccessDiscoveryStore;
+use crate::access_discovery::types::{CapabilityProfile, ExecutionExperience};
+use crate::install::session_store::InstallSessionStore;
+use crate::install::types::InstallState;
 use crate::models::resolve_paths;
 use crate::ssh::{SshConnectionPool, SshHostConfig, SshExecResult, SftpEntry};
 
@@ -610,6 +615,9 @@ pub fn upsert_model_profile(mut profile: ModelProfile) -> Result<ModelProfile, S
         profile.name = format!("{}/{}", profile.provider, profile.model);
     }
     let has_api_key = profile.api_key.as_ref().is_some_and(|k| !k.trim().is_empty());
+    if has_api_key && profile.auth_ref.trim().is_empty() {
+        profile.auth_ref = format!("{}:default", profile.provider.trim());
+    }
     if profile.auth_ref.trim().is_empty() && !has_api_key {
         // Auto-resolve auth ref from openclaw config or env vars
         let paths_tmp = resolve_paths();
@@ -645,6 +653,7 @@ pub fn upsert_model_profile(mut profile: ModelProfile) -> Result<ModelProfile, S
         profiles.push(profile.clone());
     }
     save_model_profiles(&paths, &profiles)?;
+    sync_profile_auth_to_main_agent(&paths, &profile)?;
     Ok(profile)
 }
 
@@ -694,9 +703,10 @@ pub fn resolve_provider_auth(provider: String) -> Result<ProviderAuthSuggestion,
 
     // 3. Check existing model profiles for this provider
     let profiles = load_model_profiles(&paths);
+    let global_base = global_profile_base_dir();
     for p in &profiles {
         if p.provider.eq_ignore_ascii_case(provider_trimmed) {
-            let key = resolve_profile_api_key(p, &paths.base_dir);
+            let key = resolve_profile_api_key(p, &global_base);
             if !key.is_empty() {
                 let auth_ref = if !p.auth_ref.trim().is_empty() {
                     Some(p.auth_ref.clone())
@@ -1022,11 +1032,12 @@ pub fn update_channel_config(
 pub async fn list_bindings(
     cache: tauri::State<'_, crate::cli_runner::CliCache>,
 ) -> Result<Vec<Value>, String> {
-    let cache_key = "local:bindings";
-    if let Some(cached) = cache.get(cache_key, None) {
+    let cache_key = local_cli_cache_key("bindings");
+    if let Some(cached) = cache.get(&cache_key, None) {
         return serde_json::from_str(&cached).map_err(|e| e.to_string());
     }
     let cache = cache.inner().clone();
+    let cache_key_cloned = cache_key.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let output = crate::cli_runner::run_openclaw(&["config", "get", "bindings", "--json"])?;
         // "bindings" may not exist yet — treat "not found" as empty
@@ -1039,7 +1050,7 @@ pub async fn list_bindings(
         let json = crate::cli_runner::parse_json_output(&output)?;
         let result = json.as_array().cloned().unwrap_or_default();
         if let Ok(serialized) = serde_json::to_string(&result) {
-            cache.set(cache_key.to_string(), serialized);
+            cache.set(cache_key_cloned, serialized);
         }
         Ok(result)
     }).await.map_err(|e| e.to_string())?
@@ -1071,11 +1082,18 @@ pub fn set_global_model(model_value: Option<String>) -> Result<bool, String> {
     // If existing model is an object (has fallbacks etc.), only update "primary" inside it
     if let Some(existing) = cfg.pointer_mut("/agents/defaults/model") {
         if let Some(model_obj) = existing.as_object_mut() {
-            match model {
-                Some(v) => { model_obj.insert("primary".into(), Value::String(v)); }
-                None => { model_obj.remove("primary"); }
-            }
+            let sync_model_value = match model.clone() {
+                Some(v) => {
+                    model_obj.insert("primary".into(), Value::String(v.clone()));
+                    Some(v)
+                }
+                None => {
+                    model_obj.remove("primary");
+                    None
+                }
+            };
             write_config_with_snapshot(&paths, &current, &cfg, "set-global-model")?;
+            maybe_sync_main_auth_for_model_value(&paths, sync_model_value)?;
             return Ok(true);
         }
     }
@@ -1086,6 +1104,10 @@ pub fn set_global_model(model_value: Option<String>) -> Result<bool, String> {
         model.map(Value::String),
     )?;
     write_config_with_snapshot(&paths, &current, &cfg, "set-global-model")?;
+    let model_to_sync = cfg
+        .pointer("/agents/defaults/model")
+        .and_then(read_model_value);
+    maybe_sync_main_auth_for_model_value(&paths, model_to_sync)?;
     Ok(true)
 }
 
@@ -1125,21 +1147,27 @@ pub fn list_model_bindings() -> Result<Vec<ModelBinding>, String> {
     Ok(collect_model_bindings(&cfg, &profiles))
 }
 
+fn local_cli_cache_key(suffix: &str) -> String {
+    let paths = resolve_paths();
+    format!("local:{}:{}", paths.openclaw_dir.to_string_lossy(), suffix)
+}
+
 #[tauri::command]
 pub async fn list_agents_overview(
     cache: tauri::State<'_, crate::cli_runner::CliCache>,
 ) -> Result<Vec<AgentOverview>, String> {
-    let cache_key = "local:agents-list";
-    if let Some(cached) = cache.get(cache_key, None) {
+    let cache_key = local_cli_cache_key("agents-list");
+    if let Some(cached) = cache.get(&cache_key, None) {
         return serde_json::from_str(&cached).map_err(|e| e.to_string());
     }
     let cache = cache.inner().clone();
+    let cache_key_cloned = cache_key.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let output = crate::cli_runner::run_openclaw(&["agents", "list", "--json"])?;
         let json = crate::cli_runner::parse_json_output(&output)?;
         let result = parse_agents_cli_output(&json, None)?;
         if let Ok(serialized) = serde_json::to_string(&result) {
-            cache.set(cache_key.to_string(), serialized);
+            cache.set(cache_key_cloned, serialized);
         }
         Ok(result)
     }).await.map_err(|e| e.to_string())?
@@ -2133,6 +2161,130 @@ pub fn set_active_clawpal_data_dir(path: Option<String>) -> Result<bool, String>
     Ok(true)
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EnsureAccessResult {
+    pub instance_id: String,
+    pub transport: String,
+    pub working_chain: Vec<String>,
+    pub used_legacy_fallback: bool,
+    pub profile_reused: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecordInstallExperienceResult {
+    pub saved: bool,
+    pub total_count: usize,
+}
+
+pub async fn ensure_access_profile_impl(instance_id: String, transport: String) -> Result<EnsureAccessResult, String> {
+    let paths = resolve_paths();
+    let store = AccessDiscoveryStore::new(paths.clawpal_dir.join("access-discovery"));
+    if let Some(existing) = store.load_profile(&instance_id)? {
+        if !existing.working_chain.is_empty() {
+            return Ok(EnsureAccessResult {
+                instance_id,
+                transport,
+                working_chain: existing.working_chain,
+                used_legacy_fallback: false,
+                profile_reused: true,
+            });
+        }
+    }
+
+    let probe_plan = build_probe_plan_for_local();
+    let probes = probe_plan
+        .iter()
+        .enumerate()
+        .map(|(idx, cmd)| run_probe_with_redaction(&format!("probe-{idx}"), cmd, "planned", true, 0))
+        .collect::<Vec<_>>();
+
+    let mut profile = CapabilityProfile::example_local(&instance_id);
+    profile.transport = transport.clone();
+    profile.probes = probes;
+    profile.verified_at = unix_timestamp_secs();
+
+    let used_legacy_fallback = if store.save_profile(&profile).is_err() {
+        true
+    } else {
+        false
+    };
+
+    Ok(EnsureAccessResult {
+        instance_id,
+        transport,
+        working_chain: profile.working_chain,
+        used_legacy_fallback,
+        profile_reused: false,
+    })
+}
+
+#[tauri::command]
+pub async fn ensure_access_profile(instance_id: String, transport: String) -> Result<EnsureAccessResult, String> {
+    ensure_access_profile_impl(instance_id, transport).await
+}
+
+pub async fn ensure_access_profile_for_test(instance_id: &str) -> Result<EnsureAccessResult, String> {
+    ensure_access_profile_impl(instance_id.to_string(), "local".to_string()).await
+}
+
+fn value_array_as_strings(value: Option<&Value>) -> Vec<String> {
+    value
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(Value::as_str)
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
+}
+
+#[tauri::command]
+pub async fn record_install_experience(
+    session_id: String,
+    instance_id: String,
+    goal: String,
+    store: State<'_, InstallSessionStore>,
+) -> Result<RecordInstallExperienceResult, String> {
+    let id = session_id.trim();
+    if id.is_empty() {
+        return Err("session_id is required".to_string());
+    }
+    let session = store
+        .get(id)?
+        .ok_or_else(|| format!("install session not found: {id}"))?;
+    if !matches!(session.state, InstallState::Ready) {
+        return Err(format!(
+            "install session is not ready: {}",
+            session.state.as_str()
+        ));
+    }
+
+    let transport = session.method.as_str().to_string();
+    let paths = resolve_paths();
+    let discovery_store = AccessDiscoveryStore::new(paths.clawpal_dir.join("access-discovery"));
+    let profile = discovery_store.load_profile(&instance_id)?;
+    let successful_chain = profile.map(|p| p.working_chain).unwrap_or_default();
+    let commands = value_array_as_strings(session.artifacts.get("executed_commands"));
+
+    let experience = ExecutionExperience {
+        instance_id: instance_id.clone(),
+        goal,
+        transport,
+        method: session.method.as_str().to_string(),
+        commands,
+        successful_chain,
+        recorded_at: unix_timestamp_secs(),
+    };
+    let total_count = discovery_store.save_experience(experience)?;
+    Ok(RecordInstallExperienceResult {
+        saved: true,
+        total_count,
+    })
+}
+
 /// Strip leading non-JSON lines from CLI output (plugin logs, ANSI codes, etc.)
 fn extract_json_from_output(raw: &str) -> Option<&str> {
     let start = raw.find('{').or_else(|| raw.find('['))?;
@@ -2962,7 +3114,14 @@ fn clear_directory_contents(target: &Path) -> Result<usize, String> {
 }
 
 fn model_profiles_path(paths: &crate::models::OpenClawPaths) -> std::path::PathBuf {
-    paths.clawpal_dir.join("model-profiles.json")
+    let _ = paths;
+    let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
+    home.join(".clawpal").join("model-profiles.json")
+}
+
+fn global_profile_base_dir() -> std::path::PathBuf {
+    let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
+    home.join(".openclaw")
 }
 
 
@@ -2995,9 +3154,10 @@ pub struct ResolvedApiKey {
 pub fn resolve_api_keys() -> Result<Vec<ResolvedApiKey>, String> {
     let paths = resolve_paths();
     let profiles = load_model_profiles(&paths);
+    let global_base = global_profile_base_dir();
     let mut out = Vec::new();
     for profile in &profiles {
-        let key = resolve_profile_api_key(profile, &paths.base_dir);
+        let key = resolve_profile_api_key(profile, &global_base);
         let masked = mask_api_key(&key);
         out.push(ResolvedApiKey {
             profile_id: profile.id.clone(),
@@ -3048,6 +3208,28 @@ fn resolve_profile_api_key(profile: &ModelProfile, base_dir: &Path) -> String {
     }
 
     String::new()
+}
+
+/// Internal helper: resolve available provider API keys from ClawPal model profiles.
+/// Returns provider -> full api key (unmasked). Used by internal sidecar integrations.
+pub(crate) fn collect_provider_api_keys_for_internal() -> HashMap<String, String> {
+    let paths = resolve_paths();
+    collect_provider_api_keys_from_paths(&paths)
+}
+
+pub(crate) fn collect_provider_api_keys_from_paths(paths: &crate::models::OpenClawPaths) -> HashMap<String, String> {
+    let profiles = load_model_profiles(&paths);
+    let global_base = global_profile_base_dir();
+    let mut out = HashMap::<String, String>::new();
+    for profile in profiles.iter().filter(|p| p.enabled) {
+        let key = resolve_profile_api_key(profile, &global_base);
+        if key.is_empty() {
+            continue;
+        }
+        out.entry(profile.provider.trim().to_lowercase())
+            .or_insert(key);
+    }
+    out
 }
 
 /// Reads agent-level auth-profiles.json to find the actual API key/token.
@@ -3138,6 +3320,118 @@ fn save_model_profiles(paths: &crate::models::OpenClawPaths, profiles: &[ModelPr
     {
         use std::os::unix::fs::PermissionsExt;
         let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o600));
+    }
+    Ok(())
+}
+
+fn sync_profile_auth_to_main_agent(
+    paths: &crate::models::OpenClawPaths,
+    profile: &ModelProfile,
+) -> Result<(), String> {
+    let api_key = match profile
+        .api_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|key| !key.is_empty())
+    {
+        Some(value) => value,
+        None => return Ok(()),
+    };
+
+    let provider = profile.provider.trim();
+    if provider.is_empty() {
+        return Ok(());
+    }
+    let auth_ref = profile
+        .auth_ref
+        .trim()
+        .to_string();
+    let auth_ref = if auth_ref.is_empty() {
+        format!("{provider}:default")
+    } else {
+        auth_ref
+    };
+
+    let auth_file = paths
+        .base_dir
+        .join("agents")
+        .join("main")
+        .join("agent")
+        .join("auth-profiles.json");
+    if let Some(parent) = auth_file.parent() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+
+    let mut root = fs::read_to_string(&auth_file)
+        .ok()
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+        .unwrap_or_else(|| serde_json::json!({ "version": 1 }));
+
+    if !root.is_object() {
+        root = serde_json::json!({ "version": 1 });
+    }
+    let Some(root_obj) = root.as_object_mut() else {
+        return Err("failed to prepare auth profile root object".to_string());
+    };
+
+    if !root_obj.contains_key("version") {
+        root_obj.insert("version".into(), Value::from(1_u64));
+    }
+
+    let profiles_val = root_obj
+        .entry("profiles".to_string())
+        .or_insert_with(|| Value::Object(Map::new()));
+    if !profiles_val.is_object() {
+        *profiles_val = Value::Object(Map::new());
+    }
+    if let Some(profiles_map) = profiles_val.as_object_mut() {
+        profiles_map.insert(
+            auth_ref.clone(),
+            serde_json::json!({
+                "type": "api_key",
+                "provider": provider,
+                "key": api_key,
+            }),
+        );
+    }
+
+    let last_good_val = root_obj
+        .entry("lastGood".to_string())
+        .or_insert_with(|| Value::Object(Map::new()));
+    if !last_good_val.is_object() {
+        *last_good_val = Value::Object(Map::new());
+    }
+    if let Some(last_good_map) = last_good_val.as_object_mut() {
+        last_good_map.insert(provider.to_string(), Value::String(auth_ref));
+    }
+
+    let serialized = serde_json::to_string_pretty(&root).map_err(|e| e.to_string())?;
+    write_text(&auth_file, &serialized)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&auth_file, fs::Permissions::from_mode(0o600));
+    }
+    Ok(())
+}
+
+fn maybe_sync_main_auth_for_model_value(
+    paths: &crate::models::OpenClawPaths,
+    model_value: Option<String>,
+) -> Result<(), String> {
+    let Some(model_value) = model_value else {
+        return Ok(());
+    };
+    let normalized = model_value.trim().to_lowercase();
+    if normalized.is_empty() {
+        return Ok(());
+    }
+    let profiles = load_model_profiles(paths);
+    for profile in &profiles {
+        let profile_model = profile_to_model_value(profile);
+        if profile_model.trim().to_lowercase() == normalized {
+            return sync_profile_auth_to_main_agent(paths, profile);
+        }
     }
     Ok(())
 }
@@ -3927,7 +4221,7 @@ fn resolve_full_api_key(profile_id: String) -> Result<String, String> {
     let profiles = load_model_profiles(&paths);
     let profile = profiles.iter().find(|p| p.id == profile_id)
         .ok_or_else(|| "Profile not found".to_string())?;
-    let key = resolve_profile_api_key(profile, &paths.base_dir);
+    let key = resolve_profile_api_key(profile, &global_profile_base_dir());
     if key.is_empty() {
         return Err("No API key configured for this profile".to_string());
     }
@@ -4391,7 +4685,13 @@ fn resolve_model_provider_base_url(cfg: &Value, provider: &str) -> Option<String
 // ---------------------------------------------------------------------------
 
 fn remote_instances_path() -> PathBuf {
-    resolve_paths().clawpal_dir.join("remote-instances.json")
+    // SSH host definitions are user-global and must not follow per-instance
+    // active data-dir overrides (e.g. docker-local).
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    let clawpal_dir = std::env::var("CLAWPAL_DATA_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from(home).join(".clawpal"));
+    clawpal_dir.join("remote-instances.json")
 }
 
 fn read_hosts_from_disk() -> Result<Vec<SshHostConfig>, String> {

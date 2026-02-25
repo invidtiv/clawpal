@@ -349,12 +349,6 @@ export interface PreviewQueueResult {
 
 // Doctor Agent
 
-export interface GatewayCredentials {
-  token: string;
-  deviceId: string;
-  privateKeyPem: string;
-}
-
 export interface DoctorInvoke {
   id: string;
   command: string;
@@ -429,4 +423,23 @@ export interface InstallMethodCapability {
   method: InstallMethod;
   available: boolean;
   hint: string | null;
+}
+
+export interface InstallOrchestratorDecision {
+  step: string | null;
+  reason: string;
+  source: string;
+}
+
+export interface EnsureAccessResult {
+  instanceId: string;
+  transport: string;
+  workingChain: string[];
+  usedLegacyFallback: boolean;
+  profileReused: boolean;
+}
+
+export interface RecordInstallExperienceResult {
+  saved: boolean;
+  totalCount: number;
 }

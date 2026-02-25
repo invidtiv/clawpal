@@ -1,7 +1,7 @@
 use clawpal::install::types::InstallSession;
 use clawpal::install::commands::{
     create_session_for_test, failed_state_for_test, get_session_for_test, list_methods_for_test,
-    run_local_precheck_for_test, run_step_for_test,
+    orchestrator_next_for_test, run_local_precheck_for_test, run_step_for_test,
 };
 use clawpal::install::runners::docker::docker_verify_compose_command_for_test;
 use clawpal::cli_runner::set_active_openclaw_home_override;
@@ -50,6 +50,13 @@ async fn run_step_precheck_updates_state_and_next_step() {
         .await
         .expect("get session should succeed");
     assert_eq!(refreshed.state.as_str(), "precheck_passed");
+    let executed_commands = refreshed
+        .artifacts
+        .get("executed_commands")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.len())
+        .unwrap_or(0);
+    assert!(executed_commands > 0);
 }
 
 #[tokio::test]
@@ -59,6 +66,19 @@ async fn list_methods_returns_all_four_methods() {
         .expect("list methods should succeed");
     let names: Vec<String> = methods.into_iter().map(|m| m.method).collect();
     assert_eq!(names, vec!["local", "wsl2", "docker", "remote_ssh"]);
+}
+
+#[tokio::test]
+async fn orchestrator_next_falls_back_without_decider() {
+    std::env::remove_var("CLAWPAL_ZEROCLAW_DECIDER");
+    let session = create_session_for_test("docker")
+        .await
+        .expect("create session should succeed");
+    let decision = orchestrator_next_for_test(&session.id, "install:docker")
+        .await
+        .expect("orchestrator next should succeed");
+    assert_eq!(decision.source, "fallback");
+    assert_eq!(decision.step.as_deref(), Some("precheck"));
 }
 
 #[tokio::test]
@@ -81,6 +101,7 @@ fn docker_verify_command_sets_safe_env_defaults() {
     let command = docker_verify_compose_command_for_test("/tmp/openclaw");
     assert!(command.contains("OPENCLAW_CONFIG_DIR="));
     assert!(command.contains("OPENCLAW_WORKSPACE_DIR="));
+    assert!(command.contains(".openclaw"));
     assert!(command.contains("docker compose config"));
 }
 
@@ -91,7 +112,7 @@ fn resolve_paths_uses_active_openclaw_home_override() {
     let paths = resolve_paths();
     let openclaw_dir = paths.openclaw_dir.to_string_lossy().to_string();
     assert!(
-        openclaw_dir.contains(".clawpal/test-docker-openclaw"),
+        openclaw_dir.contains(".clawpal/test-docker-openclaw/.openclaw"),
         "expected overridden openclaw dir, got {openclaw_dir}"
     );
     set_active_openclaw_home_override(None).expect("clear override should succeed");

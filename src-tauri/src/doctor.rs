@@ -5,6 +5,50 @@ use crate::config_io::read_openclaw_config;
 use crate::models::OpenClawPaths;
 use regex::Regex;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DoctorEngine {
+    ZeroClaw,
+}
+
+impl DoctorEngine {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::ZeroClaw => "zeroclaw",
+        }
+    }
+}
+
+pub fn parse_engine(input: Option<String>) -> Result<DoctorEngine, String> {
+    let raw = input.unwrap_or_else(|| "zeroclaw".to_string());
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "zeroclaw" | "" => Ok(DoctorEngine::ZeroClaw),
+        other => Err(format!("Unsupported doctor engine: {other}")),
+    }
+}
+
+pub fn classify_engine_error(message: &str) -> &'static str {
+    let lower = message.to_ascii_lowercase();
+    if lower.contains("api key not set")
+        || lower.contains("no compatible api key")
+        || lower.contains("no auth profiles configured")
+    {
+        return "CONFIG_MISSING";
+    }
+    if lower.contains("not_found_error")
+        || (lower.contains("model:") && lower.contains("404"))
+    {
+        return "MODEL_UNAVAILABLE";
+    }
+    if lower.contains("no such file")
+        || lower.contains("not found")
+        || lower.contains("failed to start")
+        || lower.contains("permission denied")
+    {
+        return "RUNTIME_UNREACHABLE";
+    }
+    "ENGINE_ERROR"
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DoctorIssue {
     pub id: String,

@@ -11,6 +11,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import type {
+  EnsureAccessResult,
   InstallMethod,
   InstallMethodCapability,
   InstallSession,
@@ -19,6 +20,7 @@ import type {
   SshHost,
 } from "@/lib/types";
 import { useApi } from "@/lib/use-api";
+import { appendOrchestratorEvent } from "@/lib/orchestrator-log";
 
 const METHOD_ORDER: InstallMethod[] = ["local", "wsl2", "docker", "remote_ssh"];
 const STEP_ORDER: InstallStep[] = ["precheck", "install", "init", "verify"];
@@ -87,8 +89,14 @@ export function InstallHub({
   const [selectedMethod, setSelectedMethod] = useState<InstallMethod>("local");
   const [creating, setCreating] = useState(false);
   const [runningStep, setRunningStep] = useState<InstallStep | null>(null);
+  const [autoRunning, setAutoRunning] = useState(false);
   const [session, setSession] = useState<InstallSession | null>(null);
   const [lastResult, setLastResult] = useState<InstallStepResult | null>(null);
+  const [lastAccessResult, setLastAccessResult] = useState<EnsureAccessResult | null>(null);
+  const [lastAccessError, setLastAccessError] = useState<string | null>(null);
+  const [ensuringAccess, setEnsuringAccess] = useState(false);
+  const [lastOrchestratorReason, setLastOrchestratorReason] = useState<string>("");
+  const [lastOrchestratorSource, setLastOrchestratorSource] = useState<string>("");
   const [sshHosts, setSshHosts] = useState<SshHost[]>([]);
   const [selectedSshHostId, setSelectedSshHostId] = useState<string>("");
 
@@ -124,6 +132,253 @@ export function InstallHub({
 
   const methodLabel = (method: InstallMethod): string => t(`home.install.method.${method}`);
 
+  const ensureInstanceByMethod = (nextSession: InstallSession): { instanceId: string; transport: string } | null => {
+    if (nextSession.method === "local") {
+      return { instanceId: "local", transport: "local" };
+    }
+    if (nextSession.method === "docker") {
+      return { instanceId: "docker:local", transport: "docker_local" };
+    }
+    if (nextSession.method === "wsl2") {
+      return { instanceId: "wsl2:local", transport: "wsl2" };
+    }
+    if (nextSession.method === "remote_ssh") {
+      const hostId = (nextSession.artifacts?.ssh_host_id as string | undefined) || selectedSshHostId;
+      if (!hostId) return null;
+      return { instanceId: hostId, transport: "remote_ssh" };
+    }
+    return null;
+  };
+
+  const runEnsureAccess = async (nextSession: InstallSession): Promise<EnsureAccessResult | null> => {
+    const target = ensureInstanceByMethod(nextSession);
+    if (!target) return null;
+    setEnsuringAccess(true);
+    setLastAccessError(null);
+    try {
+      const result = await ua.ensureAccessProfile(target.instanceId, target.transport);
+      setLastAccessResult(result);
+      showToast?.(
+        t("home.install.access.ready", {
+          chain: result.workingChain.join(" -> "),
+        }),
+        "success",
+      );
+      appendOrchestratorEvent({
+        level: "success",
+        message: "access discovery completed",
+        instanceId: target.instanceId,
+        sessionId: nextSession.id,
+        goal: `install:${nextSession.method}`,
+        source: "aad",
+        state: nextSession.state,
+        details: result.workingChain.join(" -> "),
+      });
+      return result;
+    } catch (e) {
+      const message = String(e);
+      setLastAccessError(message);
+      showToast?.(t("home.install.access.failed", { error: message }), "error");
+      appendOrchestratorEvent({
+        level: "error",
+        message: "access discovery failed",
+        instanceId: target.instanceId,
+        sessionId: nextSession.id,
+        goal: `install:${nextSession.method}`,
+        source: "aad",
+        state: nextSession.state,
+        details: message,
+      });
+      return null;
+    } finally {
+      setEnsuringAccess(false);
+    }
+  };
+
+  const runRecordExperience = async (nextSession: InstallSession) => {
+    const target = ensureInstanceByMethod(nextSession);
+    if (!target) return;
+    try {
+      const result = await ua.recordInstallExperience(
+        nextSession.id,
+        target.instanceId,
+        `install:${nextSession.method}`,
+      );
+      showToast?.(
+        t("home.install.access.experienceSaved", { count: result.totalCount }),
+        "success",
+      );
+      appendOrchestratorEvent({
+        level: "success",
+        message: "experience saved",
+        instanceId: target.instanceId,
+        sessionId: nextSession.id,
+        goal: `install:${nextSession.method}`,
+        source: "experience-store",
+        state: nextSession.state,
+        details: `total=${result.totalCount}`,
+      });
+    } catch (e) {
+      showToast?.(t("home.install.access.experienceFailed", { error: String(e) }), "error");
+      appendOrchestratorEvent({
+        level: "error",
+        message: "experience save failed",
+        instanceId: target.instanceId,
+        sessionId: nextSession.id,
+        goal: `install:${nextSession.method}`,
+        source: "experience-store",
+        state: nextSession.state,
+        details: String(e),
+      });
+    }
+  };
+
+  const runStepAndRefresh = async (
+    targetSession: InstallSession,
+    step: InstallStep,
+    quiet = false,
+  ): Promise<{ result: InstallStepResult; session: InstallSession | null }> => {
+    setRunningStep(step);
+    try {
+      const result = await ua.installRunStep(targetSession.id, step);
+      setLastResult(result);
+      if (!quiet) {
+        showToast?.(result.summary, result.ok ? "success" : "error");
+      }
+      const next = await refreshSession(targetSession.id);
+      const target = ensureInstanceByMethod(next);
+      appendOrchestratorEvent({
+        level: result.ok ? "success" : "error",
+        message: result.summary,
+        instanceId: target?.instanceId || "local",
+        sessionId: targetSession.id,
+        goal: `install:${targetSession.method}`,
+        source: "step-runner",
+        step,
+        state: next.state,
+        details: result.details,
+      });
+      if (next.state === "init_passed" || next.state === "ready") {
+        await runEnsureAccess(next);
+      }
+      if (next.state === "ready") {
+        await runRecordExperience(next);
+        onReady?.(next.method);
+      }
+      return { result, session: next };
+    } catch (e) {
+      const message = String(e);
+      if (!quiet) {
+        showToast?.(message, "error");
+      }
+      return {
+        result: {
+          ok: false,
+          summary: message,
+          details: message,
+          commands: [],
+          artifacts: {},
+          next_step: null,
+          error_code: "runtime_error",
+        },
+        session: null,
+      };
+    } finally {
+      setRunningStep(null);
+    }
+  };
+
+  const runAutoInstall = async (startSession: InstallSession) => {
+    setAutoRunning(true);
+    try {
+      let current = startSession;
+      const goal = `install:${startSession.method}`;
+      const initialTarget = ensureInstanceByMethod(startSession);
+      appendOrchestratorEvent({
+        level: "info",
+        message: "auto-install started",
+        instanceId: initialTarget?.instanceId || "local",
+        sessionId: startSession.id,
+        goal,
+        source: "orchestrator",
+        state: startSession.state,
+      });
+      while (current.state !== "ready") {
+        let step: InstallStep | null = null;
+        try {
+          const decision = await ua.installOrchestratorNext(current.id, goal);
+          setLastOrchestratorReason(decision.reason || "");
+          setLastOrchestratorSource(decision.source || "");
+          if (decision.source !== "zeroclaw-sidecar") {
+            const target = ensureInstanceByMethod(current);
+            appendOrchestratorEvent({
+              level: "error",
+              message: "orchestrator fallback blocked (strict mode)",
+              instanceId: target?.instanceId || "local",
+              sessionId: current.id,
+              goal,
+              source: decision.source,
+              state: current.state,
+              details: decision.reason,
+            });
+            showToast?.(t("home.install.orchestratorStrict", { source: decision.source }), "error");
+            return;
+          }
+          step = decision.step as InstallStep | null;
+          const target = ensureInstanceByMethod(current);
+          appendOrchestratorEvent({
+            level: "info",
+            message: `orchestrator selected step: ${decision.step || "stop"}`,
+            instanceId: target?.instanceId || "local",
+            sessionId: current.id,
+            goal,
+            source: decision.source,
+            state: current.state,
+            details: decision.reason,
+          });
+        } catch (e) {
+          setLastOrchestratorReason(String(e));
+          setLastOrchestratorSource("error");
+          const target = ensureInstanceByMethod(current);
+          appendOrchestratorEvent({
+            level: "error",
+            message: "orchestrator decision failed",
+            instanceId: target?.instanceId || "local",
+            sessionId: current.id,
+            goal,
+            source: "error",
+            state: current.state,
+            details: String(e),
+          });
+          showToast?.(t("home.install.orchestratorUnavailable", { error: String(e) }), "error");
+          return;
+        }
+        if (!step) break;
+        const { result, session: refreshed } = await runStepAndRefresh(current, step, true);
+        if (!result.ok || !refreshed) {
+          showToast?.(result.summary, "error");
+          return;
+        }
+        current = refreshed;
+      }
+      if (current.state === "ready") {
+        showToast?.(t("home.install.autoDone"), "success");
+        const target = ensureInstanceByMethod(current);
+        appendOrchestratorEvent({
+          level: "success",
+          message: "auto-install completed",
+          instanceId: target?.instanceId || "local",
+          sessionId: current.id,
+          goal,
+          source: "orchestrator",
+          state: current.state,
+        });
+      }
+    } finally {
+      setAutoRunning(false);
+    }
+  };
+
   const handleCreateSession = () => {
     if (selectedMethod === "remote_ssh" && !selectedSshHostId) {
       showToast?.(t("home.install.remoteHostRequired"), "error");
@@ -131,6 +386,8 @@ export function InstallHub({
     }
     setCreating(true);
     setLastResult(null);
+    setLastAccessResult(null);
+    setLastAccessError(null);
     const options = selectedMethod === "remote_ssh"
       ? { ssh_host_id: selectedSshHostId }
       : undefined;
@@ -138,6 +395,17 @@ export function InstallHub({
       .then((next) => {
         setSession(next);
         showToast?.(t("home.install.sessionCreated"), "success");
+        const target = ensureInstanceByMethod(next);
+        appendOrchestratorEvent({
+          level: "info",
+          message: "install session created",
+          instanceId: target?.instanceId || "local",
+          sessionId: next.id,
+          goal: `install:${next.method}`,
+          source: "ui",
+          state: next.state,
+        });
+        void runAutoInstall(next);
       })
       .catch((e) => showToast?.(String(e), "error"))
       .finally(() => setCreating(false));
@@ -152,23 +420,7 @@ export function InstallHub({
 
   const runStep = (step: InstallStep) => {
     if (!session) return;
-    setRunningStep(step);
-    ua.installRunStep(session.id, step)
-      .then((result) => {
-        setLastResult(result);
-        if (!result.ok) {
-          showToast?.(result.summary, "error");
-          return;
-        }
-        showToast?.(result.summary, "success");
-        return refreshSession(session.id).then((next) => {
-          if (next.state === "ready") {
-            onReady?.(next.method);
-          }
-        });
-      })
-      .catch((e) => showToast?.(String(e), "error"))
-      .finally(() => setRunningStep(null));
+    void runStepAndRefresh(session, step);
   };
 
   return (
@@ -181,7 +433,7 @@ export function InstallHub({
             <Select
               value={selectedMethod}
               onValueChange={(value) => setSelectedMethod(value as InstallMethod)}
-              disabled={loadingMethods || creating || runningStep !== null}
+              disabled={loadingMethods || creating || runningStep !== null || autoRunning}
             >
               <SelectTrigger size="sm" className="w-[240px]">
                 <SelectValue placeholder={t("home.install.selectMethod")} />
@@ -201,9 +453,12 @@ export function InstallHub({
                   : t("home.install.needsSetup")}
               </Badge>
             )}
-            <Button size="sm" disabled={creating || loadingMethods || runningStep !== null} onClick={handleCreateSession}>
+            <Button size="sm" disabled={creating || loadingMethods || runningStep !== null || autoRunning} onClick={handleCreateSession}>
               {creating ? t("home.install.creating") : t("home.install.start")}
             </Button>
+            {autoRunning && (
+              <Badge variant="outline">{t("home.install.autoRunning")}</Badge>
+            )}
           </div>
           {selectedMeta?.hint && (
             <p className="text-xs text-muted-foreground">{selectedMeta.hint}</p>
@@ -213,7 +468,7 @@ export function InstallHub({
               <Select
                 value={selectedSshHostId}
                 onValueChange={setSelectedSshHostId}
-                disabled={creating || runningStep !== null || sshHosts.length === 0}
+                disabled={creating || runningStep !== null || autoRunning || sshHosts.length === 0}
               >
                 <SelectTrigger size="sm" className="w-[260px]">
                   <SelectValue placeholder={t("home.install.selectRemoteHost")} />
@@ -240,6 +495,43 @@ export function InstallHub({
                 <div className="text-muted-foreground">
                   {t("home.install.sessionState", { state: session.state })}
                 </div>
+                {lastOrchestratorSource && (
+                  <div className="text-muted-foreground">
+                    {t("home.install.orchestrator", {
+                      source: lastOrchestratorSource,
+                      reason: lastOrchestratorReason || "-",
+                    })}
+                  </div>
+                )}
+              </div>
+
+              <div className="rounded border bg-muted/30 p-2 text-xs space-y-1">
+                <div className="font-medium">{t("home.install.access.title")}</div>
+                <div className="text-muted-foreground">
+                  {ensuringAccess
+                    ? t("home.install.access.probing")
+                    : lastAccessResult
+                      ? t("home.install.access.probed")
+                      : lastAccessError
+                        ? t("home.install.access.failedInline")
+                        : t("home.install.access.notStarted")}
+                </div>
+                {lastAccessResult && (
+                  <>
+                    <div className="text-muted-foreground">
+                      {t("home.install.access.chain", { chain: lastAccessResult.workingChain.join(" -> ") })}
+                    </div>
+                    <div className="text-muted-foreground">
+                      {lastAccessResult.profileReused
+                        ? t("home.install.access.reused")
+                        : t("home.install.access.created")}
+                      {lastAccessResult.usedLegacyFallback ? ` · ${t("home.install.access.fallback")}` : ""}
+                    </div>
+                  </>
+                )}
+                {lastAccessError && (
+                  <div className="text-red-600 dark:text-red-400">{lastAccessError}</div>
+                )}
               </div>
 
               <div className="space-y-2">
@@ -257,7 +549,7 @@ export function InstallHub({
                       <Button
                         size="xs"
                         variant={status === "failed" ? "outline" : "default"}
-                        disabled={runningStep !== null || !actionable}
+                        disabled={runningStep !== null || autoRunning || !actionable}
                         onClick={() => runStep(step)}
                       >
                         {runningStep === step

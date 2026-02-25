@@ -345,9 +345,10 @@ pub async fn preview_queued_commands(
             }
         }
 
-        // Copy config file (the one we want to modify in-place)
+        // Seed config file for sandbox preview. Source config may not exist yet
+        // (fresh docker-local state), so write the already-loaded content.
         let preview_config = preview_dir.join("openclaw.json");
-        std::fs::copy(&paths.config_path, &preview_config).map_err(|e| e.to_string())?;
+        crate::config_io::write_text(&preview_config, &config_before)?;
 
         let mut env = HashMap::new();
         env.insert(

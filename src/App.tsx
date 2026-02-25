@@ -10,6 +10,7 @@ import {
   HistoryIcon,
   StethoscopeIcon,
   LayersIcon,
+  WorkflowIcon,
   SettingsIcon,
   MessageCircleIcon,
   XIcon,
@@ -23,6 +24,7 @@ import { Doctor } from "./pages/Doctor";
 import { Sessions } from "./pages/Sessions";
 import { Channels } from "./pages/Channels";
 import { Cron } from "./pages/Cron";
+import { Orchestrator } from "./pages/Orchestrator";
 import { Chat } from "./components/Chat";
 import logoUrl from "./assets/logo.png";
 import { PendingChangesBar } from "./components/PendingChangesBar";
@@ -35,10 +37,10 @@ import type { DiscordGuildChannel, DockerInstance, SshHost } from "./lib/types";
 
 const PING_URL = "https://api.clawpal.zhixian.io/ping";
 const DOCKER_INSTANCES_KEY = "clawpal_docker_instances";
-const DEFAULT_DOCKER_OPENCLAW_HOME = "~/.clawpal/docker-local/openclaw";
+const DEFAULT_DOCKER_OPENCLAW_HOME = "~/.clawpal/docker-local";
 const DEFAULT_DOCKER_CLAWPAL_DATA_DIR = "~/.clawpal/docker-local/data";
 
-type Route = "home" | "recipes" | "cook" | "history" | "channels" | "cron" | "doctor" | "sessions" | "settings";
+type Route = "home" | "recipes" | "cook" | "history" | "channels" | "cron" | "doctor" | "sessions" | "orchestrator" | "settings";
 
 interface ToastItem {
   id: number;
@@ -91,7 +93,16 @@ export function App() {
         return;
       }
       const parsed = JSON.parse(raw) as DockerInstance[];
-      setDockerInstances(Array.isArray(parsed) ? parsed : []);
+      const next = (Array.isArray(parsed) ? parsed : []).map((item) => {
+        if (item.id !== "docker:local") return item;
+        return {
+          ...item,
+          openclawHome: DEFAULT_DOCKER_OPENCLAW_HOME,
+          clawpalDataDir: DEFAULT_DOCKER_CLAWPAL_DATA_DIR,
+        };
+      });
+      localStorage.setItem(DOCKER_INSTANCES_KEY, JSON.stringify(next));
+      setDockerInstances(next);
     } catch {
       setDockerInstances([]);
     }
@@ -152,6 +163,21 @@ export function App() {
     }, type === "error" ? 5000 : 3000);
   }, []);
 
+  const resolveInstanceTransport = useCallback((instanceId: string) => {
+    if (instanceId === "local") return "local";
+    if (dockerInstances.some((item) => item.id === instanceId)) return "docker_local";
+    if (sshHosts.some((host) => host.id === instanceId)) return "remote_ssh";
+    // Unknown id should not be treated as remote by default.
+    return "local";
+  }, [dockerInstances, sshHosts]);
+
+  const ensureAccessForInstance = useCallback((instanceId: string) => {
+    const transport = resolveInstanceTransport(instanceId);
+    api.ensureAccessProfile(instanceId, transport).catch((e) => {
+      console.warn("ensure_access_profile failed:", e);
+    });
+  }, [resolveInstanceTransport]);
+
   const dismissToast = useCallback((id: number) => {
     setToasts((prev) => prev.filter((t) => t.id !== id));
   }, []);
@@ -159,55 +185,80 @@ export function App() {
 
   const handleInstanceSelect = useCallback((id: string) => {
     setActiveInstance(id);
-    if (id === "local" || id.startsWith("docker:")) {
+    const transport = resolveInstanceTransport(id);
+    if (transport !== "remote_ssh") {
+      ensureAccessForInstance(id);
       return;
     }
-    if (id !== "local") {
-      // Check if backend still has a live connection before reconnecting.
-      // Do not pre-mark as disconnected — transient status failures would
-      // otherwise gray out the whole remote UI.
-      api.sshStatus(id)
-        .then((status) => {
-          if (status === "connected") {
-            setConnectionStatus((prev) => ({ ...prev, [id]: "connected" }));
-          } else {
-            return api.sshConnect(id)
-              .then(() => setConnectionStatus((prev) => ({ ...prev, [id]: "connected" })));
-          }
-        })
-        .catch((e) => {
-          // sshStatus failed or reconnect failed — try fresh connect
-          api.sshConnect(id)
-            .then(() => setConnectionStatus((prev) => ({ ...prev, [id]: "connected" })))
-            .catch((e2) => {
-              setConnectionStatus((prev) => ({ ...prev, [id]: "error" }));
-              const raw = String(e2);
-              const friendly = friendlySshError(raw, t);
-              showToast(friendly, "error");
+    // Check if backend still has a live connection before reconnecting.
+    // Do not pre-mark as disconnected — transient status failures would
+    // otherwise gray out the whole remote UI.
+    api.sshStatus(id)
+      .then((status) => {
+        if (status === "connected") {
+          setConnectionStatus((prev) => ({ ...prev, [id]: "connected" }));
+          ensureAccessForInstance(id);
+        } else {
+          return api.sshConnect(id)
+            .then(() => {
+              setConnectionStatus((prev) => ({ ...prev, [id]: "connected" }));
+              ensureAccessForInstance(id);
             });
-        });
-    }
-  }, [showToast, t]);
+        }
+      })
+      .catch(() => {
+        // sshStatus failed or reconnect failed — try fresh connect
+        api.sshConnect(id)
+          .then(() => {
+            setConnectionStatus((prev) => ({ ...prev, [id]: "connected" }));
+            ensureAccessForInstance(id);
+          })
+          .catch((e2) => {
+            setConnectionStatus((prev) => ({ ...prev, [id]: "error" }));
+            const raw = String(e2);
+            const friendly = friendlySshError(raw, t);
+            showToast(friendly, "error");
+          });
+      });
+  }, [ensureAccessForInstance, resolveInstanceTransport, showToast, t]);
 
   const [configVersion, setConfigVersion] = useState(0);
+  const [instanceToken, setInstanceToken] = useState(0);
 
-  const isDocker = activeInstance.startsWith("docker:");
-  const isRemote = activeInstance !== "local" && !isDocker;
+  const isDocker = dockerInstances.some((item) => item.id === activeInstance);
+  const isRemote = sshHosts.some((host) => host.id === activeInstance);
   const isConnected = !isRemote || connectionStatus[activeInstance] === "connected";
 
   useEffect(() => {
-    if (activeInstance === "local" || isRemote) {
-      api.setActiveOpenclawHome(null).catch(() => {});
-      api.setActiveClawpalDataDir(null).catch(() => {});
-      return;
-    }
-    if (isDocker) {
-      const instance = dockerInstances.find((item) => item.id === activeInstance);
-      const nextHome = instance?.openclawHome || DEFAULT_DOCKER_OPENCLAW_HOME;
-      const nextDataDir = instance?.clawpalDataDir || DEFAULT_DOCKER_CLAWPAL_DATA_DIR;
-      api.setActiveOpenclawHome(nextHome).catch(() => {});
-      api.setActiveClawpalDataDir(nextDataDir).catch(() => {});
-    }
+    let cancelled = false;
+    const applyOverrides = async () => {
+      if (activeInstance === "local" || isRemote) {
+        await Promise.all([
+          api.setActiveOpenclawHome(null).catch(() => {}),
+          api.setActiveClawpalDataDir(null).catch(() => {}),
+        ]);
+      } else if (isDocker) {
+        const instance = dockerInstances.find((item) => item.id === activeInstance);
+        const forceDefault = activeInstance === "docker:local";
+        const nextHome = forceDefault
+          ? DEFAULT_DOCKER_OPENCLAW_HOME
+          : (instance?.openclawHome || DEFAULT_DOCKER_OPENCLAW_HOME);
+        const nextDataDir = forceDefault
+          ? DEFAULT_DOCKER_CLAWPAL_DATA_DIR
+          : (instance?.clawpalDataDir || DEFAULT_DOCKER_CLAWPAL_DATA_DIR);
+        await Promise.all([
+          api.setActiveOpenclawHome(nextHome).catch(() => {}),
+          api.setActiveClawpalDataDir(nextDataDir).catch(() => {}),
+        ]);
+      }
+      if (!cancelled) {
+        setInstanceToken((v) => v + 1);
+      }
+    };
+    void applyOverrides();
+    return () => {
+      cancelled = true;
+    };
   }, [activeInstance, isDocker, isRemote, dockerInstances]);
 
   // Keep active remote instance self-healed: detect dropped SSH and reconnect.
@@ -275,11 +326,8 @@ export function App() {
   // Load Discord data + extract profiles on startup or connection ready
   useEffect(() => {
     if (activeInstance === "local" || isDocker) {
-      if (!localStorage.getItem("clawpal_profiles_extracted")) {
-        api.extractModelProfilesFromConfig()
-          .then(() => localStorage.setItem("clawpal_profiles_extracted", "1"))
-          .catch((e) => console.error("Failed to extract model profiles:", e));
-      }
+      api.extractModelProfilesFromConfig()
+        .catch((e) => console.error("Failed to extract model profiles:", e));
       api.listDiscordGuildChannels().then(setDiscordGuildChannels).catch((e) => console.error("Failed to load Discord channels:", e));
     } else if (isConnected) {
       api.remoteExtractModelProfilesFromConfig(activeInstance)
@@ -326,6 +374,7 @@ export function App() {
     { route: "history", icon: <HistoryIcon className="size-4" />, label: t('nav.history') },
     { route: "doctor", icon: <StethoscopeIcon className="size-4" />, label: t('nav.doctor') },
     { route: "sessions", icon: <LayersIcon className="size-4" />, label: t('nav.sessions') },
+    { route: "orchestrator", icon: <WorkflowIcon className="size-4" />, label: t('nav.orchestrator') },
   ];
 
   const isRouteActive = (item: typeof navItems[0]) => {
@@ -344,7 +393,7 @@ export function App() {
         onSelect={handleInstanceSelect}
         onHostsChange={refreshHosts}
       />
-      <InstanceContext.Provider value={{ instanceId: activeInstance, isRemote, isDocker, isConnected, discordGuildChannels }}>
+      <InstanceContext.Provider value={{ instanceId: activeInstance, instanceToken, isRemote, isDocker, isConnected, discordGuildChannels }}>
       <div className="flex flex-1 overflow-hidden">
 
       {/* ── Sidebar ── */}
@@ -487,8 +536,11 @@ export function App() {
           )}
           {route === "cron" && <Cron key={`${activeInstance}`} />}
           {route === "history" && <History key={`${activeInstance}-${configVersion}`} />}
-          <div className={route === "doctor" ? undefined : "hidden"}><Doctor sshHosts={sshHosts} /></div>
+          <div className={route === "doctor" ? undefined : "hidden"}>
+            <Doctor key={activeInstance} />
+          </div>
           {route === "sessions" && <Sessions />}
+          {route === "orchestrator" && <Orchestrator />}
           {route === "settings" && (
             <Settings
               key={`${activeInstance}-${configVersion}`}
