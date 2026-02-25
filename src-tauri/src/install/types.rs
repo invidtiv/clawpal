@@ -96,3 +96,14 @@ pub struct InstallSession {
     pub created_at: String,
     pub updated_at: String,
 }
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct InstallStepResult {
+    pub ok: bool,
+    pub summary: String,
+    pub details: String,
+    pub commands: Vec<String>,
+    pub artifacts: HashMap<String, Value>,
+    pub next_step: Option<String>,
+    pub error_code: Option<String>,
+}

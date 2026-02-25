@@ -22,6 +22,10 @@ impl InstallSessionStore {
         Ok(())
     }
 
+    pub fn upsert(&self, session: InstallSession) -> Result<(), String> {
+        self.insert(session)
+    }
+
     pub fn get(&self, session_id: &str) -> Result<Option<InstallSession>, String> {
         let guard = self
             .sessions

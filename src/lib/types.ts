@@ -406,3 +406,13 @@ export interface InstallSession {
   created_at: string;
   updated_at: string;
 }
+
+export interface InstallStepResult {
+  ok: boolean;
+  summary: string;
+  details: string;
+  commands: string[];
+  artifacts: Record<string, unknown>;
+  next_step: string | null;
+  error_code: string | null;
+}

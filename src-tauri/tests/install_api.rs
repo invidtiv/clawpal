@@ -1,5 +1,5 @@
 use clawpal::install::types::InstallSession;
-use clawpal::install::commands::create_session_for_test;
+use clawpal::install::commands::{create_session_for_test, get_session_for_test, run_step_for_test};
 
 #[test]
 fn install_session_serialization_roundtrip() {
@@ -26,4 +26,21 @@ async fn create_session_returns_selected_method_state() {
         .expect("create session should succeed");
     assert_eq!(session.method.as_str(), "local");
     assert_eq!(session.state.as_str(), "selected_method");
+}
+
+#[tokio::test]
+async fn run_step_precheck_updates_state_and_next_step() {
+    let session = create_session_for_test("local")
+        .await
+        .expect("create session should succeed");
+    let result = run_step_for_test(&session.id, "precheck")
+        .await
+        .expect("precheck should execute");
+    assert!(result.ok);
+    assert_eq!(result.next_step.as_deref(), Some("install"));
+
+    let refreshed = get_session_for_test(&session.id)
+        .await
+        .expect("get session should succeed");
+    assert_eq!(refreshed.state.as_str(), "precheck_passed");
 }
