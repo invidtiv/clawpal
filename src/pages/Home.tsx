@@ -318,10 +318,17 @@ export function Home({
     }).catch((e) => showToast?.(String(e), "error"));
   };
 
+  const handleInstallReady = useCallback(() => {
+    fetchStatus();
+    fetchStatusExtra();
+    refreshAgents();
+    onNavigate?.("home");
+  }, [fetchStatus, fetchStatusExtra, refreshAgents, onNavigate]);
+
   return (
     <div>
       <h2 className="text-2xl font-bold mb-6">{t('home.title')}</h2>
-      <InstallHub showToast={showToast} />
+      <InstallHub showToast={showToast} onNavigate={onNavigate} onReady={handleInstallReady} />
 
         {/* Status Summary */}
         <h3 className="text-lg font-semibold mt-8 mb-4">{t('home.status')}</h3>

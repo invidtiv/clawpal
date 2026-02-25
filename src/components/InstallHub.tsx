@@ -58,8 +58,12 @@ function getStepStatus(state: string | null | undefined, step: InstallStep): Ste
 
 export function InstallHub({
   showToast,
+  onNavigate,
+  onReady,
 }: {
   showToast?: (message: string, type?: "success" | "error") => void;
+  onNavigate?: (route: string) => void;
+  onReady?: () => void;
 }) {
   const { t } = useTranslation();
   const ua = useApi();
@@ -105,7 +109,10 @@ export function InstallHub({
   };
 
   const refreshSession = (sessionId: string) => {
-    return ua.installGetSession(sessionId).then(setSession);
+    return ua.installGetSession(sessionId).then((next) => {
+      setSession(next);
+      return next;
+    });
   };
 
   const runStep = (step: InstallStep) => {
@@ -119,7 +126,11 @@ export function InstallHub({
           return;
         }
         showToast?.(result.summary, "success");
-        return refreshSession(session.id);
+        return refreshSession(session.id).then((next) => {
+          if (next.state === "ready") {
+            onReady?.();
+          }
+        });
       })
       .catch((e) => showToast?.(String(e), "error"))
       .finally(() => setRunningStep(null));
@@ -215,6 +226,20 @@ export function InstallHub({
                       {t("home.install.nextStep", { step: t(`home.install.step.${lastResult.next_step}`) })}
                     </Button>
                   )}
+                </div>
+              )}
+
+              {session.state === "ready" && (
+                <div className="rounded border border-emerald-500/30 bg-emerald-500/5 p-2 text-xs space-y-2">
+                  <div className="font-medium">{t("home.install.ready")}</div>
+                  <div className="flex items-center gap-2">
+                    <Button size="xs" variant="outline" onClick={() => onNavigate?.("doctor")}>
+                      {t("home.install.goDoctor")}
+                    </Button>
+                    <Button size="xs" onClick={() => onNavigate?.("recipes")}>
+                      {t("home.install.goRecipes")}
+                    </Button>
+                  </div>
                 </div>
               )}
             </div>
