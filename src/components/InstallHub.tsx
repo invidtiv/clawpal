@@ -323,7 +323,7 @@ export function InstallHub({
         clearResumeSessionId(instanceId);
         setResumeSessionId(null);
       });
-  }, [ua, ua.instanceId]);
+  }, [ua.instanceId]);
 
   const selectedMeta = useMemo(
     () => methods.find((m) => m.method === selectedMethod) ?? null,
