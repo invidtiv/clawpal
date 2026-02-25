@@ -24,6 +24,7 @@ import {
 import { CreateAgentDialog } from "@/components/CreateAgentDialog";
 import { UpgradeDialog } from "@/components/UpgradeDialog";
 import { RecipeCard } from "@/components/RecipeCard";
+import { InstallHub } from "@/components/InstallHub";
 import { Skeleton } from "@/components/ui/skeleton";
 import type { InstanceStatus, StatusExtra, AgentOverview, Recipe, BackupInfo, ModelProfile } from "../lib/types";
 import { formatTime, formatBytes } from "@/lib/utils";
@@ -320,6 +321,7 @@ export function Home({
   return (
     <div>
       <h2 className="text-2xl font-bold mb-6">{t('home.title')}</h2>
+      <InstallHub showToast={showToast} />
 
         {/* Status Summary */}
         <h3 className="text-lg font-semibold mt-8 mb-4">{t('home.status')}</h3>

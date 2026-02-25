@@ -490,6 +490,14 @@ export function useApi() {
       ),
       getSystemStatus: api.getSystemStatus,
       listRecipes: localCached("listRecipes", 20_000, api.listRecipes),
+      listInstallMethods: localCached(
+        "installListMethods",
+        20_000,
+        api.installListMethods,
+      ),
+      installCreateSession: api.installCreateSession,
+      installGetSession: api.installGetSession,
+      installRunStep: api.installRunStep,
 
       // SSH management (infrastructure, not abstracted)
       listSshHosts: api.listSshHosts,
