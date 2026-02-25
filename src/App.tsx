@@ -35,6 +35,7 @@ import type { DiscordGuildChannel, DockerInstance, SshHost } from "./lib/types";
 
 const PING_URL = "https://api.clawpal.zhixian.io/ping";
 const DOCKER_INSTANCES_KEY = "clawpal_docker_instances";
+const DEFAULT_DOCKER_OPENCLAW_HOME = "~/.clawpal/docker-local/openclaw";
 
 type Route = "home" | "recipes" | "cook" | "history" | "channels" | "cron" | "doctor" | "sessions" | "settings";
 
@@ -192,6 +193,18 @@ export function App() {
   const isDocker = activeInstance.startsWith("docker:");
   const isRemote = activeInstance !== "local" && !isDocker;
   const isConnected = !isRemote || connectionStatus[activeInstance] === "connected";
+
+  useEffect(() => {
+    if (activeInstance === "local" || isRemote) {
+      api.setActiveOpenclawHome(null).catch(() => {});
+      return;
+    }
+    if (isDocker) {
+      const instance = dockerInstances.find((item) => item.id === activeInstance);
+      const nextHome = instance?.openclawHome || DEFAULT_DOCKER_OPENCLAW_HOME;
+      api.setActiveOpenclawHome(nextHome).catch(() => {});
+    }
+  }, [activeInstance, isDocker, isRemote, dockerInstances]);
 
   // Keep active remote instance self-healed: detect dropped SSH and reconnect.
   useEffect(() => {
@@ -431,7 +444,7 @@ export function App() {
               onInstallReady={(method) => {
                 if (method === "docker") {
                   const id = "docker:local";
-                  upsertDockerInstance({ id, label: "Docker Local" });
+                  upsertDockerInstance({ id, label: "Docker Local", openclawHome: DEFAULT_DOCKER_OPENCLAW_HOME });
                   setActiveInstance(id);
                   setRoute("settings");
                 }

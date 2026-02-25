@@ -19,10 +19,24 @@ fn repo_dir_str(path: &PathBuf) -> String {
     path.to_string_lossy().to_string()
 }
 
+fn docker_openclaw_home() -> String {
+    match home_dir() {
+        Some(home) => home
+            .join(".clawpal")
+            .join("docker-local")
+            .join("openclaw")
+            .to_string_lossy()
+            .to_string(),
+        None => "~/.clawpal/docker-local/openclaw".to_string(),
+    }
+}
+
 fn docker_verify_compose_command(repo_str: &str) -> String {
+    let openclaw_home = docker_openclaw_home();
     format!(
-        "cd \"{repo}\" && OPENCLAW_CONFIG_DIR=\"$HOME/.openclaw\" OPENCLAW_WORKSPACE_DIR=\"$HOME/.openclaw/workspace\" OPENCLAW_GATEWAY_TOKEN=\"clawpal-install\" CLAUDE_AI_SESSION_KEY=\"dummy\" CLAUDE_WEB_SESSION_KEY=\"dummy\" CLAUDE_WEB_COOKIE=\"dummy\" docker compose config",
+        "cd \"{repo}\" && OPENCLAW_CONFIG_DIR=\"{home}\" OPENCLAW_WORKSPACE_DIR=\"{home}/workspace\" OPENCLAW_GATEWAY_TOKEN=\"clawpal-install\" CLAUDE_AI_SESSION_KEY=\"dummy\" CLAUDE_WEB_SESSION_KEY=\"dummy\" CLAUDE_WEB_COOKIE=\"dummy\" docker compose config",
         repo = repo_str
+        ,home = openclaw_home
     )
 }
 
@@ -69,6 +83,12 @@ pub fn run_step(
             })
         }
         InstallStep::Init => {
+            let openclaw_home = docker_openclaw_home();
+            let prep_cmd = format!(
+                "mkdir -p \"{home}\" \"{home}/workspace\" && [ -f \"{home}/openclaw.json\" ] || printf '{{}}' > \"{home}/openclaw.json\"",
+                home = openclaw_home
+            );
+            let prep = run_command("bash", &["-lc", &prep_cmd])?;
             let build_cmd = format!(
                 "cd \"{}\" && docker build -t openclaw:local -f Dockerfile .",
                 repo_str
@@ -81,10 +101,13 @@ pub fn run_step(
                 } else {
                     build.stderr
                 },
-                commands: vec![build.command_line],
+                commands: vec![prep.command_line, build.command_line],
                 artifacts: HashMap::from([(
                     "docker_repo_dir".to_string(),
                     Value::String(repo_str),
+                ), (
+                    "docker_openclaw_home".to_string(),
+                    Value::String(openclaw_home),
                 )]),
             })
         }

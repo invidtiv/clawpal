@@ -2047,10 +2047,15 @@ fn run_openclaw_raw(args: &[&str]) -> Result<OpenclawCommandOutput, String> {
 }
 
 fn run_openclaw_raw_timeout(args: &[&str], timeout_secs: Option<u64>) -> Result<OpenclawCommandOutput, String> {
-    let mut child = Command::new(resolve_openclaw_bin())
+    let mut command = Command::new(resolve_openclaw_bin());
+    command
         .args(args)
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    if let Some(path) = crate::cli_runner::get_active_openclaw_home_override() {
+        command.env("OPENCLAW_HOME", path);
+    }
+    let mut child = command
         .spawn()
         .map_err(|error| format!("failed to run openclaw: {error}"))?;
 
@@ -2114,6 +2119,12 @@ fn run_openclaw_raw_timeout(args: &[&str], timeout_secs: Option<u64>) -> Result<
         }
         Ok(result)
     }
+}
+
+#[tauri::command]
+pub fn set_active_openclaw_home(path: Option<String>) -> Result<bool, String> {
+    crate::cli_runner::set_active_openclaw_home_override(path)?;
+    Ok(true)
 }
 
 /// Strip leading non-JSON lines from CLI output (plugin logs, ANSI codes, etc.)
@@ -5859,8 +5870,12 @@ pub fn get_cron_runs(job_id: String, limit: Option<usize>) -> Result<Vec<Value>,
 #[tauri::command]
 pub async fn trigger_cron_job(job_id: String) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let output = std::process::Command::new(resolve_openclaw_bin())
-            .args(["cron", "run", &job_id])
+        let mut cmd = std::process::Command::new(resolve_openclaw_bin());
+        cmd.args(["cron", "run", &job_id]);
+        if let Some(path) = crate::cli_runner::get_active_openclaw_home_override() {
+            cmd.env("OPENCLAW_HOME", path);
+        }
+        let output = cmd
             .output()
             .map_err(|e| format!("Failed to run openclaw: {e}"))?;
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
@@ -5877,8 +5892,12 @@ pub async fn trigger_cron_job(job_id: String) -> Result<String, String> {
 
 #[tauri::command]
 pub fn delete_cron_job(job_id: String) -> Result<String, String> {
-    let output = std::process::Command::new(resolve_openclaw_bin())
-        .args(["cron", "remove", &job_id])
+    let mut cmd = std::process::Command::new(resolve_openclaw_bin());
+    cmd.args(["cron", "remove", &job_id]);
+    if let Some(path) = crate::cli_runner::get_active_openclaw_home_override() {
+        cmd.env("OPENCLAW_HOME", path);
+    }
+    let output = cmd
         .output()
         .map_err(|e| format!("Failed to run openclaw: {e}"))?;
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();

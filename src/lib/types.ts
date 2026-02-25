@@ -257,6 +257,7 @@ export interface DockerInstance {
   id: string;
   label: string;
   projectDir?: string;
+  openclawHome?: string;
 }
 
 export interface SshExecResult {

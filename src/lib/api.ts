@@ -2,6 +2,8 @@ import { invoke } from "@tauri-apps/api/core";
 import type { AgentOverview, AgentSessionAnalysis, ApplyQueueResult, ApplyResult, BackupInfo, Binding, ChannelNode, CronJob, CronRun, DiscordGuildChannel, GatewayCredentials, HistoryItem, InstallMethodCapability, InstallSession, InstallStepResult, InstanceStatus, StatusExtra, ModelCatalogProvider, ModelProfile, PendingCommand, PreviewQueueResult, PreviewResult, ProviderAuthSuggestion, Recipe, ResolvedApiKey, SystemStatus, DoctorReport, SessionFile, SshHost, WatchdogStatus } from "./types";
 
 export const api = {
+  setActiveOpenclawHome: (path: string | null): Promise<boolean> =>
+    invoke("set_active_openclaw_home", { path }),
   installCreateSession: (
     method: "local" | "wsl2" | "docker" | "remote_ssh",
     options?: Record<string, unknown>,
