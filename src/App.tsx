@@ -36,6 +36,7 @@ import type { DiscordGuildChannel, DockerInstance, SshHost } from "./lib/types";
 const PING_URL = "https://api.clawpal.zhixian.io/ping";
 const DOCKER_INSTANCES_KEY = "clawpal_docker_instances";
 const DEFAULT_DOCKER_OPENCLAW_HOME = "~/.clawpal/docker-local/openclaw";
+const DEFAULT_DOCKER_CLAWPAL_DATA_DIR = "~/.clawpal/docker-local/data";
 
 type Route = "home" | "recipes" | "cook" | "history" | "channels" | "cron" | "doctor" | "sessions" | "settings";
 
@@ -197,12 +198,15 @@ export function App() {
   useEffect(() => {
     if (activeInstance === "local" || isRemote) {
       api.setActiveOpenclawHome(null).catch(() => {});
+      api.setActiveClawpalDataDir(null).catch(() => {});
       return;
     }
     if (isDocker) {
       const instance = dockerInstances.find((item) => item.id === activeInstance);
       const nextHome = instance?.openclawHome || DEFAULT_DOCKER_OPENCLAW_HOME;
+      const nextDataDir = instance?.clawpalDataDir || DEFAULT_DOCKER_CLAWPAL_DATA_DIR;
       api.setActiveOpenclawHome(nextHome).catch(() => {});
+      api.setActiveClawpalDataDir(nextDataDir).catch(() => {});
     }
   }, [activeInstance, isDocker, isRemote, dockerInstances]);
 
@@ -444,7 +448,12 @@ export function App() {
               onInstallReady={(method) => {
                 if (method === "docker") {
                   const id = "docker:local";
-                  upsertDockerInstance({ id, label: "Docker Local", openclawHome: DEFAULT_DOCKER_OPENCLAW_HOME });
+                  upsertDockerInstance({
+                    id,
+                    label: "Docker Local",
+                    openclawHome: DEFAULT_DOCKER_OPENCLAW_HOME,
+                    clawpalDataDir: DEFAULT_DOCKER_CLAWPAL_DATA_DIR,
+                  });
                   setActiveInstance(id);
                   setRoute("settings");
                 }

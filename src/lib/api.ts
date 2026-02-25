@@ -4,6 +4,8 @@ import type { AgentOverview, AgentSessionAnalysis, ApplyQueueResult, ApplyResult
 export const api = {
   setActiveOpenclawHome: (path: string | null): Promise<boolean> =>
     invoke("set_active_openclaw_home", { path }),
+  setActiveClawpalDataDir: (path: string | null): Promise<boolean> =>
+    invoke("set_active_clawpal_data_dir", { path }),
   installCreateSession: (
     method: "local" | "wsl2" | "docker" | "remote_ssh",
     options?: Record<string, unknown>,

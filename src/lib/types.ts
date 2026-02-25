@@ -258,6 +258,7 @@ export interface DockerInstance {
   label: string;
   projectDir?: string;
   openclawHome?: string;
+  clawpalDataDir?: string;
 }
 
 export interface SshExecResult {

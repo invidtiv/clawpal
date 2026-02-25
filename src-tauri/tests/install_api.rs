@@ -5,6 +5,7 @@ use clawpal::install::commands::{
 };
 use clawpal::install::runners::docker::docker_verify_compose_command_for_test;
 use clawpal::cli_runner::set_active_openclaw_home_override;
+use clawpal::cli_runner::set_active_clawpal_data_override;
 use clawpal::models::resolve_paths;
 
 #[test]
@@ -94,4 +95,17 @@ fn resolve_paths_uses_active_openclaw_home_override() {
         "expected overridden openclaw dir, got {openclaw_dir}"
     );
     set_active_openclaw_home_override(None).expect("clear override should succeed");
+}
+
+#[test]
+fn resolve_paths_uses_active_clawpal_data_override() {
+    set_active_clawpal_data_override(Some("~/.clawpal/test-docker-data".to_string()))
+        .expect("set data override should succeed");
+    let paths = resolve_paths();
+    let data_dir = paths.clawpal_dir.to_string_lossy().to_string();
+    assert!(
+        data_dir.contains(".clawpal/test-docker-data"),
+        "expected overridden clawpal data dir, got {data_dir}"
+    );
+    set_active_clawpal_data_override(None).expect("clear data override should succeed");
 }

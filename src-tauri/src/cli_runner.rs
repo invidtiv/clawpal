@@ -11,6 +11,8 @@ use crate::ssh::SshConnectionPool;
 
 static ACTIVE_OPENCLAW_HOME_OVERRIDE: LazyLock<Mutex<Option<String>>> =
     LazyLock::new(|| Mutex::new(None));
+static ACTIVE_CLAWPAL_DATA_OVERRIDE: LazyLock<Mutex<Option<String>>> =
+    LazyLock::new(|| Mutex::new(None));
 
 pub fn set_active_openclaw_home_override(path: Option<String>) -> Result<(), String> {
     let mut guard = ACTIVE_OPENCLAW_HOME_OVERRIDE
@@ -27,6 +29,26 @@ pub fn set_active_openclaw_home_override(path: Option<String>) -> Result<(), Str
 
 pub fn get_active_openclaw_home_override() -> Option<String> {
     ACTIVE_OPENCLAW_HOME_OVERRIDE
+        .lock()
+        .ok()
+        .and_then(|g| g.clone())
+}
+
+pub fn set_active_clawpal_data_override(path: Option<String>) -> Result<(), String> {
+    let mut guard = ACTIVE_CLAWPAL_DATA_OVERRIDE
+        .lock()
+        .map_err(|_| "active clawpal data lock poisoned".to_string())?;
+    let next = path
+        .as_deref()
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .map(|raw| shellexpand::tilde(raw).to_string());
+    *guard = next;
+    Ok(())
+}
+
+pub fn get_active_clawpal_data_override() -> Option<String> {
+    ACTIVE_CLAWPAL_DATA_OVERRIDE
         .lock()
         .ok()
         .and_then(|g| g.clone())

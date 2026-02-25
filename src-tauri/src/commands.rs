@@ -2127,6 +2127,12 @@ pub fn set_active_openclaw_home(path: Option<String>) -> Result<bool, String> {
     Ok(true)
 }
 
+#[tauri::command]
+pub fn set_active_clawpal_data_dir(path: Option<String>) -> Result<bool, String> {
+    crate::cli_runner::set_active_clawpal_data_override(path)?;
+    Ok(true)
+}
+
 /// Strip leading non-JSON lines from CLI output (plugin logs, ANSI codes, etc.)
 fn extract_json_from_output(raw: &str) -> Option<&str> {
     let start = raw.find('{').or_else(|| raw.find('['))?;
