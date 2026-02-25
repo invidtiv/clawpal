@@ -24,6 +24,8 @@ import { appendOrchestratorEvent } from "@/lib/orchestrator-log";
 
 const METHOD_ORDER: InstallMethod[] = ["local", "wsl2", "docker", "remote_ssh"];
 const STEP_ORDER: InstallStep[] = ["precheck", "install", "init", "verify"];
+const INSTALL_SESSION_STORAGE_PREFIX = "clawpal_install_session_v1:";
+const INSTALL_RESUME_STORAGE_PREFIX = "clawpal_install_resume_v1:";
 
 type StepStatus = "pending" | "running" | "success" | "failed";
 type BlockerAction = "resume" | "settings" | "doctor" | "instances";
@@ -33,6 +35,48 @@ interface InstallAutoBlocker {
   message: string;
   details?: string;
   actions: BlockerAction[];
+}
+
+function hasStorage(): boolean {
+  return typeof window !== "undefined" && typeof window.localStorage !== "undefined";
+}
+
+function storageSessionKey(instanceId: string): string {
+  return `${INSTALL_SESSION_STORAGE_PREFIX}${instanceId || "local"}`;
+}
+
+function storageResumeKey(instanceId: string): string {
+  return `${INSTALL_RESUME_STORAGE_PREFIX}${instanceId || "local"}`;
+}
+
+function readStoredSessionId(instanceId: string): string | null {
+  if (!hasStorage()) return null;
+  return window.localStorage.getItem(storageSessionKey(instanceId));
+}
+
+function writeStoredSessionId(instanceId: string, sessionId: string): void {
+  if (!hasStorage()) return;
+  window.localStorage.setItem(storageSessionKey(instanceId), sessionId);
+}
+
+function clearStoredSessionId(instanceId: string): void {
+  if (!hasStorage()) return;
+  window.localStorage.removeItem(storageSessionKey(instanceId));
+}
+
+function readResumeSessionId(instanceId: string): string | null {
+  if (!hasStorage()) return null;
+  return window.localStorage.getItem(storageResumeKey(instanceId));
+}
+
+function writeResumeSessionId(instanceId: string, sessionId: string): void {
+  if (!hasStorage()) return;
+  window.localStorage.setItem(storageResumeKey(instanceId), sessionId);
+}
+
+function clearResumeSessionId(instanceId: string): void {
+  if (!hasStorage()) return;
+  window.localStorage.removeItem(storageResumeKey(instanceId));
 }
 
 function classifyAutoBlocker(
@@ -223,6 +267,7 @@ export function InstallHub({
   const [lastOrchestratorReason, setLastOrchestratorReason] = useState<string>("");
   const [lastOrchestratorSource, setLastOrchestratorSource] = useState<string>("");
   const [autoBlocker, setAutoBlocker] = useState<InstallAutoBlocker | null>(null);
+  const [resumeSessionId, setResumeSessionId] = useState<string | null>(null);
   const [sshHosts, setSshHosts] = useState<SshHost[]>([]);
   const [selectedSshHostId, setSelectedSshHostId] = useState<string>("");
 
@@ -250,6 +295,35 @@ export function InstallHub({
       })
       .catch(() => {});
   }, [ua]);
+
+  useEffect(() => {
+    const instanceId = ua.instanceId || "local";
+    setSession(null);
+    setAutoBlocker(null);
+    setLastResult(null);
+    setLastAccessResult(null);
+    setLastAccessError(null);
+    setLastOrchestratorReason("");
+    setLastOrchestratorSource("");
+    setResumeSessionId(readResumeSessionId(instanceId));
+
+    const sessionId = readStoredSessionId(instanceId);
+    if (!sessionId) return;
+    ua.installGetSession(sessionId)
+      .then((restored) => {
+        setSession(restored);
+        setSelectedMethod(restored.method);
+        if (restored.state === "ready") {
+          clearResumeSessionId(instanceId);
+          setResumeSessionId(null);
+        }
+      })
+      .catch(() => {
+        clearStoredSessionId(instanceId);
+        clearResumeSessionId(instanceId);
+        setResumeSessionId(null);
+      });
+  }, [ua, ua.instanceId]);
 
   const selectedMeta = useMemo(
     () => methods.find((m) => m.method === selectedMethod) ?? null,
@@ -528,6 +602,44 @@ export function InstallHub({
     }
   };
 
+  useEffect(() => {
+    const instanceId = ua.instanceId || "local";
+    if (!session) {
+      clearStoredSessionId(instanceId);
+      return;
+    }
+    writeStoredSessionId(instanceId, session.id);
+    if (session.state === "ready") {
+      clearResumeSessionId(instanceId);
+      if (resumeSessionId) {
+        setResumeSessionId(null);
+      }
+    }
+  }, [session, ua.instanceId, resumeSessionId]);
+
+  useEffect(() => {
+    if (!session || !resumeSessionId) return;
+    if (session.id !== resumeSessionId) return;
+    if (session.state === "ready") {
+      clearResumeSessionId(ua.instanceId || "local");
+      setResumeSessionId(null);
+      return;
+    }
+    if (autoRunning || creating || runningStep !== null) return;
+    clearResumeSessionId(ua.instanceId || "local");
+    setResumeSessionId(null);
+    void runAutoInstall(session);
+  }, [session, resumeSessionId, autoRunning, creating, runningStep, ua.instanceId]);
+
+  const navigateWithAutoResume = (route: string, keepResumeMarker = false) => {
+    if (keepResumeMarker && session) {
+      const instanceId = ua.instanceId || "local";
+      writeResumeSessionId(instanceId, session.id);
+      setResumeSessionId(session.id);
+    }
+    onNavigate?.(route);
+  };
+
   const handleCreateSession = () => {
     if (selectedMethod === "remote_ssh" && !selectedSshHostId) {
       showToast?.(t("home.install.remoteHostRequired"), "error");
@@ -584,14 +696,14 @@ export function InstallHub({
     }
     if (action === "settings") {
       return (
-        <Button size="xs" variant="outline" onClick={() => onNavigate?.("settings")}>
+        <Button size="xs" variant="outline" onClick={() => navigateWithAutoResume("settings", true)}>
           {t("home.install.goSettings")}
         </Button>
       );
     }
     if (action === "doctor") {
       return (
-        <Button size="xs" variant="outline" onClick={() => onNavigate?.("doctor")}>
+        <Button size="xs" variant="outline" onClick={() => navigateWithAutoResume("doctor", true)}>
           {t("home.install.openDoctor")}
         </Button>
       );
