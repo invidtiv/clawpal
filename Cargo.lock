@@ -449,6 +449,7 @@ dependencies = [
  "clawpal-core",
  "serde_json",
  "tokio",
+ "uuid",
 ]
 
 [[package]]
