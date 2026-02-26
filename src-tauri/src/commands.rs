@@ -1,22 +1,26 @@
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::{fs, process::Command, time::{SystemTime, UNIX_EPOCH}};
-use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
+use std::{
+    fs,
+    process::Command,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use tauri::{Manager, State};
 
-use crate::config_io::{ensure_dirs, read_openclaw_config, write_json, write_text};
-use crate::doctor::{apply_auto_fixes, run_doctor, DoctorReport};
-use crate::history::{add_snapshot, list_snapshots, read_snapshot};
 use crate::access_discovery::probe_engine::{build_probe_plan_for_local, run_probe_with_redaction};
 use crate::access_discovery::store::AccessDiscoveryStore;
 use crate::access_discovery::types::{CapabilityProfile, ExecutionExperience};
+use crate::config_io::{ensure_dirs, read_openclaw_config, write_json, write_text};
+use crate::doctor::{apply_auto_fixes, run_doctor, DoctorReport};
+use crate::history::{add_snapshot, list_snapshots, read_snapshot};
 use crate::install::session_store::InstallSessionStore;
 use crate::install::types::InstallState;
 use crate::models::resolve_paths;
-use crate::ssh::{SshConnectionPool, SshHostConfig, SshExecResult, SftpEntry};
+use crate::ssh::{SftpEntry, SshConnectionPool, SshExecResult, SshHostConfig};
 
 /// Escape a string for safe inclusion in a single-quoted shell argument.
 fn shell_escape(s: &str) -> String {
@@ -44,8 +48,7 @@ pub(crate) fn resolve_openclaw_bin() -> &'static str {
             format!("{home}/.local/bin/openclaw"),
         ];
         // Also probe nvm directories (any node version)
-        let nvm_dir = std::env::var("NVM_DIR")
-            .unwrap_or_else(|_| format!("{home}/.nvm"));
+        let nvm_dir = std::env::var("NVM_DIR").unwrap_or_else(|_| format!("{home}/.nvm"));
         let nvm_pattern = format!("{nvm_dir}/versions/node");
         let mut nvm_candidates = Vec::new();
         if let Ok(entries) = fs::read_dir(&nvm_pattern) {
@@ -86,12 +89,8 @@ fn find_in_path(bin: &str) -> bool {
 }
 
 use crate::recipe::{
-    load_recipes_with_fallback,
-    collect_change_paths,
-    build_candidate_config_from_template,
-    format_diff,
-    ApplyResult,
-    PreviewResult,
+    build_candidate_config_from_template, collect_change_paths, format_diff,
+    load_recipes_with_fallback, ApplyResult, PreviewResult,
 };
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -477,12 +476,12 @@ pub fn clear_openclaw_version_cache() {
     *OPENCLAW_VERSION_CACHE.lock().unwrap() = None;
 }
 
-static OPENCLAW_VERSION_CACHE: std::sync::Mutex<Option<Option<String>>> = std::sync::Mutex::new(None);
+static OPENCLAW_VERSION_CACHE: std::sync::Mutex<Option<Option<String>>> =
+    std::sync::Mutex::new(None);
 
 /// Fast status: reads config + quick TCP probe of gateway port.
 #[tauri::command]
 pub fn get_status_light() -> Result<StatusLight, String> {
-
     let paths = resolve_paths();
     let cfg = read_openclaw_config(&paths)?;
     let explicit_count = cfg
@@ -492,26 +491,40 @@ pub fn get_status_light() -> Result<StatusLight, String> {
         .map(|a| a.len() as u32)
         .unwrap_or(0);
     // At least 1 agent (implicit "main") when agents section exists
-    let active_agents = if explicit_count == 0 && cfg.get("agents").is_some() { 1 } else { explicit_count };
+    let active_agents = if explicit_count == 0 && cfg.get("agents").is_some() {
+        1
+    } else {
+        explicit_count
+    };
     let global_default_model = cfg
         .pointer("/agents/defaults/model")
         .and_then(read_model_value)
-        .or_else(|| cfg.pointer("/agents/default/model").and_then(read_model_value));
+        .or_else(|| {
+            cfg.pointer("/agents/default/model")
+                .and_then(read_model_value)
+        });
 
     let fallback_models = cfg
         .pointer("/agents/defaults/model/fallbacks")
         .and_then(Value::as_array)
-        .map(|arr| arr.iter().filter_map(Value::as_str).map(String::from).collect())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(Value::as_str)
+                .map(String::from)
+                .collect()
+        })
         .unwrap_or_default();
 
     // Quick gateway health: TCP connect to gateway port
-    let gateway_port = cfg.pointer("/gateway/port")
+    let gateway_port = cfg
+        .pointer("/gateway/port")
         .and_then(Value::as_u64)
         .unwrap_or(18789) as u16;
     let healthy = std::net::TcpStream::connect_timeout(
         &std::net::SocketAddr::from(([127, 0, 0, 1], gateway_port)),
         std::time::Duration::from_millis(200),
-    ).is_ok();
+    )
+    .is_ok();
 
     Ok(StatusLight {
         healthy,
@@ -577,21 +590,25 @@ pub fn get_system_status() -> Result<SystemStatus, String> {
         .and_then(|a| a.as_array())
         .map(|a| a.len() as u32)
         .unwrap_or(0);
-    let snapshots = list_snapshots(&paths.metadata_path).unwrap_or_default().items.len();
+    let snapshots = list_snapshots(&paths.metadata_path)
+        .unwrap_or_default()
+        .items
+        .len();
     let model_summary = collect_model_summary(&cfg);
     let channel_summary = collect_channel_summary(&cfg);
     let memory = collect_memory_overview(&paths.base_dir);
     let sessions = collect_session_overview(&paths.base_dir);
     let openclaw_version = resolve_openclaw_version();
-    let openclaw_update = check_openclaw_update_cached(&paths, false).unwrap_or_else(|_| OpenclawUpdateCheck {
-        installed_version: openclaw_version.clone(),
-        latest_version: None,
-        upgrade_available: false,
-        channel: None,
-        details: Some("update status unavailable".into()),
-        source: "unknown".into(),
-        checked_at: format_timestamp_from_unix(unix_timestamp_secs()),
-    });
+    let openclaw_update =
+        check_openclaw_update_cached(&paths, false).unwrap_or_else(|_| OpenclawUpdateCheck {
+            installed_version: openclaw_version.clone(),
+            latest_version: None,
+            upgrade_available: false,
+            channel: None,
+            details: Some("update status unavailable".into()),
+            source: "unknown".into(),
+            checked_at: format_timestamp_from_unix(unix_timestamp_secs()),
+        });
     Ok(SystemStatus {
         healthy: true,
         config_path: paths.config_path.to_string_lossy().to_string(),
@@ -634,7 +651,10 @@ pub fn extract_model_profiles_from_config() -> Result<ExtractModelProfilesResult
     let mut next_profiles = profiles;
     let mut model_profile_map: HashMap<String, String> = HashMap::new();
     for profile in &next_profiles {
-        model_profile_map.insert(normalize_model_ref(&profile_to_model_value(profile)), profile.id.clone());
+        model_profile_map.insert(
+            normalize_model_ref(&profile_to_model_value(profile)),
+            profile.id.clone(),
+        );
     }
 
     for binding in bindings {
@@ -705,7 +725,10 @@ pub fn upsert_model_profile(mut profile: ModelProfile) -> Result<ModelProfile, S
     let paths = resolve_paths();
     let mut profiles = load_model_profiles(&paths);
     fill_profile_auth_from_existing_or_provider_donor(&mut profile, &profiles);
-    let has_api_key = profile.api_key.as_ref().is_some_and(|k| !k.trim().is_empty());
+    let has_api_key = profile
+        .api_key
+        .as_ref()
+        .is_some_and(|k| !k.trim().is_empty());
     if has_api_key && profile.auth_ref.trim().is_empty() {
         profile.auth_ref = format!("{}:default", profile.provider.trim());
     }
@@ -721,7 +744,10 @@ pub fn upsert_model_profile(mut profile: ModelProfile) -> Result<ModelProfile, S
             let provider_upper = profile.provider.trim().to_uppercase().replace('-', "_");
             for suffix in ["_API_KEY", "_KEY", "_TOKEN"] {
                 let env_name = format!("{provider_upper}{suffix}");
-                if std::env::var(&env_name).map(|v| !v.trim().is_empty()).unwrap_or(false) {
+                if std::env::var(&env_name)
+                    .map(|v| !v.trim().is_empty())
+                    .unwrap_or(false)
+                {
                     profile.auth_ref = env_name;
                     break;
                 }
@@ -754,7 +780,11 @@ pub fn delete_model_profile(profile_id: String) -> Result<bool, String> {
 pub fn resolve_provider_auth(provider: String) -> Result<ProviderAuthSuggestion, String> {
     let provider_trimmed = provider.trim();
     if provider_trimmed.is_empty() {
-        return Ok(ProviderAuthSuggestion { auth_ref: None, has_key: false, source: String::new() });
+        return Ok(ProviderAuthSuggestion {
+            auth_ref: None,
+            has_key: false,
+            source: String::new(),
+        });
     }
     let paths = resolve_paths();
     let cfg = read_openclaw_config(&paths)?;
@@ -772,7 +802,10 @@ pub fn resolve_provider_auth(provider: String) -> Result<ProviderAuthSuggestion,
     let provider_upper = provider_trimmed.to_uppercase().replace('-', "_");
     for suffix in ["_API_KEY", "_KEY", "_TOKEN"] {
         let env_name = format!("{provider_upper}{suffix}");
-        if std::env::var(&env_name).map(|v| !v.trim().is_empty()).unwrap_or(false) {
+        if std::env::var(&env_name)
+            .map(|v| !v.trim().is_empty())
+            .unwrap_or(false)
+        {
             return Ok(ProviderAuthSuggestion {
                 auth_ref: Some(env_name),
                 has_key: true,
@@ -802,7 +835,11 @@ pub fn resolve_provider_auth(provider: String) -> Result<ProviderAuthSuggestion,
         }
     }
 
-    Ok(ProviderAuthSuggestion { auth_ref: None, has_key: false, source: String::new() })
+    Ok(ProviderAuthSuggestion {
+        auth_ref: None,
+        has_key: false,
+        source: String::new(),
+    })
 }
 
 #[tauri::command]
@@ -813,7 +850,9 @@ pub async fn list_channels() -> Result<Vec<ChannelNode>, String> {
         let mut nodes = collect_channel_nodes(&cfg);
         enrich_channel_display_names(&paths, &cfg, &mut nodes)?;
         Ok(nodes)
-    }).await.map_err(|e| e.to_string())?
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -856,9 +895,7 @@ pub async fn refresh_discord_guild_channels() -> Result<Vec<DiscordGuildChannel>
         ensure_dirs(&paths)?;
         let cfg = read_openclaw_config(&paths)?;
 
-        let discord_cfg = cfg
-            .get("channels")
-            .and_then(|c| c.get("discord"));
+        let discord_cfg = cfg.get("channels").and_then(|c| c.get("discord"));
         let configured_single_guild_id = discord_cfg
             .and_then(|d| d.get("guilds"))
             .and_then(Value::as_object)
@@ -881,7 +918,10 @@ pub async fn refresh_discord_guild_channels() -> Result<Vec<DiscordGuildChannel>
                     .and_then(Value::as_object)
                     .and_then(|accounts| {
                         accounts.values().find_map(|acct| {
-                            acct.get("token").and_then(Value::as_str).filter(|s| !s.is_empty()).map(|s| s.to_string())
+                            acct.get("token")
+                                .and_then(Value::as_str)
+                                .filter(|s| !s.is_empty())
+                                .map(|s| s.to_string())
                         })
                     })
             });
@@ -911,7 +951,10 @@ pub async fn refresh_discord_guild_channels() -> Result<Vec<DiscordGuildChannel>
                         if channel_id.contains('*') || channel_id.contains('?') {
                             continue;
                         }
-                        if entries.iter().any(|e| e.guild_id == *guild_id && e.channel_id == *channel_id) {
+                        if entries
+                            .iter()
+                            .any(|e| e.guild_id == *guild_id && e.channel_id == *channel_id)
+                        {
                             continue;
                         }
                         channel_ids.push(channel_id.clone());
@@ -927,12 +970,18 @@ pub async fn refresh_discord_guild_channels() -> Result<Vec<DiscordGuildChannel>
         };
 
         // Collect from channels.discord.guilds (top-level structured config)
-        if let Some(guilds) = discord_cfg.and_then(|d| d.get("guilds")).and_then(Value::as_object) {
+        if let Some(guilds) = discord_cfg
+            .and_then(|d| d.get("guilds"))
+            .and_then(Value::as_object)
+        {
             collect_guilds(guilds);
         }
 
         // Collect from channels.discord.accounts.<accountId>.guilds (multi-account config)
-        if let Some(accounts) = discord_cfg.and_then(|d| d.get("accounts")).and_then(Value::as_object) {
+        if let Some(accounts) = discord_cfg
+            .and_then(|d| d.get("accounts"))
+            .and_then(Value::as_object)
+        {
             for (_account_id, account_val) in accounts {
                 if let Some(guilds) = account_val.get("guilds").and_then(Value::as_object) {
                     collect_guilds(guilds);
@@ -963,7 +1012,10 @@ pub async fn refresh_discord_guild_channels() -> Result<Vec<DiscordGuildChannel>
                     _ => continue,
                 };
                 // Skip if already collected from guilds map
-                if entries.iter().any(|e| e.guild_id == guild_id && e.channel_id == channel_id) {
+                if entries
+                    .iter()
+                    .any(|e| e.guild_id == guild_id && e.channel_id == channel_id)
+                {
                     continue;
                 }
                 if !unresolved_guild_ids.contains(&guild_id) {
@@ -987,7 +1039,10 @@ pub async fn refresh_discord_guild_channels() -> Result<Vec<DiscordGuildChannel>
                 for guild_id in &configured_guild_ids {
                     if let Ok(channels) = fetch_discord_guild_channels(token, guild_id) {
                         for (channel_id, channel_name) in channels {
-                            if entries.iter().any(|e| e.guild_id == *guild_id && e.channel_id == channel_id) {
+                            if entries
+                                .iter()
+                                .any(|e| e.guild_id == *guild_id && e.channel_id == channel_id)
+                            {
                                 continue;
                             }
                             channel_ids.push(channel_id.clone());
@@ -1018,11 +1073,12 @@ pub async fn refresh_discord_guild_channels() -> Result<Vec<DiscordGuildChannel>
                     if entries.iter().any(|e| e.channel_id == channel_id) {
                         continue;
                     }
-                    let (guild_id, guild_name) = if let Some(gid) = configured_single_guild_id.clone() {
-                        (gid.clone(), gid)
-                    } else {
-                        ("discord".to_string(), "Discord".to_string())
-                    };
+                    let (guild_id, guild_name) =
+                        if let Some(gid) = configured_single_guild_id.clone() {
+                            (gid.clone(), gid)
+                        } else {
+                            ("discord".to_string(), "Discord".to_string())
+                        };
                     channel_ids.push(channel_id.clone());
                     entries.push(DiscordGuildChannel {
                         guild_id,
@@ -1041,9 +1097,13 @@ pub async fn refresh_discord_guild_channels() -> Result<Vec<DiscordGuildChannel>
         // Resolve channel names via openclaw CLI
         if !channel_ids.is_empty() {
             let mut args = vec![
-                "channels", "resolve", "--json",
-                "--channel", "discord",
-                "--kind", "auto",
+                "channels",
+                "resolve",
+                "--json",
+                "--channel",
+                "discord",
+                "--kind",
+                "auto",
             ];
             let id_refs: Vec<&str> = channel_ids.iter().map(String::as_str).collect();
             args.extend_from_slice(&id_refs);
@@ -1062,7 +1122,8 @@ pub async fn refresh_discord_guild_channels() -> Result<Vec<DiscordGuildChannel>
         // Resolve guild names via Discord REST API
         if let Some(token) = &bot_token {
             if !unresolved_guild_ids.is_empty() {
-                let mut guild_name_map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+                let mut guild_name_map: std::collections::HashMap<String, String> =
+                    std::collections::HashMap::new();
                 for gid in &unresolved_guild_ids {
                     if let Ok(name) = fetch_discord_guild_name(token, gid) {
                         guild_name_map.insert(gid.clone(), name);
@@ -1082,7 +1143,9 @@ pub async fn refresh_discord_guild_channels() -> Result<Vec<DiscordGuildChannel>
         write_text(&cache_file, &json)?;
 
         Ok(entries)
-    }).await.map_err(|e| e.to_string())?
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -1099,13 +1162,18 @@ pub fn update_channel_config(
     let paths = resolve_paths();
     let mut cfg = read_openclaw_config(&paths)?;
     let current = serde_json::to_string_pretty(&cfg).map_err(|e| e.to_string())?;
-    set_nested_value(&mut cfg, &format!("{path}.type"), channel_type.map(Value::String))?;
+    set_nested_value(
+        &mut cfg,
+        &format!("{path}.type"),
+        channel_type.map(Value::String),
+    )?;
     set_nested_value(&mut cfg, &format!("{path}.mode"), mode.map(Value::String))?;
-    let allowlist_values = allowlist
-        .into_iter()
-        .map(Value::String)
-        .collect::<Vec<_>>();
-    set_nested_value(&mut cfg, &format!("{path}.allowlist"), Some(Value::Array(allowlist_values)))?;
+    let allowlist_values = allowlist.into_iter().map(Value::String).collect::<Vec<_>>();
+    set_nested_value(
+        &mut cfg,
+        &format!("{path}.allowlist"),
+        Some(Value::Array(allowlist_values)),
+    )?;
     set_nested_value(&mut cfg, &format!("{path}.model"), model.map(Value::String))?;
     write_config_with_snapshot(&paths, &current, &cfg, "update-channel")?;
     Ok(true)
@@ -1137,7 +1205,9 @@ pub async fn list_bindings(
             cache.set(cache_key_cloned, serialized);
         }
         Ok(result)
-    }).await.map_err(|e| e.to_string())?
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -1162,7 +1232,9 @@ pub fn set_global_model(model_value: Option<String>) -> Result<bool, String> {
     let paths = resolve_paths();
     let mut cfg = read_openclaw_config(&paths)?;
     let current = serde_json::to_string_pretty(&cfg).map_err(|e| e.to_string())?;
-    let model = model_value.map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
+    let model = model_value
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty());
     // If existing model is an object (has fallbacks etc.), only update "primary" inside it
     if let Some(existing) = cfg.pointer_mut("/agents/defaults/model") {
         if let Some(model_obj) = existing.as_object_mut() {
@@ -1182,11 +1254,7 @@ pub fn set_global_model(model_value: Option<String>) -> Result<bool, String> {
         }
     }
     // Fallback: plain string or missing — set the whole value
-    set_nested_value(
-        &mut cfg,
-        "agents.defaults.model",
-        model.map(Value::String),
-    )?;
+    set_nested_value(&mut cfg, "agents.defaults.model", model.map(Value::String))?;
     write_config_with_snapshot(&paths, &current, &cfg, "set-global-model")?;
     let model_to_sync = cfg
         .pointer("/agents/defaults/model")
@@ -1203,7 +1271,9 @@ pub fn set_agent_model(agent_id: String, model_value: Option<String>) -> Result<
     let paths = resolve_paths();
     let mut cfg = read_openclaw_config(&paths)?;
     let current = serde_json::to_string_pretty(&cfg).map_err(|e| e.to_string())?;
-    let value = model_value.map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
+    let value = model_value
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty());
     set_agent_model_value(&mut cfg, &agent_id, value)?;
     write_config_with_snapshot(&paths, &current, &cfg, "set-agent-model")?;
     Ok(true)
@@ -1217,7 +1287,9 @@ pub fn set_channel_model(path: String, model_value: Option<String>) -> Result<bo
     let paths = resolve_paths();
     let mut cfg = read_openclaw_config(&paths)?;
     let current = serde_json::to_string_pretty(&cfg).map_err(|e| e.to_string())?;
-    let value = model_value.map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
+    let value = model_value
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty());
     set_nested_value(&mut cfg, &format!("{path}.model"), value.map(Value::String))?;
     write_config_with_snapshot(&paths, &current, &cfg, "set-channel-model")?;
     Ok(true)
@@ -1254,13 +1326,19 @@ pub async fn list_agents_overview(
             cache.set(cache_key_cloned, serialized);
         }
         Ok(result)
-    }).await.map_err(|e| e.to_string())?
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Check if an agent has active sessions by examining sessions/sessions.json.
 /// Returns true if the file exists and is larger than 2 bytes (i.e. not just "{}").
 fn agent_has_sessions(base_dir: &std::path::Path, agent_id: &str) -> bool {
-    let sessions_file = base_dir.join("agents").join(agent_id).join("sessions").join("sessions.json");
+    let sessions_file = base_dir
+        .join("agents")
+        .join(agent_id)
+        .join("sessions")
+        .join("sessions.json");
     match std::fs::metadata(&sessions_file) {
         Ok(m) => m.len() > 2, // "{}" is 2 bytes = empty
         Err(_) => false,
@@ -1269,16 +1347,41 @@ fn agent_has_sessions(base_dir: &std::path::Path, agent_id: &str) -> bool {
 
 /// Parse the JSON output of `openclaw agents list --json` into Vec<AgentOverview>.
 /// `online_set`: if Some, use it to determine online status; if None, check local sessions.
-fn parse_agents_cli_output(json: &Value, online_set: Option<&std::collections::HashSet<String>>) -> Result<Vec<AgentOverview>, String> {
-    let arr = json.as_array().ok_or("agents list output is not an array")?;
-    let paths = if online_set.is_none() { Some(resolve_paths()) } else { None };
+fn parse_agents_cli_output(
+    json: &Value,
+    online_set: Option<&std::collections::HashSet<String>>,
+) -> Result<Vec<AgentOverview>, String> {
+    let arr = json
+        .as_array()
+        .ok_or("agents list output is not an array")?;
+    let paths = if online_set.is_none() {
+        Some(resolve_paths())
+    } else {
+        None
+    };
     let mut agents = Vec::new();
     for entry in arr {
-        let id = entry.get("id").and_then(Value::as_str).unwrap_or("main").to_string();
-        let name = entry.get("identityName").and_then(Value::as_str).map(|s| s.to_string());
-        let emoji = entry.get("identityEmoji").and_then(Value::as_str).map(|s| s.to_string());
-        let model = entry.get("model").and_then(Value::as_str).map(|s| s.to_string());
-        let workspace = entry.get("workspace").and_then(Value::as_str).map(|s| s.to_string());
+        let id = entry
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or("main")
+            .to_string();
+        let name = entry
+            .get("identityName")
+            .and_then(Value::as_str)
+            .map(|s| s.to_string());
+        let emoji = entry
+            .get("identityEmoji")
+            .and_then(Value::as_str)
+            .map(|s| s.to_string());
+        let model = entry
+            .get("model")
+            .and_then(Value::as_str)
+            .map(|s| s.to_string());
+        let workspace = entry
+            .get("workspace")
+            .and_then(Value::as_str)
+            .map(|s| s.to_string());
         let online = match online_set {
             Some(set) => set.contains(&id),
             None => agent_has_sessions(paths.as_ref().unwrap().base_dir.as_path(), &id),
@@ -1317,7 +1420,10 @@ pub fn create_agent(
     if agent_id.is_empty() {
         return Err("Agent ID is required".into());
     }
-    if !agent_id.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') {
+    if !agent_id
+        .chars()
+        .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+    {
         return Err("Agent ID may only contain letters, numbers, hyphens, and underscores".into());
     }
 
@@ -1326,11 +1432,16 @@ pub fn create_agent(
     let current = serde_json::to_string_pretty(&cfg).map_err(|e| e.to_string())?;
 
     let existing_ids = collect_agent_ids(&cfg);
-    if existing_ids.iter().any(|id| id.eq_ignore_ascii_case(&agent_id)) {
+    if existing_ids
+        .iter()
+        .any(|id| id.eq_ignore_ascii_case(&agent_id))
+    {
         return Err(format!("Agent '{}' already exists", agent_id));
     }
 
-    let model_display = model_value.map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
+    let model_display = model_value
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty());
 
     // If independent, create a dedicated workspace directory;
     // otherwise inherit the default workspace so the gateway doesn't auto-create one.
@@ -1402,9 +1513,7 @@ pub fn delete_agent(agent_id: String) -> Result<bool, String> {
         .ok_or("agents.list not found")?;
 
     let before = list.len();
-    list.retain(|agent| {
-        agent.get("id").and_then(Value::as_str) != Some(&agent_id)
-    });
+    list.retain(|agent| agent.get("id").and_then(Value::as_str) != Some(&agent_id));
 
     if list.len() == before {
         return Err(format!("Agent '{}' not found", agent_id));
@@ -1445,20 +1554,24 @@ pub fn setup_agent_identity(
     let cfg = read_openclaw_config(&paths)?;
 
     // Find the agent's workspace
-    let agents_list = cfg.pointer("/agents/list")
+    let agents_list = cfg
+        .pointer("/agents/list")
         .and_then(Value::as_array)
         .ok_or("agents.list not found")?;
 
-    let agent = agents_list.iter()
+    let agent = agents_list
+        .iter()
         .find(|a| a.get("id").and_then(Value::as_str) == Some(&agent_id))
         .ok_or_else(|| format!("Agent '{}' not found", agent_id))?;
 
-    let default_workspace = cfg.pointer("/agents/defaults/workspace")
+    let default_workspace = cfg
+        .pointer("/agents/defaults/workspace")
         .or_else(|| cfg.pointer("/agents/default/workspace"))
         .and_then(Value::as_str)
         .map(|s| expand_tilde(s));
 
-    let workspace = agent.get("workspace")
+    let workspace = agent
+        .get("workspace")
         .and_then(Value::as_str)
         .map(|s| expand_tilde(s))
         .or(default_workspace)
@@ -1500,23 +1613,30 @@ pub async fn remote_setup_agent_identity(
     }
 
     // Read remote config to find agent workspace
-    let raw = pool.sftp_read(&host_id, "~/.openclaw/openclaw.json").await?;
-    let cfg: Value = serde_json::from_str(&raw).map_err(|e| format!("Failed to parse config: {e}"))?;
+    let raw = pool
+        .sftp_read(&host_id, "~/.openclaw/openclaw.json")
+        .await?;
+    let cfg: Value =
+        serde_json::from_str(&raw).map_err(|e| format!("Failed to parse config: {e}"))?;
 
-    let agents_list = cfg.pointer("/agents/list")
+    let agents_list = cfg
+        .pointer("/agents/list")
         .and_then(Value::as_array)
         .ok_or("agents.list not found")?;
 
-    let agent = agents_list.iter()
+    let agent = agents_list
+        .iter()
         .find(|a| a.get("id").and_then(Value::as_str) == Some(&agent_id))
         .ok_or_else(|| format!("Agent '{}' not found", agent_id))?;
 
-    let default_workspace = cfg.pointer("/agents/defaults/workspace")
+    let default_workspace = cfg
+        .pointer("/agents/defaults/workspace")
         .or_else(|| cfg.pointer("/agents/default/workspace"))
         .and_then(Value::as_str)
         .unwrap_or("~/.openclaw/agents");
 
-    let workspace = agent.get("workspace")
+    let workspace = agent
+        .get("workspace")
         .and_then(Value::as_str)
         .unwrap_or(default_workspace);
 
@@ -1530,8 +1650,13 @@ pub async fn remote_setup_agent_identity(
     }
 
     // Write via SSH
-    let ws = if workspace.starts_with("~/") { workspace.to_string() } else { format!("~/{workspace}") };
-    pool.exec(&host_id, &format!("mkdir -p {}", shell_escape(&ws))).await?;
+    let ws = if workspace.starts_with("~/") {
+        workspace.to_string()
+    } else {
+        format!("~/{workspace}")
+    };
+    pool.exec(&host_id, &format!("mkdir -p {}", shell_escape(&ws)))
+        .await?;
     let identity_path = format!("{}/IDENTITY.md", ws);
     pool.sftp_write(&host_id, &identity_path, &content).await?;
 
@@ -1561,11 +1686,9 @@ pub fn clear_all_sessions() -> Result<usize, String> {
 
 #[tauri::command]
 pub async fn analyze_sessions() -> Result<Vec<AgentSessionAnalysis>, String> {
-    tauri::async_runtime::spawn_blocking(|| {
-        analyze_sessions_sync()
-    })
-    .await
-    .map_err(|e| e.to_string())?
+    tauri::async_runtime::spawn_blocking(|| analyze_sessions_sync())
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 fn analyze_sessions_sync() -> Result<Vec<AgentSessionAnalysis>, String> {
@@ -1695,7 +1818,9 @@ fn analyze_sessions_sync() -> Result<Vec<AgentSessionAnalysis>, String> {
                     (now - updated_at) / (1000.0 * 60.0 * 60.0 * 24.0)
                 } else {
                     // Fall back to file modification time
-                    metadata.modified().ok()
+                    metadata
+                        .modified()
+                        .ok()
                         .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
                         .map(|d| (now - d.as_millis() as f64) / (1000.0 * 60.0 * 60.0 * 24.0))
                         .unwrap_or(0.0)
@@ -1735,15 +1860,27 @@ fn analyze_sessions_sync() -> Result<Vec<AgentSessionAnalysis>, String> {
                 "low_value" => 1,
                 _ => 2,
             };
-            cat_order(&a.category).cmp(&cat_order(&b.category))
-                .then(b.age_days.partial_cmp(&a.age_days).unwrap_or(std::cmp::Ordering::Equal))
+            cat_order(&a.category).cmp(&cat_order(&b.category)).then(
+                b.age_days
+                    .partial_cmp(&a.age_days)
+                    .unwrap_or(std::cmp::Ordering::Equal),
+            )
         });
 
         let total_files = agent_sessions.len();
         let total_size_bytes = agent_sessions.iter().map(|s| s.size_bytes).sum();
-        let empty_count = agent_sessions.iter().filter(|s| s.category == "empty").count();
-        let low_value_count = agent_sessions.iter().filter(|s| s.category == "low_value").count();
-        let valuable_count = agent_sessions.iter().filter(|s| s.category == "valuable").count();
+        let empty_count = agent_sessions
+            .iter()
+            .filter(|s| s.category == "empty")
+            .count();
+        let low_value_count = agent_sessions
+            .iter()
+            .filter(|s| s.category == "low_value")
+            .count();
+        let valuable_count = agent_sessions
+            .iter()
+            .filter(|s| s.category == "valuable")
+            .count();
 
         if total_files > 0 {
             results.push(AgentSessionAnalysis {
@@ -1763,7 +1900,10 @@ fn analyze_sessions_sync() -> Result<Vec<AgentSessionAnalysis>, String> {
 }
 
 #[tauri::command]
-pub async fn delete_sessions_by_ids(agent_id: String, session_ids: Vec<String>) -> Result<usize, String> {
+pub async fn delete_sessions_by_ids(
+    agent_id: String,
+    session_ids: Vec<String>,
+) -> Result<usize, String> {
     tauri::async_runtime::spawn_blocking(move || {
         delete_sessions_by_ids_sync(&agent_id, &session_ids)
     })
@@ -1823,7 +1963,10 @@ fn delete_sessions_by_ids_sync(agent_id: &str, session_ids: &[String]) -> Result
                     let sid = val.get("sessionId").and_then(Value::as_str).unwrap_or("");
                     !id_set.contains(sid)
                 });
-                let _ = fs::write(&sessions_json_path, serde_json::to_string(&data).unwrap_or_default());
+                let _ = fs::write(
+                    &sessions_json_path,
+                    serde_json::to_string(&data).unwrap_or_default(),
+                );
             }
         }
     }
@@ -1833,11 +1976,9 @@ fn delete_sessions_by_ids_sync(agent_id: &str, session_ids: &[String]) -> Result
 
 #[tauri::command]
 pub async fn preview_session(agent_id: String, session_id: String) -> Result<Vec<Value>, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        preview_session_sync(&agent_id, &session_id)
-    })
-    .await
-    .map_err(|e| e.to_string())?
+    tauri::async_runtime::spawn_blocking(move || preview_session_sync(&agent_id, &session_id))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 fn preview_session_sync(agent_id: &str, session_id: &str) -> Result<Vec<Value>, String> {
@@ -1879,8 +2020,12 @@ fn preview_session_sync(agent_id: &str, session_id: &str) -> Result<Vec<Value>, 
             Err(_) => continue,
         };
         if obj.get("type").and_then(Value::as_str) == Some("message") {
-            let role = obj.pointer("/message/role").and_then(Value::as_str).unwrap_or("unknown");
-            let content = obj.pointer("/message/content")
+            let role = obj
+                .pointer("/message/role")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            let content = obj
+                .pointer("/message/content")
                 .map(|c| {
                     if let Some(arr) = c.as_array() {
                         arr.iter()
@@ -1929,7 +2074,8 @@ pub fn apply_config_patch(
         &current_text,
         None,
     )?;
-    let (candidate, _changes) = build_candidate_config_from_template(&current, &patch_template, &params)?;
+    let (candidate, _changes) =
+        build_candidate_config_from_template(&current, &patch_template, &params)?;
     write_json(&paths.config_path, &candidate)?;
     let mut warnings = Vec::new();
     if let Err(err) = sync_main_auth_for_config(&paths, &candidate) {
@@ -1950,7 +2096,9 @@ pub async fn restart_gateway() -> Result<bool, String> {
     tauri::async_runtime::spawn_blocking(move || {
         run_openclaw_raw(&["gateway", "restart"])?;
         Ok(true)
-    }).await.map_err(|e| e.to_string())?
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -2034,7 +2182,9 @@ pub async fn manage_rescue_bot(
             was_already_configured: already_configured,
             commands,
         })
-    }).await.map_err(|e| e.to_string())?
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -2106,7 +2256,8 @@ pub fn preview_rollback(snapshot_id: String) -> Result<PreviewResult, String> {
 
     let current = read_openclaw_config(&paths)?;
     let target_text = read_snapshot(&target.config_path)?;
-    let target_json: Value = json5::from_str(&target_text).unwrap_or(Value::Object(Default::default()));
+    let target_json: Value =
+        json5::from_str(&target_text).unwrap_or(Value::Object(Default::default()));
     let before_text = serde_json::to_string_pretty(&current).unwrap_or_else(|_| "{}".into());
     let after_text = serde_json::to_string_pretty(&target_json).unwrap_or_else(|_| "{}".into());
     Ok(PreviewResult {
@@ -2192,9 +2343,16 @@ pub fn fix_issues(ids: Vec<String>) -> Result<FixResult, String> {
 }
 
 #[tauri::command]
-pub async fn remote_fix_issues(pool: State<'_, SshConnectionPool>, host_id: String, ids: Vec<String>) -> Result<FixResult, String> {
-    let raw = pool.sftp_read(&host_id, "~/.openclaw/openclaw.json").await?;
-    let mut cfg: Value = json5::from_str(&raw).unwrap_or_else(|_| Value::Object(Default::default()));
+pub async fn remote_fix_issues(
+    pool: State<'_, SshConnectionPool>,
+    host_id: String,
+    ids: Vec<String>,
+) -> Result<FixResult, String> {
+    let raw = pool
+        .sftp_read(&host_id, "~/.openclaw/openclaw.json")
+        .await?;
+    let mut cfg: Value =
+        json5::from_str(&raw).unwrap_or_else(|_| Value::Object(Default::default()));
     let mut applied = Vec::new();
 
     for id in &ids {
@@ -2202,7 +2360,10 @@ pub async fn remote_fix_issues(pool: State<'_, SshConnectionPool>, host_id: Stri
             "field.agents" if cfg.get("agents").is_none() => {
                 let mut agents = serde_json::Map::new();
                 let mut defaults = serde_json::Map::new();
-                defaults.insert("model".into(), Value::String("anthropic/claude-sonnet-4-5".into()));
+                defaults.insert(
+                    "model".into(),
+                    Value::String("anthropic/claude-sonnet-4-5".into()),
+                );
                 agents.insert("defaults".into(), Value::Object(defaults));
                 if let Value::Object(map) = &mut cfg {
                     map.insert("agents".into(), Value::Object(agents));
@@ -2219,7 +2380,10 @@ pub async fn remote_fix_issues(pool: State<'_, SshConnectionPool>, host_id: Stri
                     .and_then(|v| v.as_object())
                     .cloned()
                     .unwrap_or_default();
-                gateway.insert("port".into(), Value::Number(serde_json::Number::from(18789_u64)));
+                gateway.insert(
+                    "port".into(),
+                    Value::Number(serde_json::Number::from(18789_u64)),
+                );
                 if let Value::Object(map) = &mut cfg {
                     map.insert("gateway".into(), Value::Object(gateway));
                 }
@@ -2245,7 +2409,10 @@ fn collect_model_summary(cfg: &Value) -> ModelSummary {
     let global_default_model = cfg
         .pointer("/agents/defaults/model")
         .and_then(|value| read_model_value(value))
-        .or_else(|| cfg.pointer("/agents/default/model").and_then(|value| read_model_value(value)));
+        .or_else(|| {
+            cfg.pointer("/agents/default/model")
+                .and_then(|value| read_model_value(value))
+        });
 
     let mut agent_overrides = Vec::new();
     if let Some(agents) = cfg.pointer("/agents/list").and_then(Value::as_array) {
@@ -2256,10 +2423,7 @@ fn collect_model_summary(cfg: &Value) -> ModelSummary {
                     .map(|global| global != &model_value)
                     .unwrap_or(true);
                 if should_emit {
-                    let id = agent
-                        .get("id")
-                        .and_then(Value::as_str)
-                        .unwrap_or("agent");
+                    let id = agent.get("id").and_then(Value::as_str).unwrap_or("agent");
                     agent_overrides.push(format!("{id} => {model_value}"));
                 }
             }
@@ -2545,8 +2709,8 @@ fn build_rescue_primary_diagnosis(
         }
     }
 
-    let doctor_report =
-        parse_json_loose(&primary_doctor_output.stdout).or_else(|| parse_json_loose(&primary_doctor_output.stderr));
+    let doctor_report = parse_json_loose(&primary_doctor_output.stdout)
+        .or_else(|| parse_json_loose(&primary_doctor_output.stderr));
     let doctor_issues = doctor_report
         .as_ref()
         .map(|report| parse_doctor_issues(report, "primary"))
@@ -2583,7 +2747,9 @@ fn build_rescue_primary_diagnosis(
             severity: "error".into(),
             message: "Primary doctor command failed".into(),
             auto_fixable: false,
-            fix_hint: Some("Review doctor output in this check and open gateway logs for details".into()),
+            fix_hint: Some(
+                "Review doctor output in this check and open gateway logs for details".into(),
+            ),
             source: "primary".into(),
         });
     }
@@ -2628,14 +2794,19 @@ fn diagnose_primary_via_rescue_local(
 ) -> Result<RescuePrimaryDiagnosisResult, String> {
     let (rescue_configured, rescue_port) = resolve_local_rescue_profile_state(rescue_profile)?;
     let rescue_gateway_status = if rescue_configured {
-        let command = build_profile_command(rescue_profile, &["gateway", "status", "--no-probe", "--json"]);
+        let command = build_profile_command(
+            rescue_profile,
+            &["gateway", "status", "--no-probe", "--json"],
+        );
         Some(run_openclaw_dynamic(&command)?)
     } else {
         None
     };
     let primary_doctor_output = run_local_primary_doctor_with_fallback(target_profile)?;
-    let primary_gateway_command =
-        build_profile_command(target_profile, &["gateway", "status", "--no-probe", "--json"]);
+    let primary_gateway_command = build_profile_command(
+        target_profile,
+        &["gateway", "status", "--no-probe", "--json"],
+    );
     let primary_gateway_output = run_openclaw_dynamic(&primary_gateway_command)?;
 
     Ok(build_rescue_primary_diagnosis(
@@ -2658,16 +2829,22 @@ async fn diagnose_primary_via_rescue_remote(
     let (rescue_configured, rescue_port) =
         resolve_remote_rescue_profile_state(pool, host_id, rescue_profile).await?;
     let rescue_gateway_status = if rescue_configured {
-        let command = build_profile_command(rescue_profile, &["gateway", "status", "--no-probe", "--json"]);
+        let command = build_profile_command(
+            rescue_profile,
+            &["gateway", "status", "--no-probe", "--json"],
+        );
         Some(run_remote_openclaw_dynamic(pool, host_id, command).await?)
     } else {
         None
     };
     let primary_doctor_output =
         run_remote_primary_doctor_with_fallback(pool, host_id, target_profile).await?;
-    let primary_gateway_command =
-        build_profile_command(target_profile, &["gateway", "status", "--no-probe", "--json"]);
-    let primary_gateway_output = run_remote_openclaw_dynamic(pool, host_id, primary_gateway_command).await?;
+    let primary_gateway_command = build_profile_command(
+        target_profile,
+        &["gateway", "status", "--no-probe", "--json"],
+    );
+    let primary_gateway_output =
+        run_remote_openclaw_dynamic(pool, host_id, primary_gateway_command).await?;
 
     Ok(build_rescue_primary_diagnosis(
         target_profile,
@@ -2817,7 +2994,8 @@ async fn run_remote_profile_restart_with_fallback(
     steps: &mut Vec<RescuePrimaryRepairStep>,
 ) -> Result<bool, String> {
     let restart_command = build_profile_command(profile, &["gateway", "restart"]);
-    let restart_output = run_remote_openclaw_dynamic(pool, host_id, restart_command.clone()).await?;
+    let restart_output =
+        run_remote_openclaw_dynamic(pool, host_id, restart_command.clone()).await?;
     let restart_ok = restart_output.exit_code == 0;
     steps.push(RescuePrimaryRepairStep {
         id: "primary.gateway.restart".into(),
@@ -2864,7 +3042,8 @@ fn repair_primary_via_rescue_local(
 ) -> Result<RescuePrimaryRepairResult, String> {
     let attempted_at = format_timestamp_from_unix(unix_timestamp_secs());
     let before = diagnose_primary_via_rescue_local(target_profile, rescue_profile)?;
-    let (selected_issue_ids, mut skipped_issue_ids) = collect_safe_primary_issue_ids(&before, &issue_ids);
+    let (selected_issue_ids, mut skipped_issue_ids) =
+        collect_safe_primary_issue_ids(&before, &issue_ids);
     let mut applied_issue_ids = Vec::new();
     let mut failed_issue_ids = Vec::new();
     let mut steps = Vec::new();
@@ -2905,7 +3084,8 @@ fn repair_primary_via_rescue_local(
         });
     } else {
         for issue_id in &selected_issue_ids {
-            let Some((title, command)) = build_primary_issue_fix_command(target_profile, issue_id) else {
+            let Some((title, command)) = build_primary_issue_fix_command(target_profile, issue_id)
+            else {
                 skipped_issue_ids.push(issue_id.clone());
                 steps.push(RescuePrimaryRepairStep {
                     id: format!("repair.{issue_id}"),
@@ -2963,8 +3143,10 @@ async fn repair_primary_via_rescue_remote(
     issue_ids: Vec<String>,
 ) -> Result<RescuePrimaryRepairResult, String> {
     let attempted_at = format_timestamp_from_unix(unix_timestamp_secs());
-    let before = diagnose_primary_via_rescue_remote(pool, host_id, target_profile, rescue_profile).await?;
-    let (selected_issue_ids, mut skipped_issue_ids) = collect_safe_primary_issue_ids(&before, &issue_ids);
+    let before =
+        diagnose_primary_via_rescue_remote(pool, host_id, target_profile, rescue_profile).await?;
+    let (selected_issue_ids, mut skipped_issue_ids) =
+        collect_safe_primary_issue_ids(&before, &issue_ids);
     let mut applied_issue_ids = Vec::new();
     let mut failed_issue_ids = Vec::new();
     let mut steps = Vec::new();
@@ -3005,7 +3187,8 @@ async fn repair_primary_via_rescue_remote(
         });
     } else {
         for issue_id in &selected_issue_ids {
-            let Some((title, command)) = build_primary_issue_fix_command(target_profile, issue_id) else {
+            let Some((title, command)) = build_primary_issue_fix_command(target_profile, issue_id)
+            else {
                 skipped_issue_ids.push(issue_id.clone());
                 steps.push(RescuePrimaryRepairStep {
                     id: format!("repair.{issue_id}"),
@@ -3035,13 +3218,15 @@ async fn repair_primary_via_rescue_remote(
 
     if !applied_issue_ids.is_empty() {
         let restart_ok =
-            run_remote_profile_restart_with_fallback(pool, host_id, target_profile, &mut steps).await?;
+            run_remote_profile_restart_with_fallback(pool, host_id, target_profile, &mut steps)
+                .await?;
         if !restart_ok {
             failed_issue_ids.push("primary.gateway.restart".into());
         }
     }
 
-    let after = diagnose_primary_via_rescue_remote(pool, host_id, target_profile, rescue_profile).await?;
+    let after =
+        diagnose_primary_via_rescue_remote(pool, host_id, target_profile, rescue_profile).await?;
     Ok(RescuePrimaryRepairResult {
         attempted_at,
         target_profile: target_profile.to_string(),
@@ -3208,11 +3393,7 @@ fn build_rescue_bot_command_plan(
             });
             commands.push({
                 let mut cmd = profile_arg;
-                cmd.extend([
-                    "config".into(),
-                    "unset".into(),
-                    "gateway.port".into(),
-                ]);
+                cmd.extend(["config".into(), "unset".into(), "gateway.port".into()]);
                 cmd
             });
         }
@@ -3256,7 +3437,9 @@ fn is_gateway_uninstall_command(command: &[String]) -> bool {
 }
 
 fn is_gateway_status_command(command: &[String]) -> bool {
-    command.windows(2).any(|window| window[0] == "gateway" && window[1] == "status")
+    command
+        .windows(2)
+        .any(|window| window[0] == "gateway" && window[1] == "status")
 }
 
 fn is_config_unset_gateway_port_command(command: &[String]) -> bool {
@@ -3286,7 +3469,9 @@ fn is_rescue_cleanup_noop(
     command: &[String],
     output: &OpenclawCommandOutput,
 ) -> bool {
-    if output.exit_code == 0 || !matches!(action, RescueBotAction::Deactivate | RescueBotAction::Unset) {
+    if output.exit_code == 0
+        || !matches!(action, RescueBotAction::Deactivate | RescueBotAction::Unset)
+    {
         return false;
     }
     let details = format!("{}\n{}", output.stderr, output.stdout).to_ascii_lowercase();
@@ -3398,12 +3583,14 @@ async fn resolve_remote_rescue_profile_state(
     Ok((true, port))
 }
 
-
 fn run_openclaw_raw(args: &[&str]) -> Result<OpenclawCommandOutput, String> {
     run_openclaw_raw_timeout(args, None)
 }
 
-fn run_openclaw_raw_timeout(args: &[&str], timeout_secs: Option<u64>) -> Result<OpenclawCommandOutput, String> {
+fn run_openclaw_raw_timeout(
+    args: &[&str],
+    timeout_secs: Option<u64>,
+) -> Result<OpenclawCommandOutput, String> {
     let mut command = Command::new(resolve_openclaw_bin());
     command
         .args(args)
@@ -3462,8 +3649,12 @@ fn run_openclaw_raw_timeout(args: &[&str], timeout_secs: Option<u64>) -> Result<
             .map_err(|error| format!("failed to run openclaw: {error}"))?;
         let exit_code = output.status.code().unwrap_or(-1);
         let result = OpenclawCommandOutput {
-            stdout: String::from_utf8_lossy(&output.stdout).trim_end().to_string(),
-            stderr: String::from_utf8_lossy(&output.stderr).trim_end().to_string(),
+            stdout: String::from_utf8_lossy(&output.stdout)
+                .trim_end()
+                .to_string(),
+            stderr: String::from_utf8_lossy(&output.stderr)
+                .trim_end()
+                .to_string(),
             exit_code,
         };
         if exit_code != 0 {
@@ -3497,7 +3688,9 @@ pub fn local_openclaw_config_exists(openclaw_home: String) -> Result<bool, Strin
         return Ok(false);
     }
     let expanded = shellexpand::tilde(home).to_string();
-    let config_path = PathBuf::from(expanded).join(".openclaw").join("openclaw.json");
+    let config_path = PathBuf::from(expanded)
+        .join(".openclaw")
+        .join("openclaw.json");
     Ok(config_path.exists())
 }
 
@@ -3516,7 +3709,8 @@ pub fn delete_local_instance_home(openclaw_home: String) -> Result<bool, String>
     let canonical_target = target
         .canonicalize()
         .map_err(|e| format!("failed to resolve target path: {e}"))?;
-    let user_home = dirs::home_dir().ok_or_else(|| "failed to resolve HOME directory".to_string())?;
+    let user_home =
+        dirs::home_dir().ok_or_else(|| "failed to resolve HOME directory".to_string())?;
     let allowed_root = user_home.join(".clawpal");
     let canonical_allowed_root = allowed_root
         .canonicalize()
@@ -3529,8 +3723,12 @@ pub fn delete_local_instance_home(openclaw_home: String) -> Result<bool, String>
         return Err("refuse to delete ~/.clawpal root".to_string());
     }
 
-    fs::remove_dir_all(&canonical_target)
-        .map_err(|e| format!("failed to delete '{}': {e}", canonical_target.to_string_lossy()))?;
+    fs::remove_dir_all(&canonical_target).map_err(|e| {
+        format!(
+            "failed to delete '{}': {e}",
+            canonical_target.to_string_lossy()
+        )
+    })?;
     Ok(true)
 }
 
@@ -3551,7 +3749,10 @@ pub struct RecordInstallExperienceResult {
     pub total_count: usize,
 }
 
-pub async fn ensure_access_profile_impl(instance_id: String, transport: String) -> Result<EnsureAccessResult, String> {
+pub async fn ensure_access_profile_impl(
+    instance_id: String,
+    transport: String,
+) -> Result<EnsureAccessResult, String> {
     let paths = resolve_paths();
     let store = AccessDiscoveryStore::new(paths.clawpal_dir.join("access-discovery"));
     if let Some(existing) = store.load_profile(&instance_id)? {
@@ -3570,7 +3771,9 @@ pub async fn ensure_access_profile_impl(instance_id: String, transport: String) 
     let probes = probe_plan
         .iter()
         .enumerate()
-        .map(|(idx, cmd)| run_probe_with_redaction(&format!("probe-{idx}"), cmd, "planned", true, 0))
+        .map(|(idx, cmd)| {
+            run_probe_with_redaction(&format!("probe-{idx}"), cmd, "planned", true, 0)
+        })
         .collect::<Vec<_>>();
 
     let mut profile = CapabilityProfile::example_local(&instance_id);
@@ -3594,11 +3797,16 @@ pub async fn ensure_access_profile_impl(instance_id: String, transport: String) 
 }
 
 #[tauri::command]
-pub async fn ensure_access_profile(instance_id: String, transport: String) -> Result<EnsureAccessResult, String> {
+pub async fn ensure_access_profile(
+    instance_id: String,
+    transport: String,
+) -> Result<EnsureAccessResult, String> {
     ensure_access_profile_impl(instance_id, transport).await
 }
 
-pub async fn ensure_access_profile_for_test(instance_id: &str) -> Result<EnsureAccessResult, String> {
+pub async fn ensure_access_profile_for_test(
+    instance_id: &str,
+) -> Result<EnsureAccessResult, String> {
     ensure_access_profile_impl(instance_id.to_string(), "local".to_string()).await
 }
 
@@ -3713,7 +3921,10 @@ fn parse_resolve_name_map(stdout: &str) -> Option<HashMap<String, String>> {
     let parsed: Vec<Value> = serde_json::from_str(json_str).ok()?;
     let mut map = HashMap::new();
     for item in parsed {
-        let resolved = item.get("resolved").and_then(Value::as_bool).unwrap_or(false);
+        let resolved = item
+            .get("resolved")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
         if !resolved {
             continue;
         }
@@ -3843,7 +4054,10 @@ fn normalize_semver_components(raw: &str) -> Option<Vec<u32>> {
     let mut parts = Vec::new();
     for bit in raw.split('.') {
         let filtered = bit.trim_start_matches(|c: char| c == 'v' || c == 'V');
-        let head = filtered.split(|c: char| !c.is_ascii_digit()).next().unwrap_or("");
+        let head = filtered
+            .split(|c: char| !c.is_ascii_digit())
+            .next()
+            .unwrap_or("");
         if head.is_empty() {
             continue;
         }
@@ -3872,17 +4086,12 @@ fn openclaw_update_cache_path(paths: &crate::models::OpenClawPaths) -> PathBuf {
     paths.clawpal_dir.join("openclaw-update-cache.json")
 }
 
-fn read_openclaw_update_cache(
-    path: &Path,
-) -> Option<OpenclawUpdateCache> {
+fn read_openclaw_update_cache(path: &Path) -> Option<OpenclawUpdateCache> {
     let text = fs::read_to_string(path).ok()?;
     serde_json::from_str::<OpenclawUpdateCache>(&text).ok()
 }
 
-fn save_openclaw_update_cache(
-    path: &Path,
-    cache: &OpenclawUpdateCache,
-) -> Result<(), String> {
+fn save_openclaw_update_cache(path: &Path, cache: &OpenclawUpdateCache) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     }
@@ -3895,10 +4104,7 @@ fn read_model_catalog_cache(path: &Path) -> Option<ModelCatalogProviderCache> {
     serde_json::from_str::<ModelCatalogProviderCache>(&text).ok()
 }
 
-fn save_model_catalog_cache(
-    path: &Path,
-    cache: &ModelCatalogProviderCache,
-) -> Result<(), String> {
+fn save_model_catalog_cache(path: &Path, cache: &ModelCatalogProviderCache) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     }
@@ -3934,22 +4140,30 @@ fn normalize_model_ref(raw: &str) -> String {
 fn resolve_openclaw_version() -> String {
     use std::sync::OnceLock;
     static VERSION: OnceLock<String> = OnceLock::new();
-    VERSION.get_or_init(|| {
-        match run_openclaw_raw(&["--version"]) {
-            Ok(output) => extract_version_from_text(&output.stdout).unwrap_or_else(|| "unknown".into()),
+    VERSION
+        .get_or_init(|| match run_openclaw_raw(&["--version"]) {
+            Ok(output) => {
+                extract_version_from_text(&output.stdout).unwrap_or_else(|| "unknown".into())
+            }
             Err(_) => "unknown".into(),
-        }
-    }).clone()
+        })
+        .clone()
 }
 
-fn check_openclaw_update_cached(paths: &crate::models::OpenClawPaths, force: bool) -> Result<OpenclawUpdateCheck, String> {
+fn check_openclaw_update_cached(
+    paths: &crate::models::OpenClawPaths,
+    force: bool,
+) -> Result<OpenclawUpdateCheck, String> {
     let cache_path = openclaw_update_cache_path(paths);
     let now = unix_timestamp_secs();
     if !force {
         if let Some(cached) = read_openclaw_update_cache(&cache_path) {
             if now.saturating_sub(cached.checked_at) < cached.ttl_seconds {
-                let installed_version = cached.installed_version.unwrap_or_else(resolve_openclaw_version);
-                let upgrade_available = compare_semver(&installed_version, cached.latest_version.as_deref());
+                let installed_version = cached
+                    .installed_version
+                    .unwrap_or_else(resolve_openclaw_version);
+                let upgrade_available =
+                    compare_semver(&installed_version, cached.latest_version.as_deref());
                 return Ok(OpenclawUpdateCheck {
                     installed_version,
                     latest_version: cached.latest_version,
@@ -3964,8 +4178,14 @@ fn check_openclaw_update_cached(paths: &crate::models::OpenClawPaths, force: boo
     }
 
     let installed_version = resolve_openclaw_version();
-    let (latest_version, channel, details, source, upgrade_available) = detect_openclaw_update_cached(&installed_version)
-        .unwrap_or((None, None, Some("failed to detect update status".into()), "openclaw-command".into(), false));
+    let (latest_version, channel, details, source, upgrade_available) =
+        detect_openclaw_update_cached(&installed_version).unwrap_or((
+            None,
+            None,
+            Some("failed to detect update status".into()),
+            "openclaw-command".into(),
+            false,
+        ));
     let checked_at = format_timestamp_from_unix(now);
     let cache = OpenclawUpdateCache {
         checked_at: now,
@@ -3989,12 +4209,20 @@ fn check_openclaw_update_cached(paths: &crate::models::OpenClawPaths, force: boo
     })
 }
 
-fn detect_openclaw_update_cached(installed_version: &str) -> Option<(Option<String>, Option<String>, Option<String>, String, bool)> {
+fn detect_openclaw_update_cached(
+    installed_version: &str,
+) -> Option<(Option<String>, Option<String>, Option<String>, String, bool)> {
     let output = run_openclaw_raw(&["update", "status"]).ok()?;
     if let Some((latest_version, channel, details, upgrade_available)) =
         parse_openclaw_update_json(&output.stdout, installed_version)
     {
-        return Some((latest_version, Some(channel), Some(details), "openclaw update status --json".into(), upgrade_available));
+        return Some((
+            latest_version,
+            Some(channel),
+            Some(details),
+            "openclaw update status --json".into(),
+            upgrade_available,
+        ));
     }
     let parsed = parse_openclaw_update_text(&output.stdout);
     if let Some((latest_version, channel, details)) = parsed {
@@ -4002,7 +4230,13 @@ fn detect_openclaw_update_cached(installed_version: &str) -> Option<(Option<Stri
         let available = latest_version
             .as_ref()
             .is_some_and(|latest| compare_semver(installed_version, Some(latest)));
-        return Some((latest_version, Some(channel), Some(details), source, available));
+        return Some((
+            latest_version,
+            Some(channel),
+            Some(details),
+            source,
+            available,
+        ));
     }
     let latest_version = query_openclaw_latest_npm().ok().flatten();
     let details = latest_version
@@ -4015,7 +4249,10 @@ fn detect_openclaw_update_cached(installed_version: &str) -> Option<(Option<Stri
     Some((latest_version, None, Some(details), "npm".into(), upgrade))
 }
 
-fn parse_openclaw_update_json(raw: &str, installed_version: &str) -> Option<(Option<String>, String, String, bool)> {
+fn parse_openclaw_update_json(
+    raw: &str,
+    installed_version: &str,
+) -> Option<(Option<String>, String, String, bool)> {
     let json_str = extract_json_from_output(raw)?;
     let payload: Value = serde_json::from_str(json_str).ok()?;
     let channel = payload
@@ -4094,8 +4331,13 @@ fn query_openclaw_latest_npm() -> Result<Option<String>, String> {
     if !resp.status().is_success() {
         return Ok(None);
     }
-    let body: Value = resp.json().map_err(|e| format!("npm registry parse failed: {e}"))?;
-    let version = body.get("version").and_then(Value::as_str).map(String::from);
+    let body: Value = resp
+        .json()
+        .map_err(|e| format!("npm registry parse failed: {e}"))?;
+    let version = body
+        .get("version")
+        .and_then(Value::as_str)
+        .map(String::from);
     Ok(version)
 }
 
@@ -4114,7 +4356,9 @@ fn fetch_discord_guild_name(bot_token: &str, guild_id: &str) -> Result<String, S
     if !resp.status().is_success() {
         return Err(format!("Discord API returned status {}", resp.status()));
     }
-    let body: Value = resp.json().map_err(|e| format!("Failed to parse Discord response: {e}"))?;
+    let body: Value = resp
+        .json()
+        .map_err(|e| format!("Failed to parse Discord response: {e}"))?;
     body.get("name")
         .and_then(Value::as_str)
         .map(|s| s.to_string())
@@ -4122,7 +4366,10 @@ fn fetch_discord_guild_name(bot_token: &str, guild_id: &str) -> Result<String, S
 }
 
 /// Fetch Discord channels for a guild via REST API using a bot token.
-fn fetch_discord_guild_channels(bot_token: &str, guild_id: &str) -> Result<Vec<(String, String)>, String> {
+fn fetch_discord_guild_channels(
+    bot_token: &str,
+    guild_id: &str,
+) -> Result<Vec<(String, String)>, String> {
     let url = format!("https://discord.com/api/v10/guilds/{guild_id}/channels");
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(4))
@@ -4136,8 +4383,12 @@ fn fetch_discord_guild_channels(bot_token: &str, guild_id: &str) -> Result<Vec<(
     if !resp.status().is_success() {
         return Err(format!("Discord API returned status {}", resp.status()));
     }
-    let body: Value = resp.json().map_err(|e| format!("Failed to parse Discord response: {e}"))?;
-    let arr = body.as_array().ok_or_else(|| "Discord response is not an array".to_string())?;
+    let body: Value = resp
+        .json()
+        .map_err(|e| format!("Failed to parse Discord response: {e}"))?;
+    let arr = body
+        .as_array()
+        .ok_or_else(|| "Discord response is not an array".to_string())?;
     let mut out = Vec::new();
     for item in arr {
         let id = item
@@ -4320,7 +4571,9 @@ fn collect_session_overview(base_dir: &Path) -> SessionSummary {
                     agent: agent.clone(),
                     session_files: session_info.files,
                     archive_files: archive_info.files,
-                    total_bytes: session_info.total_bytes.saturating_add(archive_info.total_bytes),
+                    total_bytes: session_info
+                        .total_bytes
+                        .saturating_add(archive_info.total_bytes),
                 });
             }
 
@@ -4374,10 +4627,7 @@ fn collect_file_inventory_with_limit(path: &Path) -> InventorySummary {
             }
         }
     }
-    InventorySummary {
-        files,
-        total_bytes,
-    }
+    InventorySummary { files, total_bytes }
 }
 
 fn list_session_files_detailed(base_dir: &Path) -> Result<Vec<SessionFile>, String> {
@@ -4449,7 +4699,10 @@ fn collect_session_files_in_scope(
     Ok(())
 }
 
-fn clear_agent_and_global_sessions(agents_root: &Path, agent_id: Option<&str>) -> Result<usize, String> {
+fn clear_agent_and_global_sessions(
+    agents_root: &Path,
+    agent_id: Option<&str>,
+) -> Result<usize, String> {
     if !agents_root.exists() {
         return Ok(0);
     }
@@ -4461,11 +4714,7 @@ fn clear_agent_and_global_sessions(agents_root: &Path, agent_id: Option<&str>) -
         None => {
             for entry in fs::read_dir(agents_root).map_err(|e| e.to_string())? {
                 let entry = entry.map_err(|e| e.to_string())?;
-                if entry
-                    .file_type()
-                    .map_err(|e| e.to_string())?
-                    .is_dir()
-                {
+                if entry.file_type().map_err(|e| e.to_string())?.is_dir() {
                     targets.push(entry.path());
                 }
             }
@@ -4492,9 +4741,7 @@ fn clear_directory_contents(target: &Path) -> Result<usize, String> {
     for entry in entries {
         let entry = entry.map_err(|e| e.to_string())?;
         let path = entry.path();
-        let metadata = entry
-            .metadata()
-            .map_err(|e| e.to_string())?;
+        let metadata = entry.metadata().map_err(|e| e.to_string())?;
         if metadata.is_dir() {
             total = total.saturating_add(clear_directory_contents(&path)?);
             fs::remove_dir_all(&path).map_err(|e| e.to_string())?;
@@ -4518,8 +4765,6 @@ fn global_profile_base_dir() -> std::path::PathBuf {
     let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
     home.join(".openclaw")
 }
-
-
 
 fn profile_to_model_value(profile: &ModelProfile) -> String {
     let provider = profile.provider.trim();
@@ -4671,7 +4916,9 @@ fn run_provider_probe(
     if snippet.is_empty() {
         Err(format!("Provider rejected credentials (HTTP {status})"))
     } else {
-        Err(format!("Provider rejected credentials (HTTP {status}): {snippet}"))
+        Err(format!(
+            "Provider rejected credentials (HTTP {status}): {snippet}"
+        ))
     }
 }
 
@@ -4764,7 +5011,9 @@ pub(crate) fn collect_provider_api_keys_for_internal() -> HashMap<String, String
     collect_provider_api_keys_from_paths(&paths)
 }
 
-pub(crate) fn collect_provider_api_keys_from_paths(paths: &crate::models::OpenClawPaths) -> HashMap<String, String> {
+pub(crate) fn collect_provider_api_keys_from_paths(
+    paths: &crate::models::OpenClawPaths,
+) -> HashMap<String, String> {
     let profiles = load_model_profiles(&paths);
     let global_base = global_profile_base_dir();
     let mut out = HashMap::<String, String>::new();
@@ -4855,7 +5104,11 @@ fn fill_profile_auth_from_existing_or_provider_donor(
 ) {
     if !profile.id.trim().is_empty() {
         if let Some(existing) = profiles.iter().find(|candidate| candidate.id == profile.id) {
-            if profile.api_key.as_ref().map_or(true, |key| key.trim().is_empty()) {
+            if profile
+                .api_key
+                .as_ref()
+                .map_or(true, |key| key.trim().is_empty())
+            {
                 profile.api_key = existing.api_key.clone();
             }
             if profile.auth_ref.trim().is_empty() {
@@ -4870,7 +5123,11 @@ fn fill_profile_auth_from_existing_or_provider_donor(
         return;
     }
 
-    if profile.api_key.as_ref().map_or(true, |key| key.trim().is_empty()) {
+    if profile
+        .api_key
+        .as_ref()
+        .map_or(true, |key| key.trim().is_empty())
+    {
         if let Some(donor) = profiles.iter().find(|candidate| {
             candidate.provider.eq_ignore_ascii_case(provider)
                 && candidate
@@ -4907,7 +5164,10 @@ fn upsert_profile_in_storage(
     profile
 }
 
-fn save_model_profiles(paths: &crate::models::OpenClawPaths, profiles: &[ModelProfile]) -> Result<(), String> {
+fn save_model_profiles(
+    paths: &crate::models::OpenClawPaths,
+    profiles: &[ModelProfile],
+) -> Result<(), String> {
     let path = model_profiles_path(paths);
     #[derive(serde::Serialize)]
     struct Storage<'a> {
@@ -4952,10 +5212,7 @@ fn sync_profile_auth_to_main_agent_with_source(
     if provider.is_empty() {
         return Ok(());
     }
-    let auth_ref = profile
-        .auth_ref
-        .trim()
-        .to_string();
+    let auth_ref = profile.auth_ref.trim().to_string();
     let auth_ref = if auth_ref.is_empty() {
         format!("{provider}:default")
     } else {
@@ -5057,7 +5314,10 @@ fn maybe_sync_main_auth_for_model_value_with_source(
 
 fn collect_main_auth_model_candidates(cfg: &Value) -> Vec<String> {
     let mut models = Vec::new();
-    if let Some(model) = cfg.pointer("/agents/defaults/model").and_then(read_model_value) {
+    if let Some(model) = cfg
+        .pointer("/agents/defaults/model")
+        .and_then(read_model_value)
+    {
         models.push(model);
     }
     if let Some(agents) = cfg.pointer("/agents/list").and_then(Value::as_array) {
@@ -5305,11 +5565,13 @@ fn parse_model_catalog_from_cli_output(raw: &str) -> Option<Vec<ModelCatalogProv
                     })
                     .map(str::to_string)
             });
-        let entry = providers.entry(provider.clone()).or_insert(ModelCatalogProvider {
-            provider: provider.clone(),
-            base_url,
-            models: Vec::new(),
-        });
+        let entry = providers
+            .entry(provider.clone())
+            .or_insert(ModelCatalogProvider {
+                provider: provider.clone(),
+                base_url,
+                models: Vec::new(),
+            });
         if !entry.models.iter().any(|existing| existing.id == id) {
             entry.models.push(ModelCatalogModel {
                 id: id.clone(),
@@ -5343,7 +5605,10 @@ fn extract_model_catalog_from_cli(
     Some(out)
 }
 
-fn cache_model_catalog(paths: &crate::models::OpenClawPaths, providers: Vec<ModelCatalogProvider>) -> Option<()> {
+fn cache_model_catalog(
+    paths: &crate::models::OpenClawPaths,
+    providers: Vec<ModelCatalogProvider>,
+) -> Option<()> {
     let cache_path = model_catalog_cache_path(paths);
     let now = unix_timestamp_secs();
     let cache = ModelCatalogProviderCache {
@@ -5398,7 +5663,10 @@ mod model_catalog_cache_tests {
             error: None,
         };
         let selected = select_catalog_from_cache(Some(&cached), "1.2.3");
-        assert!(selected.is_none(), "version mismatch must force CLI refresh");
+        assert!(
+            selected.is_none(),
+            "version mismatch must force CLI refresh"
+        );
     }
 }
 
@@ -5447,12 +5715,8 @@ mod rescue_bot_tests {
 
     #[test]
     fn test_build_rescue_bot_command_plan_for_activate() {
-        let commands = build_rescue_bot_command_plan(
-            RescueBotAction::Activate,
-            "rescue",
-            19789,
-            true,
-        );
+        let commands =
+            build_rescue_bot_command_plan(RescueBotAction::Activate, "rescue", 19789, true);
         let expected = vec![
             vec!["--profile", "rescue", "setup"],
             vec![
@@ -5483,12 +5747,8 @@ mod rescue_bot_tests {
 
     #[test]
     fn test_build_rescue_bot_command_plan_for_activate_without_reconfigure() {
-        let commands = build_rescue_bot_command_plan(
-            RescueBotAction::Activate,
-            "rescue",
-            19789,
-            false,
-        );
+        let commands =
+            build_rescue_bot_command_plan(RescueBotAction::Activate, "rescue", 19789, false);
         let expected = vec![
             vec!["--profile", "rescue", "gateway", "install"],
             vec!["--profile", "rescue", "gateway", "restart"],
@@ -5509,17 +5769,12 @@ mod rescue_bot_tests {
 
     #[test]
     fn test_build_rescue_bot_command_plan_for_unset() {
-        let commands = build_rescue_bot_command_plan(RescueBotAction::Unset, "rescue", 19789, false);
+        let commands =
+            build_rescue_bot_command_plan(RescueBotAction::Unset, "rescue", 19789, false);
         let expected = vec![
             vec!["--profile", "rescue", "gateway", "stop"],
             vec!["--profile", "rescue", "gateway", "uninstall"],
-            vec![
-                "--profile",
-                "rescue",
-                "config",
-                "unset",
-                "gateway.port",
-            ],
+            vec!["--profile", "rescue", "config", "unset", "gateway.port"],
         ]
         .into_iter()
         .map(|items| items.into_iter().map(String::from).collect::<Vec<_>>())
@@ -5529,9 +5784,18 @@ mod rescue_bot_tests {
 
     #[test]
     fn test_parse_rescue_bot_action_unset_aliases() {
-        assert_eq!(RescueBotAction::parse("unset").unwrap(), RescueBotAction::Unset);
-        assert_eq!(RescueBotAction::parse("remove").unwrap(), RescueBotAction::Unset);
-        assert_eq!(RescueBotAction::parse("delete").unwrap(), RescueBotAction::Unset);
+        assert_eq!(
+            RescueBotAction::parse("unset").unwrap(),
+            RescueBotAction::Unset
+        );
+        assert_eq!(
+            RescueBotAction::parse("remove").unwrap(),
+            RescueBotAction::Unset
+        );
+        assert_eq!(
+            RescueBotAction::parse("delete").unwrap(),
+            RescueBotAction::Unset
+        );
     }
 
     #[test]
@@ -5757,7 +6021,13 @@ mod model_profile_upsert_tests {
     use super::*;
     use std::path::PathBuf;
 
-    fn mk_profile(id: &str, provider: &str, model: &str, auth_ref: &str, api_key: Option<&str>) -> ModelProfile {
+    fn mk_profile(
+        id: &str,
+        provider: &str,
+        model: &str,
+        auth_ref: &str,
+        api_key: Option<&str>,
+    ) -> ModelProfile {
         ModelProfile {
             id: id.to_string(),
             name: format!("{provider}/{model}"),
@@ -5821,7 +6091,8 @@ mod model_profile_upsert_tests {
 
     #[test]
     fn sync_auth_can_copy_key_from_auth_ref_source_store() {
-        let tmp_root = std::env::temp_dir().join(format!("clawpal-auth-sync-{}", uuid::Uuid::new_v4()));
+        let tmp_root =
+            std::env::temp_dir().join(format!("clawpal-auth-sync-{}", uuid::Uuid::new_v4()));
         let source_base = tmp_root.join("source-openclaw");
         let target_base = tmp_root.join("target-openclaw");
         let clawpal_dir = tmp_root.join("clawpal");
@@ -5974,7 +6245,10 @@ fn enrich_channel_display_names(
         if entries.is_empty() {
             continue;
         }
-        let ids: Vec<String> = entries.iter().map(|(_, identifier, _)| identifier.clone()).collect();
+        let ids: Vec<String> = entries
+            .iter()
+            .map(|(_, identifier, _)| identifier.clone())
+            .collect();
         let kind = &entries[0].2;
         let mut args = vec![
             "channels".to_string(),
@@ -6008,14 +6282,24 @@ fn enrich_channel_display_names(
         let parsed: Vec<Value> = serde_json::from_str(json_str).unwrap_or_default();
         let mut name_map = HashMap::new();
         for item in parsed {
-            let input = item.get("input").and_then(Value::as_str).unwrap_or_default().to_string();
-            let resolved = item.get("resolved").and_then(Value::as_bool).unwrap_or(false);
+            let input = item
+                .get("input")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            let resolved = item
+                .get("resolved")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
             let name = item
                 .get("name")
                 .and_then(Value::as_str)
                 .map(|value| value.trim().to_string())
                 .filter(|value| !value.is_empty());
-            let note = item.get("note").and_then(Value::as_str).map(|value| value.to_string());
+            let note = item
+                .get("note")
+                .and_then(Value::as_str)
+                .map(|value| value.to_string());
             if !input.is_empty() {
                 name_map.insert(input, (resolved, name, note));
             }
@@ -6061,10 +6345,16 @@ fn save_json_cache(cache_file: &Path, nodes: &[ChannelNode]) -> Result<(), Strin
             name_status: node.name_status.clone(),
         })
         .collect();
-    write_text(cache_file, &serde_json::to_string_pretty(&payload).map_err(|e| e.to_string())?)
+    write_text(
+        cache_file,
+        &serde_json::to_string_pretty(&payload).map_err(|e| e.to_string())?,
+    )
 }
 
-fn resolve_channel_node_identity(cfg: &Value, node: &ChannelNode) -> Option<(String, String, String)> {
+fn resolve_channel_node_identity(
+    cfg: &Value,
+    node: &ChannelNode,
+) -> Option<(String, String, String)> {
     let parts: Vec<&str> = node.path.split('.').collect();
     if parts.len() < 2 || parts[0] != "channels" {
         return None;
@@ -6075,7 +6365,12 @@ fn resolve_channel_node_identity(cfg: &Value, node: &ChannelNode) -> Option<(Str
     let kind = if node.channel_type.as_deref() == Some("dm") || node.path.ends_with(".dm") {
         "user".to_string()
     } else if config_node
-        .and_then(|value| value.get("users").or(value.get("members")).or_else(|| value.get("peerIds")))
+        .and_then(|value| {
+            value
+                .get("users")
+                .or(value.get("members"))
+                .or_else(|| value.get("peerIds"))
+        })
         .is_some()
     {
         "user".to_string()
@@ -6138,7 +6433,8 @@ fn is_channel_like_node(prefix: &str, obj: &serde_json::Map<String, Value>) -> b
     {
         return true;
     }
-    if prefix.contains(".accounts.") || prefix.contains(".guilds.") || prefix.contains(".channels.") {
+    if prefix.contains(".accounts.") || prefix.contains(".guilds.") || prefix.contains(".channels.")
+    {
         return true;
     }
     if prefix.ends_with(".dm") || prefix.ends_with(".default") {
@@ -6223,7 +6519,11 @@ fn collect_channel_allowlist(obj: &serde_json::Map<String, Value>) -> Vec<String
 
 fn collect_agent_ids(cfg: &Value) -> Vec<String> {
     let mut ids = Vec::new();
-    if let Some(agents) = cfg.get("agents").and_then(|v| v.get("list")).and_then(Value::as_array) {
+    if let Some(agents) = cfg
+        .get("agents")
+        .and_then(|v| v.get("list"))
+        .and_then(Value::as_array)
+    {
         for agent in agents {
             if let Some(id) = agent.get("id").and_then(Value::as_str) {
                 ids.push(id.to_string());
@@ -6251,7 +6551,11 @@ fn collect_model_bindings(cfg: &Value, profiles: &[ModelProfile]) -> Vec<ModelBi
         path: Some("agents.defaults.model".into()),
     });
 
-    if let Some(agents) = cfg.get("agents").and_then(|v| v.get("list")).and_then(Value::as_array) {
+    if let Some(agents) = cfg
+        .get("agents")
+        .and_then(|v| v.get("list"))
+        .and_then(Value::as_array)
+    {
         for agent in agents {
             let id = agent.get("id").and_then(Value::as_str).unwrap_or("agent");
             let model = agent.get("model").and_then(read_model_value);
@@ -6265,7 +6569,12 @@ fn collect_model_bindings(cfg: &Value, profiles: &[ModelProfile]) -> Vec<ModelBi
         }
     }
 
-    fn walk_channel_binding(prefix: &str, node: &Value, out: &mut Vec<ModelBinding>, profiles: &[ModelProfile]) {
+    fn walk_channel_binding(
+        prefix: &str,
+        node: &Value,
+        out: &mut Vec<ModelBinding>,
+        profiles: &[ModelProfile],
+    ) {
         if let Some(obj) = node.as_object() {
             if let Some(model) = obj.get("model").and_then(read_model_value) {
                 out.push(ModelBinding {
@@ -6344,7 +6653,9 @@ pub fn read_raw_config() -> Result<String, String> {
 fn resolve_full_api_key(profile_id: String) -> Result<String, String> {
     let paths = resolve_paths();
     let profiles = load_model_profiles(&paths);
-    let profile = profiles.iter().find(|p| p.id == profile_id)
+    let profile = profiles
+        .iter()
+        .find(|p| p.id == profile_id)
         .ok_or_else(|| "Profile not found".to_string())?;
     let key = resolve_profile_api_key(profile, &global_profile_base_dir());
     if key.is_empty() {
@@ -6363,27 +6674,43 @@ pub fn open_url(url: String) -> Result<(), String> {
     if !trimmed.starts_with("http://") && !trimmed.starts_with("https://") {
         // For local paths, ensure they don't execute apps
         let path = std::path::Path::new(trimmed);
-        if path.extension().map_or(false, |ext| ext == "app" || ext == "exe") {
+        if path
+            .extension()
+            .map_or(false, |ext| ext == "app" || ext == "exe")
+        {
             return Err("Cannot open application files".into());
         }
     }
     #[cfg(target_os = "macos")]
     {
-        Command::new("open").arg(&url).spawn().map_err(|e| e.to_string())?;
+        Command::new("open")
+            .arg(&url)
+            .spawn()
+            .map_err(|e| e.to_string())?;
     }
     #[cfg(target_os = "linux")]
     {
-        Command::new("xdg-open").arg(&url).spawn().map_err(|e| e.to_string())?;
+        Command::new("xdg-open")
+            .arg(&url)
+            .spawn()
+            .map_err(|e| e.to_string())?;
     }
     #[cfg(target_os = "windows")]
     {
-        Command::new("cmd").args(["/c", "start", &url]).spawn().map_err(|e| e.to_string())?;
+        Command::new("cmd")
+            .args(["/c", "start", &url])
+            .spawn()
+            .map_err(|e| e.to_string())?;
     }
     Ok(())
 }
 
 #[tauri::command]
-pub async fn chat_via_openclaw(agent_id: String, message: String, session_id: Option<String>) -> Result<Value, String> {
+pub async fn chat_via_openclaw(
+    agent_id: String,
+    message: String,
+    session_id: Option<String>,
+) -> Result<Value, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let paths = resolve_paths();
         if let Err(err) = sync_main_auth_for_active_config(&paths) {
@@ -6408,8 +6735,7 @@ pub async fn chat_via_openclaw(agent_id: String, message: String, session_id: Op
         let output = run_openclaw_raw(&arg_refs)?;
         let json_str = extract_json_from_output(&output.stdout)
             .ok_or_else(|| format!("No JSON in openclaw output: {}", output.stdout))?;
-        serde_json::from_str(json_str)
-            .map_err(|e| format!("Parse openclaw response failed: {}", e))
+        serde_json::from_str(json_str).map_err(|e| format!("Parse openclaw response failed: {}", e))
     })
     .await
     .map_err(|e| format!("Task join failed: {}", e))?
@@ -6442,8 +6768,7 @@ pub async fn remote_chat_via_openclaw(
     }
     let json_str = extract_json_from_output(&result.stdout)
         .ok_or_else(|| format!("No JSON in remote openclaw output: {}", result.stdout))?;
-    serde_json::from_str(json_str)
-        .map_err(|e| format!("Failed to parse remote chat response: {e}"))
+    serde_json::from_str(json_str).map_err(|e| format!("Failed to parse remote chat response: {e}"))
 }
 
 // ---- Backup / Restore ----
@@ -6481,7 +6806,10 @@ pub fn backup_before_upgrade() -> Result<BackupInfo, String> {
     }
 
     // Copy directories, excluding sessions and archive
-    let skip_dirs: HashSet<&str> = ["sessions", "archive", ".clawpal"].iter().copied().collect();
+    let skip_dirs: HashSet<&str> = ["sessions", "archive", ".clawpal"]
+        .iter()
+        .copied()
+        .collect();
     copy_dir_recursive(&paths.base_dir, &backup_dir, &skip_dirs, &mut total_bytes)?;
 
     Ok(BackupInfo {
@@ -6492,8 +6820,14 @@ pub fn backup_before_upgrade() -> Result<BackupInfo, String> {
     })
 }
 
-fn copy_dir_recursive(src: &Path, dst: &Path, skip_dirs: &HashSet<&str>, total: &mut u64) -> Result<(), String> {
-    let entries = fs::read_dir(src).map_err(|e| format!("Failed to read dir {}: {e}", src.display()))?;
+fn copy_dir_recursive(
+    src: &Path,
+    dst: &Path,
+    skip_dirs: &HashSet<&str>,
+    total: &mut u64,
+) -> Result<(), String> {
+    let entries =
+        fs::read_dir(src).map_err(|e| format!("Failed to read dir {}: {e}", src.display()))?;
     for entry in entries {
         let entry = entry.map_err(|e| e.to_string())?;
         let name = entry.file_name();
@@ -6511,10 +6845,12 @@ fn copy_dir_recursive(src: &Path, dst: &Path, skip_dirs: &HashSet<&str>, total: 
             if skip_dirs.contains(name_str.as_ref()) {
                 continue;
             }
-            fs::create_dir_all(&dest).map_err(|e| format!("Failed to create dir {}: {e}", dest.display()))?;
+            fs::create_dir_all(&dest)
+                .map_err(|e| format!("Failed to create dir {}: {e}", dest.display()))?;
             copy_dir_recursive(&entry.path(), &dest, skip_dirs, total)?;
         } else if file_type.is_file() {
-            fs::copy(entry.path(), &dest).map_err(|e| format!("Failed to copy {}: {e}", name_str))?;
+            fs::copy(entry.path(), &dest)
+                .map_err(|e| format!("Failed to copy {}: {e}", name_str))?;
             *total += fs::metadata(&dest).map(|m| m.len()).unwrap_or(0);
         }
     }
@@ -6586,7 +6922,10 @@ pub fn restore_from_backup(backup_name: String) -> Result<String, String> {
     }
 
     // Restore other directories (agents except sessions/archive, memory, etc.)
-    let skip_dirs: HashSet<&str> = ["sessions", "archive", ".clawpal"].iter().copied().collect();
+    let skip_dirs: HashSet<&str> = ["sessions", "archive", ".clawpal"]
+        .iter()
+        .copied()
+        .collect();
     restore_dir_recursive(&backup_dir, &paths.base_dir, &skip_dirs)?;
 
     Ok(format!("Restored from backup '{}'", backup_name))
@@ -6613,7 +6952,8 @@ fn restore_dir_recursive(src: &Path, dst: &Path, skip_dirs: &HashSet<&str>) -> R
             fs::create_dir_all(&dest).map_err(|e| e.to_string())?;
             restore_dir_recursive(&entry.path(), &dest, skip_dirs)?;
         } else if file_type.is_file() {
-            fs::copy(entry.path(), &dest).map_err(|e| format!("Failed to restore {}: {e}", name_str))?;
+            fs::copy(entry.path(), &dest)
+                .map_err(|e| format!("Failed to restore {}: {e}", name_str))?;
         }
     }
     Ok(())
@@ -6659,10 +6999,17 @@ pub async fn remote_backup_before_upgrade(
 
     let result = pool.exec_login(&host_id, &cmd).await?;
     if result.exit_code != 0 {
-        return Err(format!("Remote backup failed (exit {}): {}", result.exit_code, result.stderr));
+        return Err(format!(
+            "Remote backup failed (exit {}): {}",
+            result.exit_code, result.stderr
+        ));
     }
 
-    let size_bytes: u64 = result.stdout.trim().lines().last()
+    let size_bytes: u64 = result
+        .stdout
+        .trim()
+        .lines()
+        .last()
         .and_then(|l| l.trim().parse().ok())
         .unwrap_or(0);
 
@@ -6680,17 +7027,25 @@ pub async fn remote_list_backups(
     host_id: String,
 ) -> Result<Vec<BackupInfo>, String> {
     // Migrate remote data from legacy path ~/.openclaw/.clawpal → ~/.clawpal
-    let _ = pool.exec_login(&host_id, concat!(
-        "if [ -d \"$HOME/.openclaw/.clawpal\" ]; then ",
-            "mkdir -p \"$HOME/.clawpal\"; ",
-            "cp -a \"$HOME/.openclaw/.clawpal/.\" \"$HOME/.clawpal/\" 2>/dev/null; ",
-            "rm -rf \"$HOME/.openclaw/.clawpal\"; ",
-        "fi"
-    )).await;
+    let _ = pool
+        .exec_login(
+            &host_id,
+            concat!(
+                "if [ -d \"$HOME/.openclaw/.clawpal\" ]; then ",
+                "mkdir -p \"$HOME/.clawpal\"; ",
+                "cp -a \"$HOME/.openclaw/.clawpal/.\" \"$HOME/.clawpal/\" 2>/dev/null; ",
+                "rm -rf \"$HOME/.openclaw/.clawpal\"; ",
+                "fi"
+            ),
+        )
+        .await;
 
     // List backup directory names
     let list_result = pool
-        .exec_login(&host_id, "ls -1d \"$HOME/.clawpal/backups\"/*/  2>/dev/null || true")
+        .exec_login(
+            &host_id,
+            "ls -1d \"$HOME/.clawpal/backups\"/*/  2>/dev/null || true",
+        )
         .await?;
 
     let dirs: Vec<String> = list_result
@@ -6809,6 +7164,12 @@ fn resolve_model_provider_base_url(cfg: &Value, provider: &str) -> Option<String
         })
 }
 
+#[tauri::command]
+pub fn list_registered_instances() -> Result<Vec<clawpal_core::instance::Instance>, String> {
+    let registry = clawpal_core::instance::InstanceRegistry::load().map_err(|e| e.to_string())?;
+    Ok(registry.list())
+}
+
 // ---------------------------------------------------------------------------
 // Task 3: Remote instance config CRUD
 // ---------------------------------------------------------------------------
@@ -6846,7 +7207,12 @@ fn push_ssh_config_hosts(
     identity_file: &Option<String>,
 ) {
     for alias in aliases {
-        if alias.is_empty() || alias == "*" || alias.starts_with('!') || alias.contains('*') || alias.contains('?') {
+        if alias.is_empty()
+            || alias == "*"
+            || alias.starts_with('!')
+            || alias.contains('*')
+            || alias.contains('?')
+        {
             continue;
         }
         out.push(SshConfigHostSuggestion {
@@ -7038,14 +7404,7 @@ fn parse_ssh_config_hosts(data: &str) -> Vec<SshConfigHostSuggestion> {
 
         if key == "host" {
             if !aliases.is_empty() {
-                push_ssh_config_hosts(
-                    &mut out,
-                    &aliases,
-                    &host_name,
-                    &user,
-                    &port,
-                    &identity_file,
-                );
+                push_ssh_config_hosts(&mut out, &aliases, &host_name, &user, &port, &identity_file);
             }
             aliases = split_host_aliases(&value)
                 .into_iter()
@@ -7088,14 +7447,7 @@ fn parse_ssh_config_hosts(data: &str) -> Vec<SshConfigHostSuggestion> {
     }
 
     if !aliases.is_empty() {
-        push_ssh_config_hosts(
-            &mut out,
-            &aliases,
-            &host_name,
-            &user,
-            &port,
-            &identity_file,
-        );
+        push_ssh_config_hosts(&mut out, &aliases, &host_name, &user, &port, &identity_file);
     }
 
     let mut dedup = std::collections::BTreeMap::new();
@@ -7110,7 +7462,8 @@ fn read_hosts_from_disk() -> Result<Vec<SshHostConfig>, String> {
     if !path.exists() {
         return Ok(Vec::new());
     }
-    let data = fs::read_to_string(&path).map_err(|e| format!("Failed to read remote-instances.json: {e}"))?;
+    let data = fs::read_to_string(&path)
+        .map_err(|e| format!("Failed to read remote-instances.json: {e}"))?;
     serde_json::from_str(&data).map_err(|e| format!("Failed to parse remote-instances.json: {e}"))
 }
 
@@ -7119,7 +7472,8 @@ fn write_hosts_to_disk(hosts: &[SshHostConfig]) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("Failed to create dir: {e}"))?;
     }
-    let json = serde_json::to_string_pretty(hosts).map_err(|e| format!("Failed to serialize hosts: {e}"))?;
+    let json = serde_json::to_string_pretty(hosts)
+        .map_err(|e| format!("Failed to serialize hosts: {e}"))?;
     fs::write(&path, &json).map_err(|e| format!("Failed to write remote-instances.json: {e}"))?;
     #[cfg(unix)]
     {
@@ -7142,8 +7496,8 @@ pub fn list_ssh_config_hosts() -> Result<Vec<SshConfigHostSuggestion>, String> {
     if !path.exists() {
         return Ok(Vec::new());
     }
-    let data = fs::read_to_string(&path)
-        .map_err(|e| format!("Failed to read {}: {e}", path.display()))?;
+    let data =
+        fs::read_to_string(&path).map_err(|e| format!("Failed to read {}: {e}", path.display()))?;
     Ok(parse_ssh_config_hosts(&data))
 }
 
@@ -7174,13 +7528,18 @@ pub fn delete_ssh_host(host_id: String) -> Result<bool, String> {
 // ---------------------------------------------------------------------------
 
 #[tauri::command]
-pub async fn ssh_connect(pool: State<'_, SshConnectionPool>, host_id: String) -> Result<bool, String> {
+pub async fn ssh_connect(
+    pool: State<'_, SshConnectionPool>,
+    host_id: String,
+) -> Result<bool, String> {
     // If already connected and handle is alive, reuse
     if pool.is_connected(&host_id).await {
         return Ok(true);
     }
     let hosts = read_hosts_from_disk()?;
-    let host = hosts.into_iter().find(|h| h.id == host_id)
+    let host = hosts
+        .into_iter()
+        .find(|h| h.id == host_id)
         .ok_or_else(|| format!("No SSH host config with id: {host_id}"))?;
     pool.connect(&host).await?;
     Ok(true)
@@ -7206,13 +7565,19 @@ pub async fn ssh_connect_with_passphrase(
 }
 
 #[tauri::command]
-pub async fn ssh_disconnect(pool: State<'_, SshConnectionPool>, host_id: String) -> Result<bool, String> {
+pub async fn ssh_disconnect(
+    pool: State<'_, SshConnectionPool>,
+    host_id: String,
+) -> Result<bool, String> {
     pool.disconnect(&host_id).await?;
     Ok(true)
 }
 
 #[tauri::command]
-pub async fn ssh_status(pool: State<'_, SshConnectionPool>, host_id: String) -> Result<String, String> {
+pub async fn ssh_status(
+    pool: State<'_, SshConnectionPool>,
+    host_id: String,
+) -> Result<String, String> {
     if pool.is_connected(&host_id).await {
         Ok("connected".to_string())
     } else {
@@ -7225,28 +7590,49 @@ pub async fn ssh_status(pool: State<'_, SshConnectionPool>, host_id: String) -> 
 // ---------------------------------------------------------------------------
 
 #[tauri::command]
-pub async fn ssh_exec(pool: State<'_, SshConnectionPool>, host_id: String, command: String) -> Result<SshExecResult, String> {
+pub async fn ssh_exec(
+    pool: State<'_, SshConnectionPool>,
+    host_id: String,
+    command: String,
+) -> Result<SshExecResult, String> {
     pool.exec(&host_id, &command).await
 }
 
 #[tauri::command]
-pub async fn sftp_read_file(pool: State<'_, SshConnectionPool>, host_id: String, path: String) -> Result<String, String> {
+pub async fn sftp_read_file(
+    pool: State<'_, SshConnectionPool>,
+    host_id: String,
+    path: String,
+) -> Result<String, String> {
     pool.sftp_read(&host_id, &path).await
 }
 
 #[tauri::command]
-pub async fn sftp_write_file(pool: State<'_, SshConnectionPool>, host_id: String, path: String, content: String) -> Result<bool, String> {
+pub async fn sftp_write_file(
+    pool: State<'_, SshConnectionPool>,
+    host_id: String,
+    path: String,
+    content: String,
+) -> Result<bool, String> {
     pool.sftp_write(&host_id, &path, &content).await?;
     Ok(true)
 }
 
 #[tauri::command]
-pub async fn sftp_list_dir(pool: State<'_, SshConnectionPool>, host_id: String, path: String) -> Result<Vec<SftpEntry>, String> {
+pub async fn sftp_list_dir(
+    pool: State<'_, SshConnectionPool>,
+    host_id: String,
+    path: String,
+) -> Result<Vec<SftpEntry>, String> {
     pool.sftp_list(&host_id, &path).await
 }
 
 #[tauri::command]
-pub async fn sftp_remove_file(pool: State<'_, SshConnectionPool>, host_id: String, path: String) -> Result<bool, String> {
+pub async fn sftp_remove_file(
+    pool: State<'_, SshConnectionPool>,
+    host_id: String,
+    path: String,
+) -> Result<bool, String> {
     pool.sftp_remove(&host_id, &path).await?;
     Ok(true)
 }
@@ -7256,17 +7642,27 @@ pub async fn sftp_remove_file(pool: State<'_, SshConnectionPool>, host_id: Strin
 // ---------------------------------------------------------------------------
 
 #[tauri::command]
-pub async fn remote_read_raw_config(pool: State<'_, SshConnectionPool>, host_id: String) -> Result<String, String> {
+pub async fn remote_read_raw_config(
+    pool: State<'_, SshConnectionPool>,
+    host_id: String,
+) -> Result<String, String> {
     // openclaw config get requires a path — there's no way to dump the full config via CLI.
     // Use sftp_read directly since this function's purpose is returning the entire raw config.
     pool.sftp_read(&host_id, "~/.openclaw/openclaw.json").await
 }
 
 #[tauri::command]
-pub async fn remote_get_system_status(pool: State<'_, SshConnectionPool>, host_id: String) -> Result<StatusLight, String> {
+pub async fn remote_get_system_status(
+    pool: State<'_, SshConnectionPool>,
+    host_id: String,
+) -> Result<StatusLight, String> {
     // Tier 1: fast, essential — health check + agents config (2 SSH calls in parallel)
     let (config_res, pgrep_res) = tokio::join!(
-        crate::cli_runner::run_openclaw_remote(&pool, &host_id, &["config", "get", "agents", "--json"]),
+        crate::cli_runner::run_openclaw_remote(
+            &pool,
+            &host_id,
+            &["config", "get", "agents", "--json"]
+        ),
         pool.exec(&host_id, "pgrep -f '[o]penclaw-gateway' >/dev/null 2>&1"),
     );
 
@@ -7275,17 +7671,28 @@ pub async fn remote_get_system_status(pool: State<'_, SshConnectionPool>, host_i
     let (active_agents, global_default_model, fallback_models) = match config_res {
         Ok(ref output) if output.exit_code == 0 => {
             let cfg: Value = crate::cli_runner::parse_json_output(output).unwrap_or(Value::Null);
-            let explicit = cfg.pointer("/list")
+            let explicit = cfg
+                .pointer("/list")
                 .and_then(Value::as_array)
                 .map(|a| a.len() as u32)
                 .unwrap_or(0);
             let agents = if explicit == 0 { 1 } else { explicit };
-            let model = cfg.pointer("/defaults/model")
+            let model = cfg
+                .pointer("/defaults/model")
                 .and_then(|v| read_model_value(v))
-                .or_else(|| cfg.pointer("/default/model").and_then(|v| read_model_value(v)));
-            let fallbacks = cfg.pointer("/defaults/model/fallbacks")
+                .or_else(|| {
+                    cfg.pointer("/default/model")
+                        .and_then(|v| read_model_value(v))
+                });
+            let fallbacks = cfg
+                .pointer("/defaults/model/fallbacks")
                 .and_then(Value::as_array)
-                .map(|arr| arr.iter().filter_map(Value::as_str).map(String::from).collect())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(Value::as_str)
+                        .map(String::from)
+                        .collect()
+                })
                 .unwrap_or_default();
             (agents, model, fallbacks)
         }
@@ -7312,7 +7719,10 @@ pub async fn remote_get_system_status(pool: State<'_, SshConnectionPool>, host_i
 /// Tier 2: slow, optional — openclaw version + duplicate detection (2 SSH calls in parallel).
 /// Called once on mount and on-demand (e.g., after upgrade), not in poll loop.
 #[tauri::command]
-pub async fn remote_get_status_extra(pool: State<'_, SshConnectionPool>, host_id: String) -> Result<StatusExtra, String> {
+pub async fn remote_get_status_extra(
+    pool: State<'_, SshConnectionPool>,
+    host_id: String,
+) -> Result<StatusExtra, String> {
     let detect_duplicates_script = concat!(
         "seen=''; for p in $(which -a openclaw 2>/dev/null) ",
         "\"$HOME/.npm-global/bin/openclaw\" \"/usr/local/bin/openclaw\" \"/opt/homebrew/bin/openclaw\"; do ",
@@ -7334,18 +7744,28 @@ pub async fn remote_get_status_extra(pool: State<'_, SshConnectionPool>, host_id
         Ok(r) if r.exit_code == 0 => Some(r.stdout.trim().to_string()),
         Ok(r) => {
             let trimmed = r.stdout.trim().to_string();
-            if trimmed.is_empty() { None } else { Some(trimmed) }
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed)
+            }
         }
         Err(_) => None,
     };
 
     let duplicate_installs = match dup_res {
         Ok(r) => {
-            let entries: Vec<String> = r.stdout.lines()
+            let entries: Vec<String> = r
+                .stdout
+                .lines()
                 .map(|l| l.trim().to_string())
                 .filter(|l| !l.is_empty())
                 .collect();
-            if entries.len() > 1 { entries } else { Vec::new() }
+            if entries.len() > 1 {
+                entries
+            } else {
+                Vec::new()
+            }
         }
         Err(_) => Vec::new(),
     };
@@ -7369,7 +7789,12 @@ pub async fn remote_check_openclaw_update(
     };
 
     // Try `openclaw update status --json` first (may not exist on older versions)
-    let update_result = pool.exec_login(&host_id, "openclaw update status --json --no-color 2>/dev/null").await;
+    let update_result = pool
+        .exec_login(
+            &host_id,
+            "openclaw update status --json --no-color 2>/dev/null",
+        )
+        .await;
     if let Ok(r) = update_result {
         if r.exit_code == 0 && !r.stdout.trim().is_empty() {
             if let Some((latest, _channel, _details, upgrade)) =
@@ -7386,9 +7811,9 @@ pub async fn remote_check_openclaw_update(
 
     // Fallback: query npm registry directly from Tauri (no remote CLI dependency)
     // Must use spawn_blocking because reqwest::blocking panics in async context
-    let latest_version = tokio::task::spawn_blocking(|| {
-        query_openclaw_latest_npm().ok().flatten()
-    }).await.unwrap_or(None);
+    let latest_version = tokio::task::spawn_blocking(|| query_openclaw_latest_npm().ok().flatten())
+        .await
+        .unwrap_or(None);
     let upgrade = latest_version
         .as_ref()
         .is_some_and(|latest| compare_semver(&installed_version, Some(latest.as_str())));
@@ -7400,8 +7825,13 @@ pub async fn remote_check_openclaw_update(
 }
 
 #[tauri::command]
-pub async fn remote_list_agents_overview(pool: State<'_, SshConnectionPool>, host_id: String) -> Result<Vec<AgentOverview>, String> {
-    let output = crate::cli_runner::run_openclaw_remote(&pool, &host_id, &["agents", "list", "--json"]).await?;
+pub async fn remote_list_agents_overview(
+    pool: State<'_, SshConnectionPool>,
+    host_id: String,
+) -> Result<Vec<AgentOverview>, String> {
+    let output =
+        crate::cli_runner::run_openclaw_remote(&pool, &host_id, &["agents", "list", "--json"])
+            .await?;
     let json = crate::cli_runner::parse_json_output(&output)?;
     // Check which agents have sessions remotely (single command, batch check)
     // Lists agents whose sessions.json is larger than 2 bytes (not just "{}")
@@ -7421,15 +7851,26 @@ pub async fn remote_list_agents_overview(pool: State<'_, SshConnectionPool>, hos
 }
 
 #[tauri::command]
-pub async fn remote_list_channels_minimal(pool: State<'_, SshConnectionPool>, host_id: String) -> Result<Vec<ChannelNode>, String> {
-    let output = crate::cli_runner::run_openclaw_remote(&pool, &host_id, &["config", "get", "channels", "--json"]).await?;
+pub async fn remote_list_channels_minimal(
+    pool: State<'_, SshConnectionPool>,
+    host_id: String,
+) -> Result<Vec<ChannelNode>, String> {
+    let output = crate::cli_runner::run_openclaw_remote(
+        &pool,
+        &host_id,
+        &["config", "get", "channels", "--json"],
+    )
+    .await?;
     // channels key might not exist yet
     if output.exit_code != 0 {
         let msg = format!("{} {}", output.stderr, output.stdout).to_lowercase();
         if msg.contains("not found") {
             return Ok(Vec::new());
         }
-        return Err(format!("openclaw config get channels failed: {}", output.stderr));
+        return Err(format!(
+            "openclaw config get channels failed: {}",
+            output.stderr
+        ));
     }
     let channels_val = crate::cli_runner::parse_json_output(&output).unwrap_or(Value::Null);
     // Wrap in top-level object with "channels" key so collect_channel_nodes works
@@ -7438,8 +7879,16 @@ pub async fn remote_list_channels_minimal(pool: State<'_, SshConnectionPool>, ho
 }
 
 #[tauri::command]
-pub async fn remote_list_bindings(pool: State<'_, SshConnectionPool>, host_id: String) -> Result<Vec<Value>, String> {
-    let output = crate::cli_runner::run_openclaw_remote(&pool, &host_id, &["config", "get", "bindings", "--json"]).await?;
+pub async fn remote_list_bindings(
+    pool: State<'_, SshConnectionPool>,
+    host_id: String,
+) -> Result<Vec<Value>, String> {
+    let output = crate::cli_runner::run_openclaw_remote(
+        &pool,
+        &host_id,
+        &["config", "get", "bindings", "--json"],
+    )
+    .await?;
     // "bindings" may not exist yet — treat non-zero exit with "not found" as empty
     if output.exit_code != 0 {
         let msg = format!("{} {}", output.stderr, output.stdout).to_lowercase();
@@ -7471,10 +7920,12 @@ async fn remote_write_config_with_snapshot(
         .unwrap_or_default()
         .as_secs();
     let snapshot_path = format!("~/.clawpal/snapshots/{ts}-{source}.json");
-    pool.sftp_write(host_id, &snapshot_path, current_text).await?;
+    pool.sftp_write(host_id, &snapshot_path, current_text)
+        .await?;
     // Write new config
     let new_text = serde_json::to_string_pretty(next).map_err(|e| e.to_string())?;
-    pool.sftp_write(host_id, "~/.openclaw/openclaw.json", &new_text).await?;
+    pool.sftp_write(host_id, "~/.openclaw/openclaw.json", &new_text)
+        .await?;
     Ok(())
 }
 
@@ -7483,7 +7934,8 @@ pub async fn remote_restart_gateway(
     pool: State<'_, SshConnectionPool>,
     host_id: String,
 ) -> Result<bool, String> {
-    pool.exec_login(&host_id, "openclaw gateway restart").await?;
+    pool.exec_login(&host_id, "openclaw gateway restart")
+        .await?;
     Ok(true)
 }
 
@@ -7634,7 +8086,9 @@ async fn run_remote_openclaw_dynamic(
     host_id: &str,
     command: Vec<String>,
 ) -> Result<OpenclawCommandOutput, String> {
-    Ok(run_remote_rescue_bot_command(pool, host_id, command).await?.output)
+    Ok(run_remote_rescue_bot_command(pool, host_id, command)
+        .await?
+        .output)
 }
 
 async fn run_remote_primary_doctor_with_fallback(
@@ -7683,7 +8137,6 @@ async fn run_remote_gateway_restart_fallback(
     Ok(())
 }
 
-
 #[tauri::command]
 pub async fn remote_apply_config_patch(
     pool: State<'_, SshConnectionPool>,
@@ -7691,7 +8144,9 @@ pub async fn remote_apply_config_patch(
     patch_template: String,
     params: Map<String, Value>,
 ) -> Result<ApplyResult, String> {
-    let raw = pool.sftp_read(&host_id, "~/.openclaw/openclaw.json").await?;
+    let raw = pool
+        .sftp_read(&host_id, "~/.openclaw/openclaw.json")
+        .await?;
     let current: Value =
         serde_json::from_str(&raw).map_err(|e| format!("Failed to parse remote config: {e}"))?;
     let current_text = serde_json::to_string_pretty(&current).map_err(|e| e.to_string())?;
@@ -7786,9 +8241,11 @@ pub async fn remote_preview_rollback(
     let target: Value = serde_json::from_str(&snapshot_text)
         .map_err(|e| format!("Failed to parse snapshot: {e}"))?;
 
-    let current_text = pool.sftp_read(&host_id, "~/.openclaw/openclaw.json").await?;
-    let current: Value = serde_json::from_str(&current_text)
-        .map_err(|e| format!("Failed to parse config: {e}"))?;
+    let current_text = pool
+        .sftp_read(&host_id, "~/.openclaw/openclaw.json")
+        .await?;
+    let current: Value =
+        serde_json::from_str(&current_text).map_err(|e| format!("Failed to parse config: {e}"))?;
 
     let before = serde_json::to_string_pretty(&current).unwrap_or_else(|_| "{}".into());
     let after = serde_json::to_string_pretty(&target).unwrap_or_else(|_| "{}".into());
@@ -7813,10 +8270,12 @@ pub async fn remote_rollback(
 ) -> Result<ApplyResult, String> {
     let snapshot_path = format!("~/.clawpal/snapshots/{snapshot_id}");
     let target_text = pool.sftp_read(&host_id, &snapshot_path).await?;
-    let target: Value = serde_json::from_str(&target_text)
-        .map_err(|e| format!("Failed to parse snapshot: {e}"))?;
+    let target: Value =
+        serde_json::from_str(&target_text).map_err(|e| format!("Failed to parse snapshot: {e}"))?;
 
-    let current_text = pool.sftp_read(&host_id, "~/.openclaw/openclaw.json").await?;
+    let current_text = pool
+        .sftp_read(&host_id, "~/.openclaw/openclaw.json")
+        .await?;
     remote_write_config_with_snapshot(&pool, &host_id, &current_text, &target, "rollback").await?;
 
     Ok(ApplyResult {
@@ -7834,15 +8293,26 @@ pub async fn remote_list_discord_guild_channels(
     pool: State<'_, SshConnectionPool>,
     host_id: String,
 ) -> Result<Vec<DiscordGuildChannel>, String> {
-    let output = crate::cli_runner::run_openclaw_remote(&pool, &host_id, &["config", "get", "channels.discord", "--json"]).await?;
+    let output = crate::cli_runner::run_openclaw_remote(
+        &pool,
+        &host_id,
+        &["config", "get", "channels.discord", "--json"],
+    )
+    .await?;
     let discord_section = if output.exit_code == 0 {
         crate::cli_runner::parse_json_output(&output).unwrap_or(Value::Null)
     } else {
         Value::Null
     };
-    let bindings_output = crate::cli_runner::run_openclaw_remote(&pool, &host_id, &["config", "get", "bindings", "--json"]).await?;
+    let bindings_output = crate::cli_runner::run_openclaw_remote(
+        &pool,
+        &host_id,
+        &["config", "get", "bindings", "--json"],
+    )
+    .await?;
     let bindings_section = if bindings_output.exit_code == 0 {
-        crate::cli_runner::parse_json_output(&bindings_output).unwrap_or_else(|_| Value::Array(Vec::new()))
+        crate::cli_runner::parse_json_output(&bindings_output)
+            .unwrap_or_else(|_| Value::Array(Vec::new()))
     } else {
         Value::Array(Vec::new())
     };
@@ -7852,9 +8322,7 @@ pub async fn remote_list_discord_guild_channels(
         "bindings": bindings_section
     });
 
-    let discord_cfg = cfg
-        .get("channels")
-        .and_then(|c| c.get("discord"));
+    let discord_cfg = cfg.get("channels").and_then(|c| c.get("discord"));
     let configured_single_guild_id = discord_cfg
         .and_then(|d| d.get("guilds"))
         .and_then(Value::as_object)
@@ -7877,7 +8345,10 @@ pub async fn remote_list_discord_guild_channels(
                 .and_then(Value::as_object)
                 .and_then(|accounts| {
                     accounts.values().find_map(|acct| {
-                        acct.get("token").and_then(Value::as_str).filter(|s| !s.is_empty()).map(|s| s.to_string())
+                        acct.get("token")
+                            .and_then(Value::as_str)
+                            .filter(|s| !s.is_empty())
+                            .map(|s| s.to_string())
                     })
                 })
         });
@@ -7888,9 +8359,9 @@ pub async fn remote_list_discord_guild_channels(
 
     // Helper: collect guilds from a guilds object
     let collect_guilds = |guilds: &serde_json::Map<String, Value>,
-                               entries: &mut Vec<DiscordGuildChannel>,
-                               channel_ids: &mut Vec<String>,
-                               unresolved_guild_ids: &mut Vec<String>| {
+                          entries: &mut Vec<DiscordGuildChannel>,
+                          channel_ids: &mut Vec<String>,
+                          unresolved_guild_ids: &mut Vec<String>| {
         for (guild_id, guild_val) in guilds {
             let guild_name = guild_val
                 .get("slug")
@@ -7910,7 +8381,10 @@ pub async fn remote_list_discord_guild_channels(
                     if channel_id.contains('*') || channel_id.contains('?') {
                         continue;
                     }
-                    if entries.iter().any(|e| e.guild_id == *guild_id && e.channel_id == *channel_id) {
+                    if entries
+                        .iter()
+                        .any(|e| e.guild_id == *guild_id && e.channel_id == *channel_id)
+                    {
                         continue;
                     }
                     channel_ids.push(channel_id.clone());
@@ -7926,15 +8400,31 @@ pub async fn remote_list_discord_guild_channels(
     };
 
     // Collect from channels.discord.guilds (top-level structured config)
-    if let Some(guilds) = discord_cfg.and_then(|d| d.get("guilds")).and_then(Value::as_object) {
-        collect_guilds(guilds, &mut entries, &mut channel_ids, &mut unresolved_guild_ids);
+    if let Some(guilds) = discord_cfg
+        .and_then(|d| d.get("guilds"))
+        .and_then(Value::as_object)
+    {
+        collect_guilds(
+            guilds,
+            &mut entries,
+            &mut channel_ids,
+            &mut unresolved_guild_ids,
+        );
     }
 
     // Collect from channels.discord.accounts.<accountId>.guilds (multi-account config)
-    if let Some(accounts) = discord_cfg.and_then(|d| d.get("accounts")).and_then(Value::as_object) {
+    if let Some(accounts) = discord_cfg
+        .and_then(|d| d.get("accounts"))
+        .and_then(Value::as_object)
+    {
         for (_account_id, account_val) in accounts {
             if let Some(guilds) = account_val.get("guilds").and_then(Value::as_object) {
-                collect_guilds(guilds, &mut entries, &mut channel_ids, &mut unresolved_guild_ids);
+                collect_guilds(
+                    guilds,
+                    &mut entries,
+                    &mut channel_ids,
+                    &mut unresolved_guild_ids,
+                );
             }
         }
     }
@@ -7959,7 +8449,10 @@ pub async fn remote_list_discord_guild_channels(
                 Some(Value::Number(n)) => n.to_string(),
                 _ => continue,
             };
-            if entries.iter().any(|e| e.guild_id == guild_id && e.channel_id == channel_id) {
+            if entries
+                .iter()
+                .any(|e| e.guild_id == guild_id && e.channel_id == channel_id)
+            {
                 continue;
             }
             if !unresolved_guild_ids.contains(&guild_id) {
@@ -7985,7 +8478,10 @@ pub async fn remote_list_discord_guild_channels(
                 for guild_id in configured_guild_ids {
                     if let Ok(channels) = fetch_discord_guild_channels(&token, &guild_id) {
                         for (channel_id, channel_name) in channels {
-                            if out.iter().any(|e| e.guild_id == guild_id && e.channel_id == channel_id) {
+                            if out
+                                .iter()
+                                .any(|e| e.guild_id == guild_id && e.channel_id == channel_id)
+                            {
                                 continue;
                             }
                             out.push(DiscordGuildChannel {
@@ -7998,9 +8494,14 @@ pub async fn remote_list_discord_guild_channels(
                     }
                 }
                 out
-            }).await.unwrap_or_default();
+            })
+            .await
+            .unwrap_or_default();
             for entry in rest_entries {
-                if entries.iter().any(|e| e.guild_id == entry.guild_id && e.channel_id == entry.channel_id) {
+                if entries
+                    .iter()
+                    .any(|e| e.guild_id == entry.guild_id && e.channel_id == entry.channel_id)
+                {
                     continue;
                 }
                 channel_ids.push(entry.channel_id.clone());
@@ -8019,11 +8520,12 @@ pub async fn remote_list_discord_guild_channels(
                     if entries.iter().any(|e| e.channel_id == channel_id) {
                         continue;
                     }
-                    let (guild_id, guild_name) = if let Some(gid) = configured_single_guild_id.clone() {
-                        (gid.clone(), gid)
-                    } else {
-                        ("discord".to_string(), "Discord".to_string())
-                    };
+                    let (guild_id, guild_name) =
+                        if let Some(gid) = configured_single_guild_id.clone() {
+                            (gid.clone(), gid)
+                        } else {
+                            ("discord".to_string(), "Discord".to_string())
+                        };
                     channel_ids.push(channel_id.clone());
                     entries.push(DiscordGuildChannel {
                         guild_id,
@@ -8039,7 +8541,10 @@ pub async fn remote_list_discord_guild_channels(
     // Resolve channel names via openclaw CLI on remote
     if !channel_ids.is_empty() {
         let ids_arg = channel_ids.join(" ");
-        let cmd = format!("openclaw channels resolve --json --channel discord --kind auto {}", ids_arg);
+        let cmd = format!(
+            "openclaw channels resolve --json --channel discord --kind auto {}",
+            ids_arg
+        );
         if let Ok(r) = pool.exec_login(&host_id, &cmd).await {
             if r.exit_code == 0 && !r.stdout.trim().is_empty() {
                 if let Some(name_map) = parse_resolve_name_map(&r.stdout) {
@@ -8065,7 +8570,9 @@ pub async fn remote_list_discord_guild_channels(
                     }
                 }
                 map
-            }).await.unwrap_or_default();
+            })
+            .await
+            .unwrap_or_default();
             for entry in &mut entries {
                 if let Some(name) = guild_name_map.get(&entry.guild_id) {
                     entry.guild_name = name.clone();
@@ -8077,7 +8584,9 @@ pub async fn remote_list_discord_guild_channels(
     // Persist to remote cache
     if !entries.is_empty() {
         let json = serde_json::to_string_pretty(&entries).map_err(|e| e.to_string())?;
-        let _ = pool.sftp_write(&host_id, "~/.clawpal/discord-guild-channels.json", &json).await;
+        let _ = pool
+            .sftp_write(&host_id, "~/.clawpal/discord-guild-channels.json", &json)
+            .await;
     }
 
     Ok(entries)
@@ -8090,8 +8599,7 @@ pub async fn remote_write_raw_config(
     content: String,
 ) -> Result<bool, String> {
     // Validate it's valid JSON
-    let next: Value =
-        serde_json::from_str(&content).map_err(|e| format!("Invalid JSON: {e}"))?;
+    let next: Value = serde_json::from_str(&content).map_err(|e| format!("Invalid JSON: {e}"))?;
     // Read current for snapshot
     let current = pool
         .sftp_read(&host_id, "~/.openclaw/openclaw.json")
@@ -8151,21 +8659,44 @@ echo "]"
     }
 
     // Parse the JSON output
-    let raw_sessions: Vec<Value> = serde_json::from_str(result.stdout.trim())
-        .map_err(|e| format!("Failed to parse remote session data: {e}\nOutput: {}", &result.stdout[..result.stdout.len().min(500)]))?;
+    let raw_sessions: Vec<Value> = serde_json::from_str(result.stdout.trim()).map_err(|e| {
+        format!(
+            "Failed to parse remote session data: {e}\nOutput: {}",
+            &result.stdout[..result.stdout.len().min(500)]
+        )
+    })?;
 
     // Group by agent and classify
-    let mut agent_map: std::collections::BTreeMap<String, Vec<SessionAnalysis>> = std::collections::BTreeMap::new();
+    let mut agent_map: std::collections::BTreeMap<String, Vec<SessionAnalysis>> =
+        std::collections::BTreeMap::new();
 
     for val in &raw_sessions {
-        let agent = val.get("agent").and_then(Value::as_str).unwrap_or("unknown").to_string();
-        let session_id = val.get("sessionId").and_then(Value::as_str).unwrap_or("").to_string();
+        let agent = val
+            .get("agent")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+            .to_string();
+        let session_id = val
+            .get("sessionId")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
         let size_bytes = val.get("sizeBytes").and_then(Value::as_u64).unwrap_or(0);
         let message_count = val.get("messageCount").and_then(Value::as_u64).unwrap_or(0) as usize;
-        let user_message_count = val.get("userMessageCount").and_then(Value::as_u64).unwrap_or(0) as usize;
-        let assistant_message_count = val.get("assistantMessageCount").and_then(Value::as_u64).unwrap_or(0) as usize;
+        let user_message_count = val
+            .get("userMessageCount")
+            .and_then(Value::as_u64)
+            .unwrap_or(0) as usize;
+        let assistant_message_count = val
+            .get("assistantMessageCount")
+            .and_then(Value::as_u64)
+            .unwrap_or(0) as usize;
         let age_days = val.get("ageDays").and_then(Value::as_f64).unwrap_or(0.0);
-        let kind = val.get("kind").and_then(Value::as_str).unwrap_or("sessions").to_string();
+        let kind = val
+            .get("kind")
+            .and_then(Value::as_str)
+            .unwrap_or("sessions")
+            .to_string();
 
         let category = if size_bytes < 500 || message_count == 0 {
             "empty"
@@ -8175,34 +8706,47 @@ echo "]"
             "valuable"
         };
 
-        agent_map.entry(agent.clone()).or_default().push(SessionAnalysis {
-            agent: agent.clone(),
-            session_id,
-            file_path: String::new(),
-            size_bytes,
-            message_count,
-            user_message_count,
-            assistant_message_count,
-            last_activity: None,
-            age_days,
-            total_tokens: 0,
-            model: None,
-            category: category.to_string(),
-            kind,
-        });
+        agent_map
+            .entry(agent.clone())
+            .or_default()
+            .push(SessionAnalysis {
+                agent: agent.clone(),
+                session_id,
+                file_path: String::new(),
+                size_bytes,
+                message_count,
+                user_message_count,
+                assistant_message_count,
+                last_activity: None,
+                age_days,
+                total_tokens: 0,
+                model: None,
+                category: category.to_string(),
+                kind,
+            });
     }
 
     let mut results: Vec<AgentSessionAnalysis> = Vec::new();
     for (agent, mut sessions) in agent_map {
         sessions.sort_by(|a, b| {
-            let cat_order = |c: &str| match c { "empty" => 0, "low_value" => 1, _ => 2 };
-            cat_order(&a.category).cmp(&cat_order(&b.category))
-                .then(b.age_days.partial_cmp(&a.age_days).unwrap_or(std::cmp::Ordering::Equal))
+            let cat_order = |c: &str| match c {
+                "empty" => 0,
+                "low_value" => 1,
+                _ => 2,
+            };
+            cat_order(&a.category).cmp(&cat_order(&b.category)).then(
+                b.age_days
+                    .partial_cmp(&a.age_days)
+                    .unwrap_or(std::cmp::Ordering::Equal),
+            )
         });
         let total_files = sessions.len();
         let total_size_bytes = sessions.iter().map(|s| s.size_bytes).sum();
         let empty_count = sessions.iter().filter(|s| s.category == "empty").count();
-        let low_value_count = sessions.iter().filter(|s| s.category == "low_value").count();
+        let low_value_count = sessions
+            .iter()
+            .filter(|s| s.category == "low_value")
+            .count();
         let valuable_count = sessions.iter().filter(|s| s.category == "valuable").count();
 
         results.push(AgentSessionAnalysis {
@@ -8256,7 +8800,9 @@ pub async fn remote_delete_sessions_by_ids(
                 !id_set.contains(sid)
             });
             let updated = serde_json::to_string(&data).unwrap_or_default();
-            let _ = pool.sftp_write(&host_id, &sessions_json_path, &updated).await;
+            let _ = pool
+                .sftp_write(&host_id, &sessions_json_path, &updated)
+                .await;
         }
     }
 
@@ -8292,14 +8838,25 @@ done
 echo "]"
 "#;
     let result = pool.exec(&host_id, script).await?;
-    let raw: Vec<Value> = serde_json::from_str(result.stdout.trim())
-        .unwrap_or_default();
+    let raw: Vec<Value> = serde_json::from_str(result.stdout.trim()).unwrap_or_default();
 
     let mut out = Vec::new();
     for val in &raw {
-        let agent = val.get("agent").and_then(Value::as_str).unwrap_or("").to_string();
-        let kind = val.get("kind").and_then(Value::as_str).unwrap_or("sessions").to_string();
-        let path = val.get("path").and_then(Value::as_str).unwrap_or("").to_string();
+        let agent = val
+            .get("agent")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let kind = val
+            .get("kind")
+            .and_then(Value::as_str)
+            .unwrap_or("sessions")
+            .to_string();
+        let path = val
+            .get("path")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
         let size_bytes = val.get("sizeBytes").and_then(Value::as_u64).unwrap_or(0);
         out.push(SessionFile {
             relative_path: path.clone(),
@@ -8345,7 +8902,11 @@ pub async fn remote_preview_session(
     agent_id: String,
     session_id: String,
 ) -> Result<Vec<Value>, String> {
-    if agent_id.contains("..") || agent_id.contains('/') || session_id.contains("..") || session_id.contains('/') {
+    if agent_id.contains("..")
+        || agent_id.contains('/')
+        || session_id.contains("..")
+        || session_id.contains('/')
+    {
         return Err("invalid id".into());
     }
     let jsonl_name = format!("{}.jsonl", session_id);
@@ -8353,7 +8914,10 @@ pub async fn remote_preview_session(
     // Try sessions dir first, then archive
     let paths = [
         format!("~/.openclaw/agents/{}/sessions/{}", agent_id, jsonl_name),
-        format!("~/.openclaw/agents/{}/sessions_archive/{}", agent_id, jsonl_name),
+        format!(
+            "~/.openclaw/agents/{}/sessions_archive/{}",
+            agent_id, jsonl_name
+        ),
     ];
 
     let mut content = String::new();
@@ -8377,8 +8941,12 @@ pub async fn remote_preview_session(
             Err(_) => continue,
         };
         if obj.get("type").and_then(Value::as_str) == Some("message") {
-            let role = obj.pointer("/message/role").and_then(Value::as_str).unwrap_or("unknown");
-            let content_val = obj.pointer("/message/content")
+            let role = obj
+                .pointer("/message/role")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            let content_val = obj
+                .pointer("/message/content")
                 .map(|c| {
                     if let Some(arr) = c.as_array() {
                         arr.iter()
@@ -8406,14 +8974,18 @@ pub async fn remote_list_model_profiles(
     pool: State<'_, SshConnectionPool>,
     host_id: String,
 ) -> Result<Vec<ModelProfile>, String> {
-    let content = pool.sftp_read(&host_id, "~/.clawpal/model-profiles.json").await
+    let content = pool
+        .sftp_read(&host_id, "~/.clawpal/model-profiles.json")
+        .await
         .unwrap_or_else(|_| r#"{"profiles":[]}"#.to_string());
     #[derive(serde::Deserialize)]
     struct Storage {
         #[serde(default)]
         profiles: Vec<ModelProfile>,
     }
-    let parsed: Storage = serde_json::from_str(&content).unwrap_or(Storage { profiles: Vec::new() });
+    let parsed: Storage = serde_json::from_str(&content).unwrap_or(Storage {
+        profiles: Vec::new(),
+    });
     Ok(parsed.profiles)
 }
 
@@ -8431,7 +9003,9 @@ pub async fn remote_upsert_model_profile(
     }
 
     // Load existing profiles
-    let content = pool.sftp_read(&host_id, "~/.clawpal/model-profiles.json").await
+    let content = pool
+        .sftp_read(&host_id, "~/.clawpal/model-profiles.json")
+        .await
         .unwrap_or_else(|_| r#"{"profiles":[]}"#.to_string());
     #[derive(serde::Deserialize, serde::Serialize)]
     struct Storage {
@@ -8440,10 +9014,18 @@ pub async fn remote_upsert_model_profile(
         #[serde(default = "default_version")]
         version: u8,
     }
-    fn default_version() -> u8 { 1 }
-    let mut storage: Storage = serde_json::from_str(&content).unwrap_or(Storage { profiles: Vec::new(), version: 1 });
+    fn default_version() -> u8 {
+        1
+    }
+    let mut storage: Storage = serde_json::from_str(&content).unwrap_or(Storage {
+        profiles: Vec::new(),
+        version: 1,
+    });
     fill_profile_auth_from_existing_or_provider_donor(&mut profile, &storage.profiles);
-    if profile.api_key.as_ref().is_some_and(|key| !key.trim().is_empty())
+    if profile
+        .api_key
+        .as_ref()
+        .is_some_and(|key| !key.trim().is_empty())
         && profile.auth_ref.trim().is_empty()
     {
         profile.auth_ref = format!("{}:default", profile.provider.trim());
@@ -8453,7 +9035,8 @@ pub async fn remote_upsert_model_profile(
     // Ensure .clawpal dir exists
     let _ = pool.exec(&host_id, "mkdir -p ~/.clawpal").await;
     let text = serde_json::to_string_pretty(&storage).map_err(|e| e.to_string())?;
-    pool.sftp_write(&host_id, "~/.clawpal/model-profiles.json", &text).await?;
+    pool.sftp_write(&host_id, "~/.clawpal/model-profiles.json", &text)
+        .await?;
     Ok(profile)
 }
 
@@ -8463,7 +9046,9 @@ pub async fn remote_delete_model_profile(
     host_id: String,
     profile_id: String,
 ) -> Result<bool, String> {
-    let content = pool.sftp_read(&host_id, "~/.clawpal/model-profiles.json").await
+    let content = pool
+        .sftp_read(&host_id, "~/.clawpal/model-profiles.json")
+        .await
         .unwrap_or_else(|_| r#"{"profiles":[]}"#.to_string());
     #[derive(serde::Deserialize, serde::Serialize)]
     struct Storage {
@@ -8472,15 +9057,21 @@ pub async fn remote_delete_model_profile(
         #[serde(default = "default_version")]
         version: u8,
     }
-    fn default_version() -> u8 { 1 }
-    let mut storage: Storage = serde_json::from_str(&content).unwrap_or(Storage { profiles: Vec::new(), version: 1 });
+    fn default_version() -> u8 {
+        1
+    }
+    let mut storage: Storage = serde_json::from_str(&content).unwrap_or(Storage {
+        profiles: Vec::new(),
+        version: 1,
+    });
     let before = storage.profiles.len();
     storage.profiles.retain(|p| p.id != profile_id);
     if storage.profiles.len() == before {
         return Ok(false);
     }
     let text = serde_json::to_string_pretty(&storage).map_err(|e| e.to_string())?;
-    pool.sftp_write(&host_id, "~/.clawpal/model-profiles.json", &text).await?;
+    pool.sftp_write(&host_id, "~/.clawpal/model-profiles.json", &text)
+        .await?;
     Ok(true)
 }
 
@@ -8489,7 +9080,10 @@ pub async fn remote_resolve_api_keys(
     pool: State<'_, SshConnectionPool>,
     host_id: String,
 ) -> Result<Vec<ResolvedApiKey>, String> {
-    let content = match pool.sftp_read(&host_id, "~/.clawpal/model-profiles.json").await {
+    let content = match pool
+        .sftp_read(&host_id, "~/.clawpal/model-profiles.json")
+        .await
+    {
         Ok(content) => content,
         Err(e) if is_remote_missing_path_error(&e) => r#"{"profiles":[]}"#.to_string(),
         Err(e) => return Err(format!("Failed to read remote model profiles: {e}")),
@@ -8505,7 +9099,7 @@ pub async fn remote_resolve_api_keys(
     for profile in &storage.profiles {
         let masked = if let Some(ref key) = profile.api_key {
             if key.len() > 8 {
-                format!("{}...{}", &key[..4], &key[key.len()-4..])
+                format!("{}...{}", &key[..4], &key[key.len() - 4..])
             } else if !key.is_empty() {
                 "****".to_string()
             } else if !profile.auth_ref.is_empty() {
@@ -8587,7 +9181,11 @@ async fn resolve_remote_key_from_agent_auth_profiles(
         let text = match pool.sftp_read(host_id, &auth_file).await {
             Ok(text) => text,
             Err(e) if is_remote_missing_path_error(&e) => continue,
-            Err(e) => return Err(format!("Failed to read remote auth profiles at {auth_file}: {e}")),
+            Err(e) => {
+                return Err(format!(
+                    "Failed to read remote auth profiles at {auth_file}: {e}"
+                ))
+            }
         };
         let data: Value = serde_json::from_str(&text)
             .map_err(|e| format!("Failed to parse remote auth profiles at {auth_file}: {e}"))?;
@@ -8620,7 +9218,11 @@ async fn resolve_remote_profile_base_url(
     let raw = match pool.sftp_read(host_id, "~/.openclaw/openclaw.json").await {
         Ok(raw) => raw,
         Err(e) if is_remote_missing_path_error(&e) => return Ok(None),
-        Err(e) => return Err(format!("Failed to read remote config for base URL resolution: {e}")),
+        Err(e) => {
+            return Err(format!(
+                "Failed to read remote config for base URL resolution: {e}"
+            ))
+        }
     };
     let cfg: Value = serde_json::from_str(&raw)
         .map_err(|e| format!("Failed to parse remote config for base URL resolution: {e}"))?;
@@ -8652,7 +9254,9 @@ async fn resolve_remote_profile_api_key(
         }
 
         // Try auth_ref from remote agent auth-profiles.json
-        if let Some(key) = resolve_remote_key_from_agent_auth_profiles(pool, host_id, auth_ref).await? {
+        if let Some(key) =
+            resolve_remote_key_from_agent_auth_profiles(pool, host_id, auth_ref).await?
+        {
             return Ok(key);
         }
     }
@@ -8725,17 +9329,24 @@ pub async fn remote_extract_model_profiles_from_config(
     pool: State<'_, SshConnectionPool>,
     host_id: String,
 ) -> Result<ExtractModelProfilesResult, String> {
-    let raw = pool.sftp_read(&host_id, "~/.openclaw/openclaw.json").await?;
-    let cfg: Value = serde_json::from_str(&raw).map_err(|e| format!("Failed to parse remote config: {e}"))?;
+    let raw = pool
+        .sftp_read(&host_id, "~/.openclaw/openclaw.json")
+        .await?;
+    let cfg: Value =
+        serde_json::from_str(&raw).map_err(|e| format!("Failed to parse remote config: {e}"))?;
 
-    let profiles_raw = pool.sftp_read(&host_id, "~/.clawpal/model-profiles.json").await
+    let profiles_raw = pool
+        .sftp_read(&host_id, "~/.clawpal/model-profiles.json")
+        .await
         .unwrap_or_else(|_| r#"{"profiles":[]}"#.to_string());
     #[derive(serde::Deserialize)]
     struct StorageIn {
         #[serde(default)]
         profiles: Vec<ModelProfile>,
     }
-    let existing: StorageIn = serde_json::from_str(&profiles_raw).unwrap_or(StorageIn { profiles: Vec::new() });
+    let existing: StorageIn = serde_json::from_str(&profiles_raw).unwrap_or(StorageIn {
+        profiles: Vec::new(),
+    });
     let profiles = existing.profiles;
 
     let bindings = collect_model_bindings(&cfg, &profiles);
@@ -8747,7 +9358,10 @@ pub async fn remote_extract_model_profiles_from_config(
     let mut next_profiles = profiles;
     let mut model_profile_map: HashMap<String, String> = HashMap::new();
     for profile in &next_profiles {
-        model_profile_map.insert(normalize_model_ref(&profile_to_model_value(profile)), profile.id.clone());
+        model_profile_map.insert(
+            normalize_model_ref(&profile_to_model_value(profile)),
+            profile.id.clone(),
+        );
     }
 
     for binding in bindings {
@@ -8757,9 +9371,13 @@ pub async fn remote_extract_model_profiles_from_config(
             "channel" => format!("channel:{}", binding.scope_id),
             _ => binding.scope_id,
         };
-        let Some(model_ref) = binding.model_value else { continue };
+        let Some(model_ref) = binding.model_value else {
+            continue;
+        };
         let model_ref = normalize_model_ref(&model_ref);
-        if model_ref.trim().is_empty() { continue }
+        if model_ref.trim().is_empty() {
+            continue;
+        }
         if model_profile_map.contains_key(&model_ref) || seen.contains(&model_ref) {
             reused += 1;
             continue;
@@ -8798,13 +9416,21 @@ pub async fn remote_extract_model_profiles_from_config(
             profiles: &'a [ModelProfile],
             version: u8,
         }
-        let payload = StorageOut { profiles: &next_profiles, version: 1 };
+        let payload = StorageOut {
+            profiles: &next_profiles,
+            version: 1,
+        };
         let text = serde_json::to_string_pretty(&payload).map_err(|e| e.to_string())?;
         let _ = pool.exec(&host_id, "mkdir -p ~/.clawpal").await;
-        pool.sftp_write(&host_id, "~/.clawpal/model-profiles.json", &text).await?;
+        pool.sftp_write(&host_id, "~/.clawpal/model-profiles.json", &text)
+            .await?;
     }
 
-    Ok(ExtractModelProfilesResult { created, reused, skipped_invalid })
+    Ok(ExtractModelProfilesResult {
+        created,
+        reused,
+        skipped_invalid,
+    })
 }
 
 #[tauri::command]
@@ -8815,8 +9441,9 @@ pub async fn remote_refresh_model_catalog(
     let paths = resolve_paths();
     let cache_path = remote_model_catalog_cache_path(&paths, &host_id);
     let remote_version = match pool.exec_login(&host_id, "openclaw --version").await {
-        Ok(r) => extract_version_from_text(&r.stdout)
-            .unwrap_or_else(|| r.stdout.trim().to_string()),
+        Ok(r) => {
+            extract_version_from_text(&r.stdout).unwrap_or_else(|| r.stdout.trim().to_string())
+        }
         Err(_) => "unknown".into(),
     };
     let cached = read_model_catalog_cache(&cache_path);
@@ -8824,7 +9451,9 @@ pub async fn remote_refresh_model_catalog(
         return Ok(selected);
     }
 
-    let result = pool.exec_login(&host_id, "openclaw models list --all --json --no-color").await;
+    let result = pool
+        .exec_login(&host_id, "openclaw models list --all --json --no-color")
+        .await;
     if let Ok(r) = result {
         if r.exit_code == 0 && !r.stdout.trim().is_empty() {
             if let Some(catalog) = parse_model_catalog_from_cli_output(&r.stdout) {
@@ -8877,8 +9506,11 @@ pub async fn remote_run_openclaw_upgrade(
     // Use the official install script with --no-prompt for non-interactive SSH.
     // The script handles npm prefix/permissions, bin links, and PATH fixups
     // that plain `npm install -g` misses (e.g. stale /usr/bin/openclaw symlinks).
-    let version_before = pool.exec_login(&host_id, "openclaw --version 2>/dev/null || true").await
-        .map(|r| r.stdout.trim().to_string()).unwrap_or_default();
+    let version_before = pool
+        .exec_login(&host_id, "openclaw --version 2>/dev/null || true")
+        .await
+        .map(|r| r.stdout.trim().to_string())
+        .unwrap_or_default();
 
     let install_cmd = "curl -fsSL --proto '=https' --tlsv1.2 https://openclaw.ai/install.sh | bash -s -- --no-prompt --no-onboard 2>&1";
     let result = pool.exec_login(&host_id, install_cmd).await?;
@@ -8893,11 +9525,16 @@ pub async fn remote_run_openclaw_upgrade(
     }
 
     // Restart gateway after successful upgrade (best-effort)
-    let _ = pool.exec_login(&host_id, "openclaw gateway restart 2>/dev/null || true").await;
+    let _ = pool
+        .exec_login(&host_id, "openclaw gateway restart 2>/dev/null || true")
+        .await;
 
     // Verify version actually changed
-    let version_after = pool.exec_login(&host_id, "openclaw --version 2>/dev/null || true").await
-        .map(|r| r.stdout.trim().to_string()).unwrap_or_default();
+    let version_after = pool
+        .exec_login(&host_id, "openclaw --version 2>/dev/null || true")
+        .await
+        .map(|r| r.stdout.trim().to_string())
+        .unwrap_or_default();
     if !version_before.is_empty() && !version_after.is_empty() && version_before == version_after {
         return Err(format!("{combined}\n\nWarning: version unchanged after upgrade ({version_before}). Check PATH or npm prefix."));
     }
@@ -8931,7 +9568,11 @@ fn strip_doctor_banner(text: &str) -> String {
         }
     }
     let result = lines.join("\n").trim().to_string();
-    if result.is_empty() { "Command failed".into() } else { result }
+    if result.is_empty() {
+        "Command failed".into()
+    } else {
+        result
+    }
 }
 
 fn parse_cron_jobs(text: &str) -> Value {
@@ -8944,25 +9585,32 @@ fn parse_cron_jobs(text: &str) -> Value {
     };
     match jobs {
         Value::Array(arr) => {
-            let mapped: Vec<Value> = arr.into_iter().map(|mut v| {
-                // Map "id" → "jobId" for frontend compatibility
-                if let Value::Object(ref mut obj) = v {
-                    if let Some(id) = obj.get("id").cloned() {
-                        obj.entry("jobId".to_string()).or_insert(id);
+            let mapped: Vec<Value> = arr
+                .into_iter()
+                .map(|mut v| {
+                    // Map "id" → "jobId" for frontend compatibility
+                    if let Value::Object(ref mut obj) = v {
+                        if let Some(id) = obj.get("id").cloned() {
+                            obj.entry("jobId".to_string()).or_insert(id);
+                        }
                     }
-                }
-                v
-            }).collect();
+                    v
+                })
+                .collect();
             Value::Array(mapped)
         }
         Value::Object(map) => {
-            let arr: Vec<Value> = map.into_iter().map(|(k, mut v)| {
-                if let Value::Object(ref mut obj) = v {
-                    obj.entry("jobId".to_string()).or_insert(Value::String(k.clone()));
-                    obj.entry("id".to_string()).or_insert(Value::String(k));
-                }
-                v
-            }).collect();
+            let arr: Vec<Value> = map
+                .into_iter()
+                .map(|(k, mut v)| {
+                    if let Value::Object(ref mut obj) = v {
+                        obj.entry("jobId".to_string())
+                            .or_insert(Value::String(k.clone()));
+                        obj.entry("id".to_string()).or_insert(Value::String(k));
+                    }
+                    v
+                })
+                .collect();
             Value::Array(arr)
         }
         _ => Value::Array(vec![]),
@@ -8983,12 +9631,17 @@ pub fn list_cron_jobs() -> Result<Value, String> {
 #[tauri::command]
 pub fn get_cron_runs(job_id: String, limit: Option<usize>) -> Result<Vec<Value>, String> {
     let paths = resolve_paths();
-    let runs_path = paths.base_dir.join("cron").join("runs").join(format!("{}.jsonl", job_id));
+    let runs_path = paths
+        .base_dir
+        .join("cron")
+        .join("runs")
+        .join(format!("{}.jsonl", job_id));
     if !runs_path.exists() {
         return Ok(vec![]);
     }
     let text = std::fs::read_to_string(&runs_path).map_err(|e| e.to_string())?;
-    let mut runs: Vec<Value> = text.lines()
+    let mut runs: Vec<Value> = text
+        .lines()
         .filter(|l| !l.trim().is_empty())
         .filter_map(|l| serde_json::from_str(l).ok())
         .collect();
@@ -9018,7 +9671,9 @@ pub async fn trigger_cron_job(job_id: String) -> Result<String, String> {
             let error_msg = strip_doctor_banner(&format!("{stdout}\n{stderr}"));
             Err(error_msg)
         }
-    }).await.map_err(|e| format!("Task failed: {e}"))?
+    })
+    .await
+    .map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
@@ -9045,7 +9700,10 @@ pub fn delete_cron_job(job_id: String) -> Result<String, String> {
 // ---------------------------------------------------------------------------
 
 #[tauri::command]
-pub async fn remote_list_cron_jobs(pool: State<'_, SshConnectionPool>, host_id: String) -> Result<Value, String> {
+pub async fn remote_list_cron_jobs(
+    pool: State<'_, SshConnectionPool>,
+    host_id: String,
+) -> Result<Value, String> {
     let raw = pool.sftp_read(&host_id, "~/.openclaw/cron/jobs.json").await;
     match raw {
         Ok(text) => Ok(parse_cron_jobs(&text)),
@@ -9054,12 +9712,18 @@ pub async fn remote_list_cron_jobs(pool: State<'_, SshConnectionPool>, host_id: 
 }
 
 #[tauri::command]
-pub async fn remote_get_cron_runs(pool: State<'_, SshConnectionPool>, host_id: String, job_id: String, limit: Option<usize>) -> Result<Vec<Value>, String> {
+pub async fn remote_get_cron_runs(
+    pool: State<'_, SshConnectionPool>,
+    host_id: String,
+    job_id: String,
+    limit: Option<usize>,
+) -> Result<Vec<Value>, String> {
     let path = format!("~/.openclaw/cron/runs/{}.jsonl", job_id);
     let raw = pool.sftp_read(&host_id, &path).await;
     match raw {
         Ok(text) => {
-            let mut runs: Vec<Value> = text.lines()
+            let mut runs: Vec<Value> = text
+                .lines()
                 .filter(|l| !l.trim().is_empty())
                 .filter_map(|l| serde_json::from_str(l).ok())
                 .collect();
@@ -9073,8 +9737,17 @@ pub async fn remote_get_cron_runs(pool: State<'_, SshConnectionPool>, host_id: S
 }
 
 #[tauri::command]
-pub async fn remote_trigger_cron_job(pool: State<'_, SshConnectionPool>, host_id: String, job_id: String) -> Result<String, String> {
-    let result = pool.exec_login(&host_id, &format!("openclaw cron run {}", shell_escape(&job_id))).await?;
+pub async fn remote_trigger_cron_job(
+    pool: State<'_, SshConnectionPool>,
+    host_id: String,
+    job_id: String,
+) -> Result<String, String> {
+    let result = pool
+        .exec_login(
+            &host_id,
+            &format!("openclaw cron run {}", shell_escape(&job_id)),
+        )
+        .await?;
     if result.exit_code == 0 {
         Ok(result.stdout)
     } else {
@@ -9083,8 +9756,17 @@ pub async fn remote_trigger_cron_job(pool: State<'_, SshConnectionPool>, host_id
 }
 
 #[tauri::command]
-pub async fn remote_delete_cron_job(pool: State<'_, SshConnectionPool>, host_id: String, job_id: String) -> Result<String, String> {
-    let result = pool.exec_login(&host_id, &format!("openclaw cron remove {}", shell_escape(&job_id))).await?;
+pub async fn remote_delete_cron_job(
+    pool: State<'_, SshConnectionPool>,
+    host_id: String,
+    job_id: String,
+) -> Result<String, String> {
+    let result = pool
+        .exec_login(
+            &host_id,
+            &format!("openclaw cron remove {}", shell_escape(&job_id)),
+        )
+        .await?;
     if result.exit_code == 0 {
         Ok(result.stdout)
     } else {
@@ -9127,11 +9809,17 @@ pub fn get_watchdog_status() -> Result<Value, String> {
 
     if let Value::Object(ref mut map) = status {
         map.insert("alive".into(), Value::Bool(alive));
-        map.insert("deployed".into(), Value::Bool(wd_dir.join("watchdog.js").exists()));
+        map.insert(
+            "deployed".into(),
+            Value::Bool(wd_dir.join("watchdog.js").exists()),
+        );
     } else {
         let mut map = serde_json::Map::new();
         map.insert("alive".into(), Value::Bool(alive));
-        map.insert("deployed".into(), Value::Bool(wd_dir.join("watchdog.js").exists()));
+        map.insert(
+            "deployed".into(),
+            Value::Bool(wd_dir.join("watchdog.js").exists()),
+        );
         status = Value::Object(map);
     }
 
@@ -9144,8 +9832,12 @@ pub fn deploy_watchdog(app_handle: tauri::AppHandle) -> Result<bool, String> {
     let wd_dir = paths.clawpal_dir.join("watchdog");
     std::fs::create_dir_all(&wd_dir).map_err(|e| e.to_string())?;
 
-    let resource_path = app_handle.path()
-        .resolve("resources/watchdog.js", tauri::path::BaseDirectory::Resource)
+    let resource_path = app_handle
+        .path()
+        .resolve(
+            "resources/watchdog.js",
+            tauri::path::BaseDirectory::Resource,
+        )
         .map_err(|e| format!("Failed to resolve watchdog resource: {e}"))?;
 
     let content = std::fs::read_to_string(&resource_path)
@@ -9183,7 +9875,8 @@ pub fn start_watchdog() -> Result<bool, String> {
     }
 
     let log_file = std::fs::OpenOptions::new()
-        .create(true).append(true)
+        .create(true)
+        .append(true)
         .open(&log_path)
         .map_err(|e| e.to_string())?;
     let log_err = log_file.try_clone().map_err(|e| e.to_string())?;
@@ -9234,7 +9927,9 @@ pub fn uninstall_watchdog() -> Result<bool, String> {
     if pid_path.exists() {
         let pid_str = std::fs::read_to_string(&pid_path).unwrap_or_default();
         if let Ok(pid) = pid_str.trim().parse::<u32>() {
-            let _ = std::process::Command::new("kill").arg(pid.to_string()).output();
+            let _ = std::process::Command::new("kill")
+                .arg(pid.to_string())
+                .output();
         }
     }
 
@@ -9298,7 +9993,11 @@ pub fn read_gateway_error_log(lines: Option<usize>) -> Result<String, String> {
 }
 
 #[tauri::command]
-pub async fn remote_read_app_log(pool: State<'_, SshConnectionPool>, host_id: String, lines: Option<usize>) -> Result<String, String> {
+pub async fn remote_read_app_log(
+    pool: State<'_, SshConnectionPool>,
+    host_id: String,
+    lines: Option<usize>,
+) -> Result<String, String> {
     let n = lines.unwrap_or(200);
     let cmd = format!("tail -n {n} ~/.clawpal/logs/app.log 2>/dev/null || echo ''");
     let result = pool.exec(&host_id, &cmd).await?;
@@ -9306,7 +10005,11 @@ pub async fn remote_read_app_log(pool: State<'_, SshConnectionPool>, host_id: St
 }
 
 #[tauri::command]
-pub async fn remote_read_error_log(pool: State<'_, SshConnectionPool>, host_id: String, lines: Option<usize>) -> Result<String, String> {
+pub async fn remote_read_error_log(
+    pool: State<'_, SshConnectionPool>,
+    host_id: String,
+    lines: Option<usize>,
+) -> Result<String, String> {
     let n = lines.unwrap_or(200);
     let cmd = format!("tail -n {n} ~/.clawpal/logs/error.log 2>/dev/null || echo ''");
     let result = pool.exec(&host_id, &cmd).await?;
@@ -9314,7 +10017,11 @@ pub async fn remote_read_error_log(pool: State<'_, SshConnectionPool>, host_id: 
 }
 
 #[tauri::command]
-pub async fn remote_read_gateway_log(pool: State<'_, SshConnectionPool>, host_id: String, lines: Option<usize>) -> Result<String, String> {
+pub async fn remote_read_gateway_log(
+    pool: State<'_, SshConnectionPool>,
+    host_id: String,
+    lines: Option<usize>,
+) -> Result<String, String> {
     let n = lines.unwrap_or(200);
     let cmd = format!("tail -n {n} ~/.openclaw/logs/gateway.log 2>/dev/null || echo ''");
     let result = pool.exec(&host_id, &cmd).await?;
@@ -9322,7 +10029,11 @@ pub async fn remote_read_gateway_log(pool: State<'_, SshConnectionPool>, host_id
 }
 
 #[tauri::command]
-pub async fn remote_read_gateway_error_log(pool: State<'_, SshConnectionPool>, host_id: String, lines: Option<usize>) -> Result<String, String> {
+pub async fn remote_read_gateway_error_log(
+    pool: State<'_, SshConnectionPool>,
+    host_id: String,
+    lines: Option<usize>,
+) -> Result<String, String> {
     let n = lines.unwrap_or(200);
     let cmd = format!("tail -n {n} ~/.openclaw/logs/gateway.err.log 2>/dev/null || echo ''");
     let result = pool.exec(&host_id, &cmd).await?;
@@ -9334,25 +10045,39 @@ pub async fn remote_read_gateway_error_log(pool: State<'_, SshConnectionPool>, h
 // ---------------------------------------------------------------------------
 
 #[tauri::command]
-pub async fn remote_get_watchdog_status(pool: State<'_, SshConnectionPool>, host_id: String) -> Result<Value, String> {
-    let status_raw = pool.sftp_read(&host_id, "~/.clawpal/watchdog/status.json").await;
+pub async fn remote_get_watchdog_status(
+    pool: State<'_, SshConnectionPool>,
+    host_id: String,
+) -> Result<Value, String> {
+    let status_raw = pool
+        .sftp_read(&host_id, "~/.clawpal/watchdog/status.json")
+        .await;
     let mut status = match status_raw {
         Ok(text) => serde_json::from_str::<Value>(&text).unwrap_or(Value::Null),
         Err(_) => Value::Null,
     };
 
-    let pid_raw = pool.sftp_read(&host_id, "~/.clawpal/watchdog/watchdog.pid").await;
+    let pid_raw = pool
+        .sftp_read(&host_id, "~/.clawpal/watchdog/watchdog.pid")
+        .await;
     let alive = match pid_raw {
         Ok(pid_str) => {
-            let cmd = format!("kill -0 {} 2>/dev/null && echo alive || echo dead", pid_str.trim());
-            pool.exec(&host_id, &cmd).await
+            let cmd = format!(
+                "kill -0 {} 2>/dev/null && echo alive || echo dead",
+                pid_str.trim()
+            );
+            pool.exec(&host_id, &cmd)
+                .await
                 .map(|r| r.stdout.trim() == "alive")
                 .unwrap_or(false)
         }
         Err(_) => false,
     };
 
-    let deployed = pool.sftp_read(&host_id, "~/.clawpal/watchdog/watchdog.js").await.is_ok();
+    let deployed = pool
+        .sftp_read(&host_id, "~/.clawpal/watchdog/watchdog.js")
+        .await
+        .is_ok();
 
     if let Value::Object(ref mut map) = status {
         map.insert("alive".into(), Value::Bool(alive));
@@ -9368,23 +10093,40 @@ pub async fn remote_get_watchdog_status(pool: State<'_, SshConnectionPool>, host
 }
 
 #[tauri::command]
-pub async fn remote_deploy_watchdog(app_handle: tauri::AppHandle, pool: State<'_, SshConnectionPool>, host_id: String) -> Result<bool, String> {
-    let resource_path = app_handle.path()
-        .resolve("resources/watchdog.js", tauri::path::BaseDirectory::Resource)
+pub async fn remote_deploy_watchdog(
+    app_handle: tauri::AppHandle,
+    pool: State<'_, SshConnectionPool>,
+    host_id: String,
+) -> Result<bool, String> {
+    let resource_path = app_handle
+        .path()
+        .resolve(
+            "resources/watchdog.js",
+            tauri::path::BaseDirectory::Resource,
+        )
         .map_err(|e| format!("Failed to resolve watchdog resource: {e}"))?;
     let content = std::fs::read_to_string(&resource_path)
         .map_err(|e| format!("Failed to read watchdog resource: {e}"))?;
 
     pool.exec(&host_id, "mkdir -p ~/.clawpal/watchdog").await?;
-    pool.sftp_write(&host_id, "~/.clawpal/watchdog/watchdog.js", &content).await?;
+    pool.sftp_write(&host_id, "~/.clawpal/watchdog/watchdog.js", &content)
+        .await?;
     Ok(true)
 }
 
 #[tauri::command]
-pub async fn remote_start_watchdog(pool: State<'_, SshConnectionPool>, host_id: String) -> Result<bool, String> {
-    let pid_raw = pool.sftp_read(&host_id, "~/.clawpal/watchdog/watchdog.pid").await;
+pub async fn remote_start_watchdog(
+    pool: State<'_, SshConnectionPool>,
+    host_id: String,
+) -> Result<bool, String> {
+    let pid_raw = pool
+        .sftp_read(&host_id, "~/.clawpal/watchdog/watchdog.pid")
+        .await;
     if let Ok(pid_str) = pid_raw {
-        let cmd = format!("kill -0 {} 2>/dev/null && echo alive || echo dead", pid_str.trim());
+        let cmd = format!(
+            "kill -0 {} 2>/dev/null && echo alive || echo dead",
+            pid_str.trim()
+        );
         if let Ok(r) = pool.exec(&host_id, &cmd).await {
             if r.stdout.trim() == "alive" {
                 return Ok(true);
@@ -9399,21 +10141,37 @@ pub async fn remote_start_watchdog(pool: State<'_, SshConnectionPool>, host_id: 
 }
 
 #[tauri::command]
-pub async fn remote_stop_watchdog(pool: State<'_, SshConnectionPool>, host_id: String) -> Result<bool, String> {
-    let pid_raw = pool.sftp_read(&host_id, "~/.clawpal/watchdog/watchdog.pid").await;
+pub async fn remote_stop_watchdog(
+    pool: State<'_, SshConnectionPool>,
+    host_id: String,
+) -> Result<bool, String> {
+    let pid_raw = pool
+        .sftp_read(&host_id, "~/.clawpal/watchdog/watchdog.pid")
+        .await;
     if let Ok(pid_str) = pid_raw {
-        let _ = pool.exec(&host_id, &format!("kill {} 2>/dev/null", pid_str.trim())).await;
+        let _ = pool
+            .exec(&host_id, &format!("kill {} 2>/dev/null", pid_str.trim()))
+            .await;
     }
-    let _ = pool.exec(&host_id, "rm -f ~/.clawpal/watchdog/watchdog.pid").await;
+    let _ = pool
+        .exec(&host_id, "rm -f ~/.clawpal/watchdog/watchdog.pid")
+        .await;
     Ok(true)
 }
 
 #[tauri::command]
-pub async fn remote_uninstall_watchdog(pool: State<'_, SshConnectionPool>, host_id: String) -> Result<bool, String> {
+pub async fn remote_uninstall_watchdog(
+    pool: State<'_, SshConnectionPool>,
+    host_id: String,
+) -> Result<bool, String> {
     // Stop first
-    let pid_raw = pool.sftp_read(&host_id, "~/.clawpal/watchdog/watchdog.pid").await;
+    let pid_raw = pool
+        .sftp_read(&host_id, "~/.clawpal/watchdog/watchdog.pid")
+        .await;
     if let Ok(pid_str) = pid_raw {
-        let _ = pool.exec(&host_id, &format!("kill {} 2>/dev/null", pid_str.trim())).await;
+        let _ = pool
+            .exec(&host_id, &format!("kill {} 2>/dev/null", pid_str.trim()))
+            .await;
     }
     // Remove entire directory
     let _ = pool.exec(&host_id, "rm -rf ~/.clawpal/watchdog").await;

@@ -1,4 +1,5 @@
 use clap::{Parser, Subcommand};
+use clawpal_core::instance::InstanceRegistry;
 use serde_json::json;
 
 #[derive(Parser, Debug)]
@@ -77,13 +78,34 @@ enum ProfileCommands {
 
 fn main() {
     let cli = Cli::parse();
-    let command = format!("{:?}", cli.command);
-    println!(
-        "{}",
-        json!({
+    let result = match cli.command {
+        Commands::Instance { command } => run_instance_command(command),
+        command => Ok(json!({
             "status": "not yet implemented",
-            "command": command,
-        })
-    );
+            "command": format!("{command:?}"),
+        })),
+    };
+
+    match result {
+        Ok(value) => println!("{value}"),
+        Err(message) => {
+            println!("{}", json!({ "error": message }));
+            std::process::exit(1);
+        }
+    }
 }
 
+fn run_instance_command(command: InstanceCommands) -> Result<serde_json::Value, String> {
+    match command {
+        InstanceCommands::List => {
+            let registry = InstanceRegistry::load().map_err(|e| e.to_string())?;
+            Ok(json!(registry.list()))
+        }
+        InstanceCommands::Remove { id } => {
+            let mut registry = InstanceRegistry::load().map_err(|e| e.to_string())?;
+            let removed = registry.remove(&id).is_some();
+            registry.save().map_err(|e| e.to_string())?;
+            Ok(json!({ "removed": removed, "id": id }))
+        }
+    }
+}
