@@ -16,7 +16,7 @@ import {
 import { InstanceCard } from "@/components/InstanceCard";
 import { InstallHub } from "@/components/InstallHub";
 import { api } from "@/lib/api";
-import type { DockerInstance, SshHost, InstallSession } from "@/lib/types";
+import type { DockerInstance, SshHost, InstallSession, InstanceStatus } from "@/lib/types";
 
 interface StartPageProps {
   dockerInstances: DockerInstance[];
@@ -75,10 +75,11 @@ export function StartPage({
   const [sshDeleteOpen, setSshDeleteOpen] = useState(false);
   const [deletingHost, setDeletingHost] = useState<SshHost | null>(null);
 
-  // Health polling — only poll local instance for now
+  // Health polling — local + connected SSH instances
   useEffect(() => {
     let cancelled = false;
     const poll = async () => {
+      // Poll local instance
       try {
         const status = await api.getInstanceStatus();
         if (!cancelled) {
@@ -95,6 +96,42 @@ export function StartPage({
           }));
         }
       }
+
+      // Docker instances share local runtime — mark them healthy based on local status
+      for (const d of dockerInstances) {
+        if (cancelled) break;
+        // Docker instances are always "connected" locally, so just copy local health
+        // In the future this could be per-docker health check
+        setHealthMap((prev) => ({
+          ...prev,
+          [d.id]: prev.local || { healthy: null, agentCount: 0 },
+        }));
+      }
+
+      // Poll connected SSH instances
+      for (const h of sshHosts) {
+        if (cancelled) break;
+        if (connectionStatus[h.id] !== "connected") {
+          // Not connected — mark as offline (healthMap stays null)
+          continue;
+        }
+        try {
+          const status = await api.remoteGetInstanceStatus(h.id);
+          if (!cancelled) {
+            setHealthMap((prev) => ({
+              ...prev,
+              [h.id]: { healthy: status.healthy, agentCount: status.activeAgents },
+            }));
+          }
+        } catch {
+          if (!cancelled) {
+            setHealthMap((prev) => ({
+              ...prev,
+              [h.id]: { healthy: null, agentCount: 0 },
+            }));
+          }
+        }
+      }
     };
     poll();
     const timer = setInterval(poll, 30_000);
@@ -102,7 +139,7 @@ export function StartPage({
       cancelled = true;
       clearInterval(timer);
     };
-  }, []);
+  }, [dockerInstances, sshHosts, connectionStatus]);
 
   // Build unified instances list
   const instances = [
@@ -187,7 +224,9 @@ export function StartPage({
               agentCount={health?.agentCount ?? 0}
               opened={openTabIds.has(inst.id)}
               connectionStatus={
-                inst.type === "ssh" ? connectionStatus[inst.id] : undefined
+                inst.type === "local" ? "connected"
+                  : inst.type === "docker" ? "connected"
+                  : connectionStatus[inst.id]
               }
               onClick={() => onOpenInstance(inst.id)}
               onRename={

@@ -766,6 +766,7 @@ export function App() {
             <Settings
               key="global-profiles"
               globalMode
+              section="profiles"
               onDataChange={bumpConfigVersion}
             />
           )}
@@ -773,6 +774,7 @@ export function App() {
             <Settings
               key="global-settings"
               globalMode
+              section="preferences"
               onDataChange={bumpConfigVersion}
               hasAppUpdate={appUpdateAvailable}
               onAppUpdateSeen={() => setAppUpdateAvailable(false)}
