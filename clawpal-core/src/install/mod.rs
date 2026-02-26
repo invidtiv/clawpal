@@ -56,7 +56,7 @@ pub fn install_docker(options: DockerInstallOptions) -> Result<InstallResult> {
     let home = options
         .home
         .clone()
-        .unwrap_or_else(|| "~/.openclaw".to_string());
+        .unwrap_or_else(|| "~/.clawpal/docker-local".to_string());
     let instance_id = "docker:local".to_string();
     let label = options.label.unwrap_or_else(|| "Docker Local".to_string());
 

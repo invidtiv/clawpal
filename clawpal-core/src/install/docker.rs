@@ -1,48 +1,121 @@
+use std::path::PathBuf;
+
 use crate::install::{DockerInstallOptions, InstallError, Result, StepResult};
 
 pub fn pull(options: &DockerInstallOptions) -> Result<StepResult> {
-    run_step(
-        "docker_pull",
+    if options.dry_run {
+        return Ok(StepResult {
+            step: "docker_pull".to_string(),
+            ok: true,
+            detail: "dry-run: docker compose pull".to_string(),
+        });
+    }
+
+    ensure_command_exists("docker")?;
+    ensure_command_exists("git")?;
+
+    let repo = ensure_repo_checkout()?;
+    let state_dir = openclaw_state_dir(options);
+    run_bash(
         "docker compose pull",
-        options.dry_run || command_exists("docker"),
-        options.dry_run,
+        Some(&repo),
+        compose_env(&state_dir),
+        "docker_pull",
     )
 }
 
 pub fn configure(options: &DockerInstallOptions) -> Result<StepResult> {
-    run_step(
+    let state_dir = openclaw_state_dir(options);
+    if options.dry_run {
+        return Ok(StepResult {
+            step: "docker_configure".to_string(),
+            ok: true,
+            detail: format!("dry-run: prepare {state_dir}"),
+        });
+    }
+
+    run_bash(
+        &format!(
+            "mkdir -p \"{state}\" \"{state}/workspace\" && [ -f \"{state}/openclaw.json\" ] || printf '{{}}' > \"{state}/openclaw.json\"",
+            state = state_dir
+        ),
+        None,
+        Vec::new(),
         "docker_configure",
-        "write docker env/config",
-        true,
-        options.dry_run,
     )
 }
 
 pub fn up(options: &DockerInstallOptions) -> Result<StepResult> {
-    run_step(
-        "docker_up",
+    if options.dry_run {
+        return Ok(StepResult {
+            step: "docker_up".to_string(),
+            ok: true,
+            detail: "dry-run: docker compose up -d".to_string(),
+        });
+    }
+
+    ensure_command_exists("docker")?;
+    let repo = ensure_repo_checkout()?;
+    let state_dir = openclaw_state_dir(options);
+    run_bash(
         "docker compose up -d",
-        options.dry_run || command_exists("docker"),
-        options.dry_run,
+        Some(&repo),
+        compose_env(&state_dir),
+        "docker_up",
     )
 }
 
-fn run_step(step: &str, detail: &str, ok: bool, dry_run: bool) -> Result<StepResult> {
-    if dry_run {
-        return Ok(StepResult {
-            step: step.to_string(),
-            ok: true,
-            detail: format!("dry-run: {detail}"),
-        });
+fn run_bash(
+    command: &str,
+    cwd: Option<&PathBuf>,
+    envs: Vec<(&'static str, String)>,
+    step: &str,
+) -> Result<StepResult> {
+    let mut cmd = std::process::Command::new("bash");
+    cmd.args(["-lc", command]);
+    if let Some(dir) = cwd {
+        cmd.current_dir(dir);
     }
-    if !ok {
-        return Err(InstallError::Step(format!("{step} failed: {detail}")));
+    for (key, value) in envs {
+        cmd.env(key, value);
     }
+
+    let output = cmd
+        .output()
+        .map_err(|e| InstallError::Step(format!("{step} failed: {e}")))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let detail = if stderr.is_empty() { stdout } else { stderr };
+        return Err(InstallError::Step(format!(
+            "{step} failed (code {:?}): {detail}",
+            output.status.code()
+        )));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let detail = if stdout.is_empty() {
+        command.to_string()
+    } else {
+        stdout
+    };
+
     Ok(StepResult {
         step: step.to_string(),
         ok: true,
-        detail: detail.to_string(),
+        detail,
     })
+}
+
+fn ensure_command_exists(name: &str) -> Result<()> {
+    if command_exists(name) {
+        Ok(())
+    } else {
+        Err(InstallError::Step(format!(
+            "required command not found in PATH: {name}"
+        )))
+    }
 }
 
 fn command_exists(name: &str) -> bool {
@@ -51,6 +124,60 @@ fn command_exists(name: &str) -> bool {
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
+}
+
+fn repo_dir() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    PathBuf::from(home)
+        .join(".clawpal")
+        .join("install")
+        .join("openclaw-docker")
+}
+
+fn ensure_repo_checkout() -> Result<PathBuf> {
+    let repo = repo_dir();
+    if repo.join(".git").exists() {
+        return Ok(repo);
+    }
+
+    if let Some(parent) = repo.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            InstallError::Step(format!("failed to create {}: {e}", parent.display()))
+        })?;
+    }
+
+    let command = format!(
+        "if [ -d \"{repo}\"/.git ]; then echo 'repo exists'; else git clone https://github.com/openclaw/openclaw.git \"{repo}\"; fi",
+        repo = repo.to_string_lossy()
+    );
+    run_bash(&command, None, Vec::new(), "docker_pull")?;
+    Ok(repo)
+}
+
+fn openclaw_home(options: &DockerInstallOptions) -> String {
+    options
+        .home
+        .as_ref()
+        .map(|v| shellexpand::tilde(v).to_string())
+        .unwrap_or_else(|| {
+            let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+            format!("{home}/.clawpal/docker-local")
+        })
+}
+
+fn openclaw_state_dir(options: &DockerInstallOptions) -> String {
+    format!("{}/.openclaw", openclaw_home(options))
+}
+
+fn compose_env(state_dir: &str) -> Vec<(&'static str, String)> {
+    vec![
+        ("OPENCLAW_CONFIG_DIR", state_dir.to_string()),
+        ("OPENCLAW_WORKSPACE_DIR", format!("{state_dir}/workspace")),
+        ("OPENCLAW_GATEWAY_TOKEN", "clawpal-install".to_string()),
+        ("CLAUDE_AI_SESSION_KEY", "dummy".to_string()),
+        ("CLAUDE_WEB_SESSION_KEY", "dummy".to_string()),
+        ("CLAUDE_WEB_COOKIE", "dummy".to_string()),
+    ]
 }
 
 #[cfg(test)]

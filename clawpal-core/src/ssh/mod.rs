@@ -28,6 +28,8 @@ pub enum SshError {
     Spawn(#[from] std::io::Error),
     #[error("invalid host config: {0}")]
     InvalidConfig(String),
+    #[error("remote command failed: {0}")]
+    CommandFailed(String),
 }
 
 pub type Result<T> = std::result::Result<T, SshError>;
@@ -57,27 +59,46 @@ impl SshSession {
 
     pub async fn sftp_read(&self, path: &str) -> Result<Vec<u8>> {
         let escaped = shell_escape(path);
-        let result = self.exec(&format!("cat {escaped}")).await?;
-        Ok(result.stdout.into_bytes())
+        let command = format!("cat {escaped}");
+        let output = self.run_ssh(&[command.as_str()]).await?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            return Err(SshError::CommandFailed(format!(
+                "cat {path} exited with code {:?}: {stderr}",
+                output.status.code()
+            )));
+        }
+        Ok(output.stdout)
     }
 
     pub async fn sftp_write(&self, path: &str, content: &[u8]) -> Result<()> {
         let escaped = shell_escape(path);
         let command = format!("mkdir -p \"$(dirname {escaped})\" && cat > {escaped}");
-        let destination = format!("{}@{}", self.config.username, self.config.host);
+        let destination = if self.config.username.trim().is_empty() {
+            self.config.host.clone()
+        } else {
+            format!("{}@{}", self.config.username, self.config.host)
+        };
 
         let mut child = Command::new("ssh")
             .args(self.common_ssh_args())
             .arg(destination)
             .arg(command)
             .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
             .spawn()?;
         if let Some(mut stdin) = child.stdin.take() {
             stdin.write_all(content).await?;
         }
-        let _ = child.wait().await?;
+        let output = child.wait_with_output().await?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            return Err(SshError::CommandFailed(format!(
+                "write {path} exited with code {:?}: {stderr}",
+                output.status.code()
+            )));
+        }
         Ok(())
     }
 

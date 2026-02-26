@@ -7,6 +7,7 @@ use clawpal_core::openclaw::OpenclawCli;
 use clawpal_core::profile::{
     delete_profile, list_profiles, test_profile, upsert_profile, ModelProfile,
 };
+use clawpal_core::ssh::SshSession;
 use serde_json::json;
 
 #[derive(Parser, Debug)]
@@ -138,10 +139,7 @@ fn main() {
         Commands::Install { command } => run_install_command(command),
         Commands::Connect { command } => run_connect_command(command),
         Commands::Profile { command } => run_profile_command(command),
-        command => Ok(json!({
-            "status": "not yet implemented",
-            "command": format!("{command:?}"),
-        })),
+        Commands::Ssh { command } => run_ssh_command(command),
     };
 
     match result {
@@ -321,5 +319,50 @@ fn run_instance_command(command: InstanceCommands) -> Result<serde_json::Value, 
             registry.save().map_err(|e| e.to_string())?;
             Ok(json!({ "removed": removed, "id": id }))
         }
+    }
+}
+
+fn run_ssh_command(command: SshCommands) -> Result<serde_json::Value, String> {
+    match command {
+        SshCommands::List => {
+            let hosts = clawpal_core::ssh::registry::list_ssh_hosts().map_err(|e| e.to_string())?;
+            Ok(json!(hosts))
+        }
+        SshCommands::Connect { host_id } => {
+            let registry = InstanceRegistry::load().map_err(|e| e.to_string())?;
+            let instance = registry
+                .get(&host_id)
+                .cloned()
+                .ok_or_else(|| format!("instance '{host_id}' not found"))?;
+            let host = instance
+                .ssh_host_config
+                .ok_or_else(|| format!("instance '{host_id}' is not an SSH instance"))?;
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|e| e.to_string())?;
+            let result = runtime.block_on(async {
+                let session = SshSession::connect(&host)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let output = session
+                    .exec("echo connected")
+                    .await
+                    .map_err(|e| e.to_string())?;
+                Ok::<_, String>(output)
+            })?;
+            Ok(json!({
+                "hostId": host_id,
+                "connected": result.exit_code == 0,
+                "stdout": result.stdout,
+                "stderr": result.stderr,
+                "exitCode": result.exit_code,
+            }))
+        }
+        SshCommands::Disconnect { host_id } => Ok(json!({
+            "hostId": host_id,
+            "disconnected": true,
+            "note": "stateless ssh mode has no persistent session",
+        })),
     }
 }
