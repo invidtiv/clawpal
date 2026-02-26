@@ -16,7 +16,7 @@ import {
 import { InstanceCard } from "@/components/InstanceCard";
 import { InstallHub } from "@/components/InstallHub";
 import { api } from "@/lib/api";
-import type { DockerInstance, SshHost, InstallSession, InstanceStatus } from "@/lib/types";
+import type { DockerInstance, SshHost, InstallSession } from "@/lib/types";
 
 interface StartPageProps {
   dockerInstances: DockerInstance[];
@@ -75,62 +75,39 @@ export function StartPage({
   const [sshDeleteOpen, setSshDeleteOpen] = useState(false);
   const [deletingHost, setDeletingHost] = useState<SshHost | null>(null);
 
-  // Health polling — local + connected SSH instances
+  // Health polling — local, Docker (mirrors local), and connected SSH
   useEffect(() => {
     let cancelled = false;
     const poll = async () => {
+      const updates: Record<string, { healthy: boolean | null; agentCount: number }> = {};
+
       // Poll local instance
       try {
         const status = await api.getInstanceStatus();
-        if (!cancelled) {
-          setHealthMap((prev) => ({
-            ...prev,
-            local: { healthy: status.healthy, agentCount: status.activeAgents },
-          }));
-        }
+        updates.local = { healthy: status.healthy, agentCount: status.activeAgents };
       } catch {
-        if (!cancelled) {
-          setHealthMap((prev) => ({
-            ...prev,
-            local: { healthy: null, agentCount: 0 },
-          }));
-        }
+        updates.local = { healthy: null, agentCount: 0 };
       }
 
-      // Docker instances share local runtime — mark them healthy based on local status
+      // Docker instances share the local host runtime — mirror local health
       for (const d of dockerInstances) {
-        if (cancelled) break;
-        // Docker instances are always "connected" locally, so just copy local health
-        // In the future this could be per-docker health check
-        setHealthMap((prev) => ({
-          ...prev,
-          [d.id]: prev.local || { healthy: null, agentCount: 0 },
-        }));
+        updates[d.id] = { ...updates.local };
       }
 
       // Poll connected SSH instances
       for (const h of sshHosts) {
         if (cancelled) break;
-        if (connectionStatus[h.id] !== "connected") {
-          // Not connected — mark as offline (healthMap stays null)
-          continue;
-        }
+        if (connectionStatus[h.id] !== "connected") continue;
         try {
           const status = await api.remoteGetInstanceStatus(h.id);
-          if (!cancelled) {
-            setHealthMap((prev) => ({
-              ...prev,
-              [h.id]: { healthy: status.healthy, agentCount: status.activeAgents },
-            }));
-          }
+          updates[h.id] = { healthy: status.healthy, agentCount: status.activeAgents };
         } catch {
-          if (!cancelled) {
-            setHealthMap((prev) => ({
-              ...prev,
-              [h.id]: { healthy: null, agentCount: 0 },
-            }));
-          }
+          updates[h.id] = { healthy: null, agentCount: 0 };
         }
+      }
+
+      if (!cancelled) {
+        setHealthMap((prev) => ({ ...prev, ...updates }));
       }
     };
     poll();

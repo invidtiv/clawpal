@@ -63,7 +63,7 @@ export function InstanceTabBar({
               )}
               onClick={() => onSelect(tab.id)}
             >
-              {statusDot(tab.type === "local" ? "connected" : connectionStatus[tab.id])}
+              {statusDot(tab.type === "local" || tab.type === "docker" ? "connected" : connectionStatus[tab.id])}
               {tab.label}
             </button>
             <button
