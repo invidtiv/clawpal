@@ -11,6 +11,8 @@ type ApiReadCacheEntry = {
 
 const API_READ_CACHE = new Map<string, ApiReadCacheEntry>();
 const API_READ_CACHE_MAX_ENTRIES = 512;
+const AGENT_GUIDANCE_THROTTLE = new Map<string, number>();
+const AGENT_GUIDANCE_THROTTLE_TTL_MS = 90_000;
 
 function makeCacheKey(instanceCacheKey: string, method: string, args: unknown[]): string {
   let serializedArgs = "";
@@ -105,6 +107,34 @@ function shouldLogRemoteInvokeMetric(ok: boolean, elapsedMs: number): boolean {
   return Math.random() < 0.05;
 }
 
+function normalizeErrorSignature(raw: string): string {
+  return raw
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .replace(/\d{2,}/g, "#")
+    .trim()
+    .slice(0, 220);
+}
+
+function shouldEmitAgentGuidance(instanceId: string, operation: string, errorText: string): boolean {
+  const signature = `${instanceId}::${operation}::${normalizeErrorSignature(errorText)}`;
+  const now = Date.now();
+  const lastAt = AGENT_GUIDANCE_THROTTLE.get(signature) || 0;
+  if (now - lastAt < AGENT_GUIDANCE_THROTTLE_TTL_MS) {
+    return false;
+  }
+  AGENT_GUIDANCE_THROTTLE.set(signature, now);
+  // Keep the map bounded.
+  if (AGENT_GUIDANCE_THROTTLE.size > 256) {
+    for (const [key, ts] of AGENT_GUIDANCE_THROTTLE.entries()) {
+      if (now - ts > AGENT_GUIDANCE_THROTTLE_TTL_MS * 3) {
+        AGENT_GUIDANCE_THROTTLE.delete(key);
+      }
+    }
+  }
+  return true;
+}
+
 /**
  * Returns a unified API object that auto-dispatches to local or remote
  * based on the current instance context. Remote calls automatically
@@ -114,6 +144,40 @@ export function useApi() {
   const { instanceId, instanceToken, isRemote, isDocker, isConnected, discordGuildChannels } = useInstance();
   const instanceCacheKey = `${instanceId}#${instanceToken}`;
   const globalCacheKey = "__global__";
+  const transport: "local" | "docker_local" | "remote_ssh" = isRemote
+    ? "remote_ssh"
+    : (isDocker ? "docker_local" : "local");
+
+  const explainAndWrapError = useCallback(
+    async (method: string | undefined, rawError: unknown) => {
+      const original = String(rawError);
+      try {
+        const explained = await api.explainOperationError(
+          instanceId,
+          method || "unknown",
+          transport,
+          original,
+          typeof navigator !== "undefined" ? navigator.language : "en",
+        );
+        if (typeof window !== "undefined" && shouldEmitAgentGuidance(instanceId, method || "unknown", original)) {
+          window.dispatchEvent(new CustomEvent("clawpal:agent-guidance", {
+            detail: {
+              ...explained,
+              operation: method || "unknown",
+              instanceId,
+              transport,
+              rawError: original,
+              createdAt: Date.now(),
+            },
+          }));
+        }
+        return new Error(explained.message || original);
+      } catch {
+        return new Error(original);
+      }
+    },
+    [instanceId, transport],
+  );
 
   const dispatch = useCallback(
     <TArgs extends unknown[], TResult>(
@@ -143,7 +207,7 @@ export function useApi() {
               }
               return result;
             })
-            .catch((error) => {
+            .catch(async (error) => {
               const elapsedMs = Date.now() - startedAt;
               if (shouldLogRemoteInvokeMetric(false, elapsedMs)) {
               emitRemoteInvokeMetric({
@@ -155,16 +219,20 @@ export function useApi() {
                 error: String(error),
               });
               }
-              throw error;
+              throw await explainAndWrapError(method, error);
             });
         }
         if (isDocker) {
-          return localFn(...args);
+          return localFn(...args).catch(async (error) => {
+            throw await explainAndWrapError(method, error);
+          });
         }
-        return localFn(...args);
+        return localFn(...args).catch(async (error) => {
+          throw await explainAndWrapError(method, error);
+        });
       };
     },
-    [instanceId, isRemote, isDocker, isConnected],
+    [instanceId, isRemote, isDocker, isConnected, explainAndWrapError],
   );
 
   const dispatchCached = useCallback(
@@ -529,6 +597,7 @@ export function useApi() {
       ),
       getSystemStatus: api.getSystemStatus,
       listRecipes: localCached("listRecipes", 20_000, api.listRecipes),
+      connectDockerInstance: api.connectDockerInstance,
       listInstallMethods: localCached(
         "installListMethods",
         20_000,

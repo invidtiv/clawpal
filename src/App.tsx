@@ -54,6 +54,18 @@ interface ToastItem {
   type: "success" | "error";
 }
 
+interface AgentGuidanceItem {
+  message: string;
+  summary: string;
+  actions: string[];
+  source: string;
+  operation: string;
+  instanceId: string;
+  transport: string;
+  rawError: string;
+  createdAt: number;
+}
+
 let toastIdCounter = 0;
 
 const SSH_ERROR_MAP: Array<[RegExp, string]> = [
@@ -66,7 +78,7 @@ const SSH_ERROR_MAP: Array<[RegExp, string]> = [
 ];
 
 const SSH_PASSPHRASE_RETRY_HINT =
-  /permission denied|publickey|passphrase|sign_and_send_pubkey|agent refused operation|can't open \/dev\/tty|authentication agent/i;
+  /passphrase|sign_and_send_pubkey|agent refused operation|can't open \/dev\/tty|authentication agent|key is encrypted/i;
 
 function friendlySshError(raw: string, t: (key: string, opts?: Record<string, string>) => string): string {
   for (const [pattern, key] of SSH_ERROR_MAP) {
@@ -147,7 +159,7 @@ export function App() {
   const [recipeSource, setRecipeSource] = useState<string | undefined>(undefined);
   const [discordGuildChannels, setDiscordGuildChannels] = useState<DiscordGuildChannel[]>([]);
   const [chatOpen, setChatOpen] = useState(false);
-  const [lastInstanceRoute, setLastInstanceRoute] = useState<Route>("channels");
+  const [lastInstanceRoute, setLastInstanceRoute] = useState<Route>("home");
   const [startSection, setStartSection] = useState<"overview" | "profiles" | "settings">("overview");
   const [inStart, setInStart] = useState(true);
 
@@ -191,24 +203,28 @@ export function App() {
         seen.add(id);
         normalized.push(normalizeDockerInstance({ ...item, id }));
       }
-      const checked = await Promise.all(
-        normalized.map(async (item) => {
-          try {
-            const exists = await api.localOpenclawConfigExists(item.openclawHome || "");
-            return exists ? item : null;
-          } catch {
-            // If probe fails unexpectedly, keep the tab instead of hiding it.
-            return item;
-          }
-        }),
-      );
-      const next = checked.filter((item): item is DockerInstance => item !== null);
-      localStorage.setItem(DOCKER_INSTANCES_KEY, JSON.stringify(next));
-      setDockerInstances(next);
+      // Optimistic update first to keep startup / tab transitions responsive.
+      setDockerInstances(normalized);
       setActiveInstance((prev) => {
         if (!prev.startsWith("docker:")) return prev;
-        return next.some((item) => item.id === prev) ? prev : "local";
+        return normalized.some((item) => item.id === prev) ? prev : "local";
       });
+      // Validate in background; prune stale entries later.
+      void (async () => {
+        const checked = await Promise.all(
+          normalized.map(async (item) => {
+            try {
+              const exists = await api.localOpenclawConfigExists(item.openclawHome || "");
+              return exists ? item : null;
+            } catch {
+              return item;
+            }
+          }),
+        );
+        const next = checked.filter((item): item is DockerInstance => item !== null);
+        localStorage.setItem(DOCKER_INSTANCES_KEY, JSON.stringify(next));
+        setDockerInstances(next);
+      })();
     } catch {
       setDockerInstances([]);
       setActiveInstance((prev) => (prev.startsWith("docker:") ? "local" : prev));
@@ -301,6 +317,8 @@ export function App() {
   }, []);
 
   const [toasts, setToasts] = useState<ToastItem[]>([]);
+  const [agentGuidanceByInstance, setAgentGuidanceByInstance] = useState<Record<string, AgentGuidanceItem>>({});
+  const [agentGuidanceOpen, setAgentGuidanceOpen] = useState(false);
   const sshHealthFailStreakRef = useRef<Record<string, number>>({});
   const legacyMigrationDoneRef = useRef(false);
   const passphraseResolveRef = useRef<((value: string | null) => void) | null>(null);
@@ -322,6 +340,29 @@ export function App() {
       setToasts((prev) => prev.filter((t) => t.id !== id));
     }, type === "error" ? 5000 : 3000);
   }, []);
+
+  useEffect(() => {
+    const onGuidance = (event: Event) => {
+      const custom = event as CustomEvent<AgentGuidanceItem>;
+      if (!custom.detail) return;
+      setAgentGuidanceByInstance((prev) => ({
+        ...prev,
+        [custom.detail.instanceId]: custom.detail,
+      }));
+      setAgentGuidanceOpen(true);
+    };
+    window.addEventListener("clawpal:agent-guidance", onGuidance as EventListener);
+    return () => {
+      window.removeEventListener("clawpal:agent-guidance", onGuidance as EventListener);
+    };
+  }, []);
+
+  const agentGuidance = agentGuidanceByInstance[activeInstance] || null;
+  useEffect(() => {
+    if (!agentGuidance) {
+      setAgentGuidanceOpen(false);
+    }
+  }, [activeInstance, agentGuidance]);
 
   const resolveInstanceTransport = useCallback((instanceId: string) => {
     if (instanceId === "local") return "local";
@@ -445,15 +486,6 @@ export function App() {
 
   const connectWithPassphraseFallback = useCallback(async (hostId: string) => {
     const host = sshHosts.find((h) => h.id === hostId);
-    if (host && host.authMethod === "key") {
-      const passphrase = await requestPassphrase(host.label || host.host);
-      if (passphrase === null) {
-        throw new Error(t("ssh.passphraseCancelled"));
-      }
-      await api.sshConnectWithPassphrase(hostId, passphrase);
-      return;
-    }
-
     try {
       await api.sshConnect(hostId);
       return;
@@ -468,15 +500,16 @@ export function App() {
       }
       throw err;
     }
-  }, [requestPassphrase, sshHosts, t]);
+  }, [requestPassphrase, sshHosts]);
 
 
   const openTab = useCallback((id: string) => {
     setOpenTabIds((prev) => prev.includes(id) ? prev : [...prev, id]);
     setActiveInstance(id);
     setInStart(false);
-    setRoute(lastInstanceRoute);
-  }, [lastInstanceRoute]);
+    // Entering instance mode from Start should prefer a fast route.
+    setRoute("home");
+  }, []);
 
   const closeTab = useCallback((id: string) => {
     setOpenTabIds((prev) => {
@@ -500,14 +533,11 @@ export function App() {
     setActiveInstance(id);
     setOpenTabIds((prev) => prev.includes(id) ? prev : [...prev, id]);
     setInStart(false);
-    if (inStart) {
-      setRoute(lastInstanceRoute);
-    }
+    // Always land on Home when switching instance to avoid route-specific
+    // heavy reloads (e.g., Channels) on the critical interaction path.
+    setRoute("home");
     const transport = resolveInstanceTransport(id);
-    if (transport !== "remote_ssh") {
-      scheduleEnsureAccessForInstance(id);
-      return;
-    }
+    if (transport !== "remote_ssh") return;
     // Check if backend still has a live connection before reconnecting.
     // Do not pre-mark as disconnected — transient status failures would
     // otherwise gray out the whole remote UI.
@@ -538,7 +568,7 @@ export function App() {
             showToast(friendly, "error");
           });
       });
-  }, [activeInstance, inStart, lastInstanceRoute, resolveInstanceTransport, scheduleEnsureAccessForInstance, connectWithPassphraseFallback, showToast, t]);
+  }, [activeInstance, resolveInstanceTransport, scheduleEnsureAccessForInstance, connectWithPassphraseFallback, showToast, t]);
 
   const [configVersion, setConfigVersion] = useState(0);
   const [instanceToken, setInstanceToken] = useState(0);
@@ -577,7 +607,11 @@ export function App() {
         ]);
       }
     };
-    void applyOverrides();
+    // Defer bridge calls so tab switch paint is not on the same critical frame.
+    const timer = setTimeout(() => {
+      void applyOverrides();
+    }, 120);
+    return () => clearTimeout(timer);
   }, [activeInstance, isDocker, isRemote, dockerInstances]);
 
   // Keep active remote instance self-healed: detect dropped SSH and reconnect.
@@ -672,9 +706,12 @@ export function App() {
         }
       }).catch(() => setHasEscalatedCron(false));
     };
-    check();
+    const initial = setTimeout(check, 500);
     const interval = setInterval(check, 30000);
-    return () => clearInterval(interval);
+    return () => {
+      clearTimeout(initial);
+      clearInterval(interval);
+    };
   }, [activeInstance, isRemote]);
 
   const bumpConfigVersion = useCallback(() => {
@@ -719,8 +756,8 @@ export function App() {
 
   // Handle install completion — register docker instance and open tab
   const handleInstallReady = useCallback((session: InstallSession) => {
+    const artifacts = session.artifacts || {};
     if (session.method === "docker") {
-      const artifacts = session.artifacts || {};
       const artifactId = typeof artifacts.docker_instance_id === "string"
         ? artifacts.docker_instance_id.trim()
         : "";
@@ -737,6 +774,15 @@ export function App() {
         : deriveDockerLabel(id);
       upsertDockerInstance({ id, label, openclawHome, clawpalDataDir });
       openTab(id);
+    } else if (session.method === "remote_ssh") {
+      const hostId = typeof artifacts.ssh_host_id === "string"
+        ? artifacts.ssh_host_id.trim()
+        : "";
+      if (hostId) {
+        openTab(hostId);
+      } else {
+        openTab("local");
+      }
     } else {
       // For local/SSH installs, just switch to the instance
       openTab("local");
@@ -1024,6 +1070,65 @@ export function App() {
             </button>
           </div>
         ))}
+      </div>
+    )}
+
+    {agentGuidance && (
+      <div className="fixed bottom-5 right-5 z-[60] flex flex-col items-end gap-2">
+        {agentGuidanceOpen && (
+          <div className="w-[420px] max-w-[calc(100vw-2rem)] rounded-xl border border-border bg-card shadow-xl p-4 space-y-3">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <div className="text-sm font-semibold">小龙虾建议</div>
+                <div className="text-xs text-muted-foreground">
+                  {(openTabs.find((tab) => tab.id === agentGuidance.instanceId)?.label
+                    || fallbackInstanceLabel(agentGuidance.instanceId, t))} · {agentGuidance.operation}
+                </div>
+              </div>
+              <Button
+                variant="ghost"
+                size="icon-xs"
+                onClick={() => setAgentGuidanceOpen(false)}
+              >
+                <XIcon className="size-4" />
+              </Button>
+            </div>
+            <p className="text-sm leading-relaxed">{agentGuidance.summary || agentGuidance.message}</p>
+            {agentGuidance.actions.length > 0 && (
+              <ol className="text-sm space-y-1.5 list-decimal pl-5">
+                {agentGuidance.actions.map((action, idx) => (
+                  <li key={`${idx}-${action}`}>{action}</li>
+                ))}
+              </ol>
+            )}
+            <div className="flex items-center gap-2 pt-1">
+              <Button
+                size="sm"
+                onClick={() => {
+                  setInStart(false);
+                  setRoute("doctor");
+                }}
+              >
+                打开 Doctor
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => setAgentGuidanceOpen(false)}
+              >
+                稍后处理
+              </Button>
+            </div>
+          </div>
+        )}
+        <Button
+          className="rounded-full shadow-md"
+          size="sm"
+          variant={agentGuidanceOpen ? "secondary" : "default"}
+          onClick={() => setAgentGuidanceOpen((v) => !v)}
+        >
+          小龙虾
+        </Button>
       </div>
     )}
 

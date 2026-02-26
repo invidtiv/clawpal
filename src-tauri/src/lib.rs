@@ -5,9 +5,10 @@ use crate::cli_runner::{
     remote_queue_command, remote_queued_commands_count, remote_remove_queued_command,
     remove_queued_command, CliCache, CommandQueue, RemoteCommandQueues,
 };
+use crate::agent_fallback::explain_operation_error;
 use crate::commands::{
     analyze_sessions, apply_config_patch, backup_before_upgrade, chat_via_openclaw,
-    check_openclaw_update, clear_all_sessions, create_agent, delete_agent, delete_backup,
+    check_openclaw_update, clear_all_sessions, connect_docker_instance, create_agent, delete_agent, delete_backup,
     delete_cron_job, delete_local_instance_home, delete_model_profile, delete_sessions_by_ids,
     delete_ssh_host, deploy_watchdog, diagnose_primary_via_rescue, ensure_access_profile,
     extract_model_profiles_from_config, fix_issues, get_cached_model_catalog, get_cron_runs,
@@ -58,6 +59,7 @@ use crate::node_client::NodeClient;
 use crate::ssh::SshConnectionPool;
 
 pub mod access_discovery;
+pub mod agent_fallback;
 pub mod bridge_client;
 pub mod cli_runner;
 pub mod commands;
@@ -72,6 +74,7 @@ pub mod logging;
 pub mod models;
 pub mod node_client;
 pub mod path_fix;
+pub mod prompt_templates;
 pub mod recipe;
 pub mod runtime;
 pub mod ssh;
@@ -95,9 +98,11 @@ pub fn run() {
             install_run_step,
             set_active_openclaw_home,
             set_active_clawpal_data_dir,
+            explain_operation_error,
             local_openclaw_config_exists,
             delete_local_instance_home,
             list_registered_instances,
+            connect_docker_instance,
             migrate_legacy_instances,
             ensure_access_profile,
             record_install_experience,

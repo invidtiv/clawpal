@@ -96,11 +96,19 @@ pub async fn run_openclaw_remote_with_env(
 
     if let Some(env_vars) = env {
         for (k, v) in env_vars {
-            cmd_str.push_str(&format!("{}='{}' ", k, v.replace('\'', "'\\''")));
+            cmd_str.push_str(&format!(
+                "export {}='{}'; ",
+                k,
+                v.replace('\'', "'\\''")
+            ));
         }
     }
 
-    cmd_str.push_str("openclaw");
+    cmd_str.push_str(
+        "if command -v openclaw >/dev/null 2>&1; then OPENCLAW_BIN='openclaw'; \
+         else echo 'openclaw command not found' >&2; exit 127; fi; \
+         \"$OPENCLAW_BIN\"",
+    );
     for arg in args {
         cmd_str.push_str(&format!(" '{}'", arg.replace('\'', "'\\''")));
     }

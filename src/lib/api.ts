@@ -6,6 +6,20 @@ export const api = {
     invoke("set_active_openclaw_home", { path }),
   setActiveClawpalDataDir: (path: string | null): Promise<boolean> =>
     invoke("set_active_clawpal_data_dir", { path }),
+  explainOperationError: (
+    instanceId: string,
+    operation: string,
+    transport: "local" | "docker_local" | "remote_ssh",
+    error: string,
+    language?: string,
+  ): Promise<{ message: string; summary: string; actions: string[]; source: string }> =>
+    invoke("explain_operation_error", {
+      instanceId,
+      operation,
+      transport,
+      error,
+      language: language ?? null,
+    }),
   localOpenclawConfigExists: (openclawHome: string): Promise<boolean> =>
     invoke("local_openclaw_config_exists", { openclawHome }),
   deleteLocalInstanceHome: (openclawHome: string): Promise<boolean> =>
@@ -33,6 +47,11 @@ export const api = {
     invoke("get_system_status", {}),
   listRegisteredInstances: (): Promise<RegisteredInstance[]> =>
     invoke("list_registered_instances", {}),
+  connectDockerInstance: (
+    home: string,
+    label?: string,
+  ): Promise<RegisteredInstance> =>
+    invoke("connect_docker_instance", { home, label: label ?? null }),
   migrateLegacyInstances: (
     legacyDockerInstances: DockerInstance[],
     legacyOpenTabIds: string[],

@@ -66,28 +66,15 @@ impl ZeroclawDoctorAdapter {
         } else {
             "Target is a non-local instance selected in ClawPal."
         };
-        let target_id_line = format!("Target instance id: {}", key.instance_id);
-        [
-            "DOCTOR DOMAIN ONLY.",
-            "You are ClawPal Doctor assistant.",
-            "Identity rule: you are Doctor Claw (engine), not the target host.",
-            "If user asks who/where you are, include both engine and target instance id.",
-            "Do NOT infer transport type from instance name pattern.",
-            "Use the provided context to decide whether target is local/docker/remote.",
-            "Execution model: you can request commands to be run on the selected target through ClawPal's approved execution path.",
-            "If command execution is needed, output ONLY JSON:",
-            "{\"tool\":\"clawpal\",\"args\":\"<subcommand>\",\"reason\":\"<why>\"}",
-            "{\"tool\":\"openclaw\",\"args\":\"<subcommand>\",\"instance\":\"<optional instance id>\",\"reason\":\"<why>\"}",
-            "Do NOT claim you cannot access remote host due to missing SSH in your environment.",
-            "Do NOT ask user to run commands manually when diagnosis requires commands.",
-            "Do NOT output install/orchestrator JSON such as {\"step\":..., \"reason\":...}.",
-            "Always answer in plain natural language with diagnosis and next actions.",
-            target_line,
-            &target_id_line,
-            "",
-            message,
-        ]
-        .join("\n")
+        let template = crate::prompt_templates::doctor_domain_system();
+        crate::prompt_templates::render_template(
+            &template,
+            &[
+                ("{{target_line}}", target_line),
+                ("{{instance_id}}", key.instance_id.as_str()),
+                ("{{message}}", message),
+            ],
+        )
     }
 
     fn normalize_doctor_output(raw: String) -> String {

@@ -112,6 +112,7 @@ pub async fn doctor_send_message(
 #[tauri::command]
 pub async fn doctor_approve_invoke(
     app: AppHandle,
+    pool: State<'_, SshConnectionPool>,
     invoke_id: String,
     target: String,
     session_key: String,
@@ -128,8 +129,8 @@ pub async fn doctor_approve_invoke(
     // (write → "Execute" button, read → "Allow" button).
     // User approval is the security boundary, not command validation.
     let result = match command {
-        "clawpal" => run_clawpal_tool(&args).await?,
-        "openclaw" => run_openclaw_tool(&args, &target).await?,
+        "clawpal" => run_clawpal_tool(&pool, &args, &target).await?,
+        "openclaw" => run_openclaw_tool(&pool, &args, &target).await?,
         _ => {
             return Err(format!(
                 "unsupported tool '{command}', expected 'clawpal' or 'openclaw'"
@@ -350,7 +351,150 @@ fn validate_not_sensitive(path: &str) -> Result<(), String> {
     Ok(())
 }
 
-async fn run_clawpal_tool(args: &Value) -> Result<Value, String> {
+fn target_is_remote_instance(target: &str) -> bool {
+    if target.starts_with("ssh:") {
+        return true;
+    }
+    if target == "local" || target.starts_with("docker:") {
+        return false;
+    }
+    if let Ok(registry) = clawpal_core::instance::InstanceRegistry::load() {
+        if let Some(instance) = registry.get(target) {
+            return matches!(
+                instance.instance_type,
+                clawpal_core::instance::InstanceType::RemoteSsh
+            );
+        }
+    }
+    false
+}
+
+async fn probe_openclaw_on_target(pool: &SshConnectionPool, target: &str) -> Result<Value, String> {
+    if target_is_remote_instance(target) {
+        let which = pool
+            .exec_login(target, "command -v openclaw 2>/dev/null || true")
+            .await
+            .map_err(|e| format!("probe which failed: {e}"))?;
+        let version = pool
+            .exec_login(target, "openclaw --version 2>/dev/null || true")
+            .await
+            .map_err(|e| format!("probe version failed: {e}"))?;
+        let path_env = pool
+            .exec_login(target, "printf '%s' \"$PATH\"")
+            .await
+            .map_err(|e| format!("probe PATH failed: {e}"))?;
+        let located = which.stdout.trim().to_string();
+        return Ok(json!({
+            "target": target,
+            "remote": true,
+            "openclawPath": if located.is_empty() { Value::Null } else { Value::String(located.clone()) },
+            "openclawVersion": version.stdout.trim(),
+            "path": path_env.stdout.trim(),
+            "ok": !located.is_empty(),
+        }));
+    }
+
+    let which = std::process::Command::new("sh")
+        .arg("-lc")
+        .arg("command -v openclaw 2>/dev/null || true")
+        .output()
+        .map_err(|e| format!("probe which failed: {e}"))?;
+    let version = clawpal_core::openclaw::OpenclawCli::new()
+        .run(&["--version"])
+        .map(|o| o.stdout.trim().to_string())
+        .unwrap_or_default();
+    let path = std::env::var("PATH").unwrap_or_default();
+    let located = String::from_utf8_lossy(&which.stdout).trim().to_string();
+    Ok(json!({
+        "target": target,
+        "remote": false,
+        "openclawPath": if located.is_empty() { Value::Null } else { Value::String(located.clone()) },
+        "openclawVersion": version,
+        "path": path,
+        "ok": !located.is_empty(),
+    }))
+}
+
+async fn fix_openclaw_path_on_target(pool: &SshConnectionPool, target: &str) -> Result<Value, String> {
+    if !target_is_remote_instance(target) {
+        return Err("doctor fix-openclaw-path currently supports remote target only".to_string());
+    }
+    let find_dir = pool.exec_login(
+        target,
+        "for d in \"$HOME/.npm-global/bin\" \"/opt/homebrew/bin\" \"/usr/local/bin\"; do [ -x \"$d/openclaw\" ] && echo \"$d\" && break; done",
+    ).await?;
+    let dir = find_dir.stdout.trim().to_string();
+    if dir.is_empty() {
+        return Err("cannot locate openclaw binary in known directories".to_string());
+    }
+    let escaped_dir = dir.replace('\'', "'\\''");
+    let patch_script = format!(
+        "line='export PATH=\"{escaped_dir}:$PATH\"'; \
+for f in \"$HOME/.zshrc\" \"$HOME/.bashrc\"; do \
+  touch \"$f\"; \
+  grep -Fq \"$line\" \"$f\" || printf '\\n%s\\n' \"$line\" >> \"$f\"; \
+done; \
+command -v openclaw 2>/dev/null || true"
+    );
+    let apply = pool.exec_login(target, &patch_script).await?;
+    let located = apply.stdout.trim().to_string();
+    Ok(json!({
+        "target": target,
+        "updatedPathDir": dir,
+        "openclawPathAfterFix": if located.is_empty() { Value::Null } else { Value::String(located.clone()) },
+        "ok": !located.is_empty(),
+    }))
+}
+
+#[derive(Default)]
+struct ParsedCliArgs {
+    positionals: Vec<String>,
+    options: HashMap<String, Option<String>>,
+}
+
+fn parse_cli_args(tokens: &[&str]) -> ParsedCliArgs {
+    let mut parsed = ParsedCliArgs::default();
+    let mut index = 0usize;
+    while index < tokens.len() {
+        let token = tokens[index];
+        if !token.starts_with("--") || token == "--" {
+            parsed.positionals.push(token.to_string());
+            index += 1;
+            continue;
+        }
+        let key = token.trim_start_matches("--").to_string();
+        if index + 1 < tokens.len() && !tokens[index + 1].starts_with("--") {
+            parsed
+                .options
+                .insert(key, Some(tokens[index + 1].to_string()));
+            index += 2;
+        } else {
+            parsed.options.insert(key, None);
+            index += 1;
+        }
+    }
+    parsed
+}
+
+fn tool_stdout_json(value: Value) -> Result<Value, String> {
+    let stdout =
+        serde_json::to_string(&value).map_err(|e| format!("failed to serialize tool output: {e}"))?;
+    Ok(json!({
+        "stdout": stdout,
+        "stderr": "",
+        "exitCode": 0
+    }))
+}
+
+fn parse_tool_tokens(raw: &str) -> Result<Vec<String>, String> {
+    shell_words::split(raw).map_err(|e| format!("invalid command args: {e}"))
+}
+
+async fn run_clawpal_tool(
+    pool: &SshConnectionPool,
+    args: &Value,
+    target: &str,
+) -> Result<Value, String> {
     let raw = args
         .get("args")
         .and_then(|v| v.as_str())
@@ -359,85 +503,303 @@ async fn run_clawpal_tool(args: &Value) -> Result<Value, String> {
     if raw.is_empty() {
         return Err("clawpal: missing args".to_string());
     }
-    if raw == "instance list" {
-        let registry =
-            clawpal_core::instance::InstanceRegistry::load().map_err(|e| e.to_string())?;
-        return Ok(json!({
-            "stdout": serde_json::to_string(&registry.list()).unwrap_or_else(|_| "[]".to_string()),
-            "stderr": "",
-            "exitCode": 0
-        }));
+    let tokens = parse_tool_tokens(raw)?;
+    let token_refs: Vec<&str> = tokens.iter().map(String::as_str).collect();
+    if tokens.is_empty() {
+        return Err("clawpal: missing args".to_string());
     }
-    if raw == "ssh list" {
-        let hosts = clawpal_core::ssh::registry::list_ssh_hosts().map_err(|e| e.to_string())?;
-        return Ok(json!({
-            "stdout": serde_json::to_string(&hosts).unwrap_or_else(|_| "[]".to_string()),
-            "stderr": "",
-            "exitCode": 0
-        }));
+
+    if token_refs.as_slice() == ["doctor", "probe-openclaw"] {
+        let probed = probe_openclaw_on_target(pool, target).await?;
+        return tool_stdout_json(probed);
     }
-    if raw == "profile list" {
-        let openclaw = clawpal_core::openclaw::OpenclawCli::new();
-        let profiles =
-            clawpal_core::profile::list_profiles(&openclaw).map_err(|e| e.to_string())?;
-        return Ok(json!({
-            "stdout": serde_json::to_string(&profiles).unwrap_or_else(|_| "[]".to_string()),
-            "stderr": "",
-            "exitCode": 0
-        }));
+    if token_refs.as_slice() == ["doctor", "fix-openclaw-path"] {
+        let fixed = fix_openclaw_path_on_target(pool, target).await?;
+        return tool_stdout_json(fixed);
     }
-    if raw.starts_with("health check") {
-        let openclaw = clawpal_core::openclaw::OpenclawCli::new();
-        let registry =
-            clawpal_core::instance::InstanceRegistry::load().map_err(|e| e.to_string())?;
-        if raw.contains("--all") {
-            let mut output = Vec::new();
-            for instance in registry.list() {
-                let status =
-                    clawpal_core::health::check_instance(&instance).map_err(|e| e.to_string())?;
-                output.push(json!({"id": instance.id, "status": status}));
-            }
-            return Ok(json!({
-                "stdout": serde_json::to_string(&output).unwrap_or_else(|_| "[]".to_string()),
-                "stderr": "",
-                "exitCode": 0
-            }));
+
+    match (token_refs.first().copied(), token_refs.get(1).copied()) {
+        (Some("instance"), Some("list")) => {
+            let registry =
+                clawpal_core::instance::InstanceRegistry::load().map_err(|e| e.to_string())?;
+            tool_stdout_json(json!(registry.list()))
         }
-        let target_id = raw
-            .split_whitespace()
-            .nth(2)
-            .filter(|v| !v.is_empty() && *v != "check")
-            .unwrap_or("local");
-        let instance = if target_id == "local" {
-            clawpal_core::instance::Instance {
-                id: "local".to_string(),
-                instance_type: clawpal_core::instance::InstanceType::Local,
-                label: "Local".to_string(),
-                openclaw_home: None,
-                clawpal_data_dir: None,
-                ssh_host_config: None,
+        (Some("instance"), Some("remove")) => {
+            let id = token_refs
+                .get(2)
+                .ok_or_else(|| "clawpal instance remove requires <id>".to_string())?;
+            let mut registry =
+                clawpal_core::instance::InstanceRegistry::load().map_err(|e| e.to_string())?;
+            let removed = registry.remove(id).is_some();
+            registry.save().map_err(|e| e.to_string())?;
+            tool_stdout_json(json!({ "removed": removed, "id": id }))
+        }
+        (Some("health"), Some("check")) => {
+            let parsed = parse_cli_args(&token_refs[2..]);
+            let registry =
+                clawpal_core::instance::InstanceRegistry::load().map_err(|e| e.to_string())?;
+            if parsed.options.contains_key("all") {
+                let mut output = Vec::new();
+                for instance in registry.list() {
+                    let status =
+                        clawpal_core::health::check_instance(&instance).map_err(|e| e.to_string())?;
+                    output.push(json!({ "id": instance.id, "status": status }));
+                }
+                return tool_stdout_json(Value::Array(output));
             }
-        } else {
-            registry
-                .get(target_id)
+            let target_id = parsed
+                .positionals
+                .first()
+                .map(String::as_str)
+                .unwrap_or("local");
+            let instance = if target_id == "local" {
+                clawpal_core::instance::Instance {
+                    id: "local".to_string(),
+                    instance_type: clawpal_core::instance::InstanceType::Local,
+                    label: "Local".to_string(),
+                    openclaw_home: None,
+                    clawpal_data_dir: None,
+                    ssh_host_config: None,
+                }
+            } else {
+                registry
+                    .get(target_id)
+                    .cloned()
+                    .ok_or_else(|| format!("instance '{target_id}' not found"))?
+            };
+            let status = clawpal_core::health::check_instance(&instance).map_err(|e| e.to_string())?;
+            tool_stdout_json(json!({ "id": instance.id, "status": status }))
+        }
+        (Some("ssh"), Some("list")) => {
+            let hosts = clawpal_core::ssh::registry::list_ssh_hosts().map_err(|e| e.to_string())?;
+            tool_stdout_json(json!(hosts))
+        }
+        (Some("ssh"), Some("connect")) => {
+            let host_id = token_refs
+                .get(2)
+                .ok_or_else(|| "clawpal ssh connect requires <host_id>".to_string())?;
+            let registry =
+                clawpal_core::instance::InstanceRegistry::load().map_err(|e| e.to_string())?;
+            let instance = registry
+                .get(host_id)
                 .cloned()
-                .ok_or_else(|| format!("instance '{target_id}' not found"))?
-        };
-        let status = clawpal_core::health::check_instance(&instance).map_err(|e| e.to_string())?;
-        let _ = openclaw; // keeps symmetry with CLI execution context
-        return Ok(json!({
-            "stdout": serde_json::to_string(&json!({"id": instance.id, "status": status})).unwrap_or_else(|_| "{}".to_string()),
-            "stderr": "",
-            "exitCode": 0
-        }));
+                .ok_or_else(|| format!("instance '{host_id}' not found"))?;
+            let host = instance
+                .ssh_host_config
+                .ok_or_else(|| format!("instance '{host_id}' is not an SSH instance"))?;
+            let session = clawpal_core::ssh::SshSession::connect(&host)
+                .await
+                .map_err(|e| e.to_string())?;
+            let output = session
+                .exec("echo connected")
+                .await
+                .map_err(|e| e.to_string())?;
+            tool_stdout_json(json!({
+                "hostId": host_id,
+                "connected": output.exit_code == 0,
+                "stdout": output.stdout,
+                "stderr": output.stderr,
+                "exitCode": output.exit_code,
+            }))
+        }
+        (Some("ssh"), Some("disconnect")) => {
+            let host_id = token_refs
+                .get(2)
+                .ok_or_else(|| "clawpal ssh disconnect requires <host_id>".to_string())?;
+            tool_stdout_json(json!({
+                "hostId": host_id,
+                "disconnected": true,
+                "note": "stateless ssh mode has no persistent session",
+            }))
+        }
+        (Some("profile"), Some("list")) => {
+            let openclaw = clawpal_core::openclaw::OpenclawCli::new();
+            let profiles =
+                clawpal_core::profile::list_profiles(&openclaw).map_err(|e| e.to_string())?;
+            tool_stdout_json(json!(profiles))
+        }
+        (Some("profile"), Some("remove")) => {
+            let id = token_refs
+                .get(2)
+                .ok_or_else(|| "clawpal profile remove requires <id>".to_string())?;
+            let openclaw = clawpal_core::openclaw::OpenclawCli::new();
+            let removed = clawpal_core::profile::delete_profile(&openclaw, id)
+                .map_err(|e| e.to_string())?;
+            tool_stdout_json(json!({ "removed": removed, "id": id }))
+        }
+        (Some("profile"), Some("test")) => {
+            let id = token_refs
+                .get(2)
+                .ok_or_else(|| "clawpal profile test requires <id>".to_string())?;
+            let openclaw = clawpal_core::openclaw::OpenclawCli::new();
+            let result =
+                clawpal_core::profile::test_profile(&openclaw, id).map_err(|e| e.to_string())?;
+            tool_stdout_json(json!(result))
+        }
+        (Some("profile"), Some("add")) => {
+            let parsed = parse_cli_args(&token_refs[2..]);
+            let provider = parsed
+                .options
+                .get("provider")
+                .and_then(|v| v.as_ref())
+                .cloned()
+                .ok_or_else(|| "clawpal profile add requires --provider".to_string())?;
+            let model = parsed
+                .options
+                .get("model")
+                .and_then(|v| v.as_ref())
+                .cloned()
+                .ok_or_else(|| "clawpal profile add requires --model".to_string())?;
+            let profile = clawpal_core::profile::ModelProfile {
+                id: String::new(),
+                name: parsed
+                    .options
+                    .get("name")
+                    .and_then(|v| v.as_ref())
+                    .cloned()
+                    .unwrap_or_default(),
+                provider,
+                model,
+                auth_ref: String::new(),
+                api_key: parsed
+                    .options
+                    .get("api_key")
+                    .or_else(|| parsed.options.get("api-key"))
+                    .and_then(|v| v.as_ref())
+                    .cloned(),
+                base_url: None,
+                description: None,
+                enabled: true,
+            };
+            let openclaw = clawpal_core::openclaw::OpenclawCli::new();
+            let saved =
+                clawpal_core::profile::upsert_profile(&openclaw, profile).map_err(|e| e.to_string())?;
+            tool_stdout_json(json!(saved))
+        }
+        (Some("connect"), Some("docker")) => {
+            let parsed = parse_cli_args(&token_refs[2..]);
+            let home = parsed
+                .options
+                .get("home")
+                .and_then(|v| v.as_ref())
+                .cloned()
+                .ok_or_else(|| "clawpal connect docker requires --home".to_string())?;
+            let label = parsed
+                .options
+                .get("label")
+                .and_then(|v| v.as_ref())
+                .map(String::as_str);
+            let instance = clawpal_core::connect::connect_docker(&home, label)
+                .await
+                .map_err(|e| e.to_string())?;
+            tool_stdout_json(json!(instance))
+        }
+        (Some("connect"), Some("ssh")) => {
+            let parsed = parse_cli_args(&token_refs[2..]);
+            let host = parsed
+                .options
+                .get("host")
+                .and_then(|v| v.as_ref())
+                .cloned()
+                .ok_or_else(|| "clawpal connect ssh requires --host".to_string())?;
+            let port = parsed
+                .options
+                .get("port")
+                .and_then(|v| v.as_ref())
+                .and_then(|v| v.parse::<u16>().ok())
+                .unwrap_or(22);
+            let username = parsed
+                .options
+                .get("user")
+                .and_then(|v| v.as_ref())
+                .cloned()
+                .unwrap_or_else(|| "root".to_string());
+            let id = parsed
+                .options
+                .get("id")
+                .and_then(|v| v.as_ref())
+                .cloned()
+                .unwrap_or_else(|| format!("ssh:{host}"));
+            let label = parsed
+                .options
+                .get("label")
+                .and_then(|v| v.as_ref())
+                .cloned()
+                .unwrap_or_else(|| host.clone());
+            let key_path = parsed
+                .options
+                .get("key_path")
+                .or_else(|| parsed.options.get("key-path"))
+                .and_then(|v| v.as_ref())
+                .cloned();
+            let config = clawpal_core::instance::SshHostConfig {
+                id,
+                label,
+                host,
+                port,
+                username,
+                auth_method: "key".to_string(),
+                key_path,
+                password: None,
+            };
+            let instance = clawpal_core::connect::connect_ssh(config)
+                .await
+                .map_err(|e| e.to_string())?;
+            tool_stdout_json(json!(instance))
+        }
+        (Some("install"), Some("local")) => {
+            let result = clawpal_core::install::install_local(
+                clawpal_core::install::LocalInstallOptions::default(),
+            )
+            .map_err(|e| e.to_string())?;
+            tool_stdout_json(json!(result))
+        }
+        (Some("install"), Some("docker")) => {
+            let parsed = parse_cli_args(&token_refs[2..]);
+            let subcommand = parsed.positionals.first().map(String::as_str);
+            let options = clawpal_core::install::DockerInstallOptions {
+                home: parsed
+                    .options
+                    .get("home")
+                    .and_then(|v| v.as_ref())
+                    .cloned(),
+                label: parsed
+                    .options
+                    .get("label")
+                    .and_then(|v| v.as_ref())
+                    .cloned(),
+                dry_run: parsed.options.contains_key("dry-run"),
+            };
+            let result = match subcommand {
+                Some("pull") => clawpal_core::install::docker::pull(&options)
+                    .map(|v| json!(v))
+                    .map_err(|e| e.to_string())?,
+                Some("configure") => clawpal_core::install::docker::configure(&options)
+                    .map(|v| json!(v))
+                    .map_err(|e| e.to_string())?,
+                Some("up") => clawpal_core::install::docker::up(&options)
+                    .map(|v| json!(v))
+                    .map_err(|e| e.to_string())?,
+                None => clawpal_core::install::install_docker(options)
+                    .map(|v| json!(v))
+                    .map_err(|e| e.to_string())?,
+                Some(other) => {
+                    return Err(format!(
+                        "unsupported clawpal install docker subcommand: {other}"
+                    ))
+                }
+            };
+            tool_stdout_json(result)
+        }
+        _ => Err(format!("unsupported clawpal args: {raw}")),
     }
-    Err(format!("unsupported clawpal args: {raw}"))
 }
 
-async fn run_openclaw_tool(args: &Value, target: &str) -> Result<Value, String> {
-    if target != "local" {
-        return Err("openclaw tool currently supports local target only".to_string());
-    }
+async fn run_openclaw_tool(
+    pool: &SshConnectionPool,
+    args: &Value,
+    target: &str,
+) -> Result<Value, String> {
     let raw = args
         .get("args")
         .and_then(|v| v.as_str())
@@ -446,13 +808,62 @@ async fn run_openclaw_tool(args: &Value, target: &str) -> Result<Value, String> 
     if raw.is_empty() {
         return Err("openclaw: missing args".to_string());
     }
-    let parts: Vec<&str> = raw.split_whitespace().collect();
-    let output = clawpal_core::openclaw::OpenclawCli::new()
-        .run(&parts)
-        .map_err(|e| e.to_string())?;
+    let tokens = parse_tool_tokens(raw)?;
+    let parts: Vec<&str> = tokens.iter().map(String::as_str).collect();
+    let output = if target_is_remote_instance(target) {
+        crate::cli_runner::run_openclaw_remote(pool, target, &parts).await?
+    } else {
+        clawpal_core::openclaw::OpenclawCli::new()
+            .run(&parts)
+            .map_err(|e| e.to_string())?
+    };
     Ok(json!({
         "stdout": output.stdout,
         "stderr": output.stderr,
         "exitCode": output.exit_code,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_tool_tokens_keeps_quoted_values() {
+        let tokens = parse_tool_tokens(
+            "profile add --provider openai --model gpt-4.1 --name \"My Profile\" --api-key \"sk test\"",
+        )
+        .expect("parse tokens");
+        assert_eq!(
+            tokens,
+            vec![
+                "profile",
+                "add",
+                "--provider",
+                "openai",
+                "--model",
+                "gpt-4.1",
+                "--name",
+                "My Profile",
+                "--api-key",
+                "sk test"
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_cli_args_supports_space_containing_option_values() {
+        let tokens = parse_tool_tokens("connect docker --home \"/tmp/a b\" --label \"Docker Local\"")
+            .expect("parse tokens");
+        let token_refs: Vec<&str> = tokens.iter().map(String::as_str).collect();
+        let parsed = parse_cli_args(&token_refs[2..]);
+        assert_eq!(
+            parsed.options.get("home").and_then(|v| v.as_deref()),
+            Some("/tmp/a b")
+        );
+        assert_eq!(
+            parsed.options.get("label").and_then(|v| v.as_deref()),
+            Some("Docker Local")
+        );
+    }
 }

@@ -14,6 +14,8 @@ import {
 import { AgentMessageBubble } from "@/components/AgentMessageBubble";
 import { SshFormWidget } from "@/components/SshFormWidget";
 import { useDoctorAgent } from "@/lib/use-doctor-agent";
+import { api } from "@/lib/api";
+import { installHubFallbackPromptTemplate, renderPromptTemplate } from "@/lib/prompt-templates";
 import type { DoctorChatMessage, InstallMethod, InstallSession, SshHost } from "@/lib/types";
 import i18n from "../i18n";
 
@@ -114,23 +116,11 @@ const PRESET_TAGS = [
 ];
 
 function buildInstallPrompt(userIntent: string): string {
-  const lang = i18n.language?.startsWith("zh") ? "Chinese (简体中文)" : "English";
-  return [
-    `Respond in ${lang}. Keep replies to 1-2 sentences max.`,
-    "",
-    "INSTALL KNOWLEDGE:",
-    "- Docker: Use the official OpenClaw docker-compose.yml from the openclaw repo.",
-    "- Local: Use the official install script.",
-    "- Auto-generate ALL tokens, secrets, and config values. NEVER ask the user for tokens.",
-    "- Use sensible defaults for all paths (e.g. ~/.openclaw).",
-    "",
-    "VERIFICATION (MANDATORY):",
-    "- NEVER claim installation succeeded without verifying via commands.",
-    "- After install, you MUST check: container logs (docker logs), service health (curl), process status (docker ps).",
-    "- If a container is in a restart loop or crashed, report the actual error.",
-    "",
-    `User intent: ${userIntent}`,
-  ].join("\n");
+  const language = i18n.language?.startsWith("zh") ? "Chinese (简体中文)" : "English";
+  return renderPromptTemplate(installHubFallbackPromptTemplate(), {
+    "{{LANGUAGE}}": language,
+    "{{USER_INTENT}}": userIntent,
+  });
 }
 
 export function InstallHub({
@@ -150,8 +140,12 @@ export function InstallHub({
   const agent = useDoctorAgent();
   const [input, setInput] = useState("");
   const [sessionStarted, setSessionStarted] = useState(false);
-  const [mode, setMode] = useState<"idle" | "chat" | "connect">("idle");
+  const [mode, setMode] = useState<"idle" | "running" | "failed" | "chat" | "connect">("idle");
   const [installMethod, setInstallMethod] = useState<InstallMethod>("local");
+  const [runLogs, setRunLogs] = useState<string[]>([]);
+  const [runError, setRunError] = useState<string | null>(null);
+  const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
+  const [connectSubmitting, setConnectSubmitting] = useState(false);
   // Connect-existing form state
   const [connectPath, setConnectPath] = useState("~/.clawpal/docker-local");
   const [connectLabel, setConnectLabel] = useState("");
@@ -175,11 +169,96 @@ export function InstallHub({
       setInput("");
       setMode("idle");
       setInstallMethod("local");
+      setRunLogs([]);
+      setRunError(null);
+      setActiveSessionId(null);
+      setConnectSubmitting(false);
       setConnectPath("~/.clawpal/docker-local");
       setConnectLabel("");
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
+
+  const startDeterministicInstall = useCallback(async (
+    method: InstallMethod,
+    goal: string,
+    options?: Record<string, unknown>,
+  ) => {
+    if (!onReady) return;
+    setInstallMethod(method);
+    setMode("running");
+    setRunLogs([]);
+    setRunError(null);
+    try {
+      const session = await api.installCreateSession(method, options);
+      setActiveSessionId(session.id);
+      const logs: string[] = [`[session] ${session.id}`];
+      let latest = session;
+      for (let round = 0; round < 12; round++) {
+        const decision = await api.installOrchestratorNext(latest.id, goal);
+        if (!decision.step) {
+          latest = await api.installGetSession(latest.id);
+          if (latest.state === "ready") {
+            setRunLogs((prev) => [...prev, ...logs, "[done] ready"]);
+            onReady(latest);
+            return;
+          }
+          throw new Error(decision.reason || "Install halted with no next step");
+        }
+        logs.push(`[${decision.step}] ${decision.reason}`);
+        setRunLogs((prev) => [...prev, `[${decision.step}] ${decision.reason}`]);
+        const result = await api.installRunStep(
+          latest.id,
+          decision.step as "precheck" | "install" | "init" | "verify",
+        );
+        logs.push(result.summary);
+        setRunLogs((prev) => [...prev, result.summary]);
+        latest = await api.installGetSession(latest.id);
+        if (!result.ok) {
+          throw new Error(result.details || result.summary || "Install step failed");
+        }
+        if (latest.state === "ready") {
+          setRunLogs((prev) => [...prev, "[done] ready"]);
+          onReady(latest);
+          return;
+        }
+      }
+      throw new Error("Install did not converge within expected steps");
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      setRunError(message);
+      setMode("failed");
+    }
+  }, [onReady]);
+
+  const startDeterministicFromTarget = useCallback(async (goal: string) => {
+    try {
+      const decision = await api.installDecideTarget(goal);
+      const method = decision.method;
+      if (method === "docker" || method === "local") {
+        await startDeterministicInstall(method, goal);
+        return;
+      }
+      if (method === "remote_ssh") {
+        const hosts = await api.listSshHosts();
+        if (hosts.length === 1) {
+          await startDeterministicInstall("remote_ssh", goal, {
+            ssh_host_id: hosts[0].id,
+          });
+          return;
+        }
+        if (hosts.length === 0) {
+          throw new Error("No SSH host configured. Add one in Instances first.");
+        }
+        throw new Error("Multiple SSH hosts found. Choose one in Instances first.");
+      }
+      throw new Error(decision.reason || "No deterministic install target available");
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      setRunError(message);
+      setMode("failed");
+    }
+  }, [startDeterministicInstall]);
 
   // Start agent session with the user's first message baked into the system prompt
   const startSession = useCallback((userIntent: string) => {
@@ -206,17 +285,27 @@ export function InstallHub({
 
   const handleTagClick = useCallback((tagKey: string, tagLabel: string) => {
     if (agent.loading) return;
-    // Derive install method from the tag key
-    if (tagKey === "docker") setInstallMethod("docker");
-    else if (tagKey === "ssh") setInstallMethod("remote_ssh");
-    else setInstallMethod("local");
-    setMode("chat");
-    if (!sessionStarted) {
-      startSession(tagLabel);
-    } else {
-      agent.sendMessage(tagLabel);
+    if (tagKey === "connect") {
+      setMode("connect");
+      return;
     }
-  }, [agent, sessionStarted, startSession]);
+    if (tagKey === "docker") {
+      void startDeterministicInstall("docker", tagLabel);
+      return;
+    }
+    if (tagKey === "local") {
+      void startDeterministicInstall("local", tagLabel);
+      return;
+    }
+    if (tagKey === "ssh" || tagKey === "digitalocean") {
+      void startDeterministicFromTarget(tagLabel);
+      return;
+    }
+    setInstallMethod("remote_ssh");
+    setMode("chat");
+    if (!sessionStarted) startSession(tagLabel);
+    else agent.sendMessage(tagLabel);
+  }, [agent, sessionStarted, startSession, startDeterministicInstall, startDeterministicFromTarget]);
 
   // A2UI: intercept render_form tool-calls + parse text-based choices from assistant messages
   const extraRenderer = useCallback((msg: DoctorChatMessage) => {
@@ -342,24 +431,40 @@ export function InstallHub({
   }, [onReady, installMethod]);
 
   // Connect-existing submit handler
-  const handleConnectSubmit = useCallback(() => {
+  const handleConnectSubmit = useCallback(async () => {
     if (!onReady || !connectPath.trim()) return;
-    const now = new Date().toISOString();
-    onReady({
-      id: `install-${Date.now()}`,
-      method: "docker",
-      state: "ready",
-      current_step: null,
-      logs: [],
-      artifacts: {
-        docker_openclaw_home: connectPath.trim(),
-        docker_clawpal_data_dir: `${connectPath.trim()}/data`,
-        ...(connectLabel.trim() ? { docker_label: connectLabel.trim() } : {}),
-      },
-      created_at: now,
-      updated_at: now,
-    });
-  }, [onReady, connectPath, connectLabel]);
+    setConnectSubmitting(true);
+    setRunError(null);
+    try {
+      const connected = await api.connectDockerInstance(
+        connectPath.trim(),
+        connectLabel.trim() || undefined,
+      );
+      const openclawHome = connected.openclawHome || connectPath.trim();
+      const now = new Date().toISOString();
+      onReady({
+        id: `install-${Date.now()}`,
+        method: "docker",
+        state: "ready",
+        current_step: null,
+        logs: [],
+        artifacts: {
+          docker_instance_id: connected.id,
+          docker_instance_label: connected.label,
+          docker_openclaw_home: openclawHome,
+          docker_clawpal_data_dir: connected.clawpalDataDir || `${openclawHome}/data`,
+        },
+        created_at: now,
+        updated_at: now,
+      });
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      setRunError(message);
+      showToast?.(message, "error");
+    } finally {
+      setConnectSubmitting(false);
+    }
+  }, [onReady, connectPath, connectLabel, showToast]);
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -402,6 +507,33 @@ export function InstallHub({
                 placeholder={t("installChat.connectLabelPlaceholder")}
               />
             </div>
+            {runError && (
+              <div className="text-sm text-destructive border border-destructive/30 rounded-md px-3 py-2 bg-destructive/5">
+                {runError}
+              </div>
+            )}
+          </div>
+        ) : mode === "running" || mode === "failed" ? (
+          <div className="space-y-3">
+            <div className="text-sm text-muted-foreground">
+              {mode === "running" ? t("installChat.connecting") : t("doctor.failed")}
+            </div>
+            <div className="border rounded-md p-3 bg-muted/30 max-h-[40vh] overflow-y-auto">
+              <div className="space-y-1 text-xs font-mono">
+                {activeSessionId && <div>session: {activeSessionId}</div>}
+                {runLogs.length === 0 && (
+                  <div className="animate-pulse text-muted-foreground">running…</div>
+                )}
+                {runLogs.map((line, idx) => (
+                  <div key={`${idx}-${line.slice(0, 16)}`}>{line}</div>
+                ))}
+              </div>
+            </div>
+            {runError && (
+              <div className="text-sm text-destructive border border-destructive/30 rounded-md px-3 py-2 bg-destructive/5">
+                {runError}
+              </div>
+            )}
           </div>
         ) : (
           <>
@@ -422,7 +554,7 @@ export function InstallHub({
                 <button
                   type="button"
                   className="text-sm px-3 py-1.5 rounded-full border cursor-pointer hover:bg-muted/60 hover:border-primary/40 transition-colors"
-                  onClick={() => setMode("connect")}
+                  onClick={() => handleTagClick("connect", t("installChat.tag.connect"))}
                 >
                   {t("installChat.tag.connect")}
                 </button>
@@ -502,7 +634,7 @@ export function InstallHub({
             <Button variant="outline" onClick={() => setMode("idle")}>
               {t("installChat.cancel")}
             </Button>
-            <Button onClick={handleConnectSubmit} disabled={!connectPath.trim()}>
+            <Button onClick={handleConnectSubmit} disabled={!connectPath.trim() || connectSubmitting}>
               {t("installChat.connectSubmit")}
             </Button>
           </DialogFooter>
@@ -511,6 +643,25 @@ export function InstallHub({
           <DialogFooter>
             <Button onClick={handleDone}>
               {t("installChat.done")}
+            </Button>
+          </DialogFooter>
+        )}
+        {mode === "failed" && (
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setMode("idle")}>
+              {t("installChat.cancel")}
+            </Button>
+            <Button
+              onClick={() => {
+                setMode("chat");
+                const fallbackIntent = runError
+                  ? `Install failed: ${runError}`
+                  : "Install failed";
+                startSession(fallbackIntent);
+              }}
+              disabled={!agent.bridgeConnected || agent.loading}
+            >
+              Let AI help
             </Button>
           </DialogFooter>
         )}

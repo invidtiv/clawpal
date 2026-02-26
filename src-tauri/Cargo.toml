@@ -25,6 +25,7 @@ tokio = { version = "1", features = ["sync", "process", "macros"] }
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
 futures-util = "0.3"
 shellexpand = "3.1"
+shell-words = "1.1"
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
 fix-path-env = { git = "https://github.com/tauri-apps/fix-path-env-rs" }

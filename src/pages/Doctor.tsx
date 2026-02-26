@@ -527,12 +527,13 @@ export function Doctor() {
     ua.listBackups().then(setBackups).catch((e) => console.error("Failed to load backups:", e));
   }, [ua]);
   useEffect(refreshBackups, [refreshBackups]);
+  const showLegacyRecoveryCards = false;
 
   return (
     <section>
       <h2 className="text-2xl font-bold mb-4">{t("doctor.title")}</h2>
 
-      <Card className="mb-4 gap-2 py-4">
+      {showLegacyRecoveryCards && <Card className="mb-4 gap-2 py-4">
         <CardHeader className="pb-0">
           <CardTitle className="text-base">{t("doctor.rescueBotTitle")}</CardTitle>
         </CardHeader>
@@ -623,9 +624,9 @@ export function Doctor() {
             </div>
           )}
         </CardContent>
-      </Card>
+      </Card>}
 
-      <Card className="mb-4 gap-2 py-4">
+      {showLegacyRecoveryCards && <Card className="mb-4 gap-2 py-4">
         <CardHeader className="pb-0">
           <CardTitle className="text-base">{t("doctor.primaryRecoveryTitle")}</CardTitle>
         </CardHeader>
@@ -827,7 +828,7 @@ export function Doctor() {
             </div>
           )}
         </CardContent>
-      </Card>
+      </Card>}
 
       <Card className="gap-2 py-4">
         <CardHeader className="pb-0">

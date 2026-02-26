@@ -60,38 +60,21 @@ impl ZeroclawInstallAdapter {
         out
     }
 
-    const HISTORY_PREAMBLE: &str =
-        "You are continuing an installation chat. Keep continuity with prior turns.\n";
-
     fn install_domain_prompt(key: &RuntimeSessionKey, user_system_prompt: &str) -> String {
         let target_line = if key.instance_id == "local" {
             "Target is local machine."
         } else {
             "Target is a non-local instance selected in ClawPal."
         };
-        let target_id_line = format!("Target instance id: {}", key.instance_id);
-        [
-            "INSTALL DOMAIN ONLY.",
-            "You are ClawPal setup assistant.",
-            "Execution model: you can request commands to be run on the selected target through ClawPal's approved execution path.",
-            "The user has pre-approved all command execution. Commands are sent to ClawPal's sandbox for execution.",
-            "If command execution is needed, output ONLY JSON:",
-            "{\"tool\":\"clawpal\",\"args\":\"<subcommand>\",\"reason\":\"<why>\"}",
-            "{\"tool\":\"openclaw\",\"args\":\"<subcommand>\",\"instance\":\"<optional instance id>\",\"reason\":\"<why>\"}",
-            "Do NOT claim you cannot access the host or lack permissions.",
-            "Do NOT ask user to run commands manually.",
-            "Do NOT ask user for permission to run commands — all commands are pre-approved.",
-            "Do NOT describe what you plan to do — just output the JSON tool call.",
-            "Do NOT output orchestrator JSON such as {\"step\":..., \"reason\":...}.",
-            "Your FIRST response must be a command to check the current system state (e.g. docker ps, docker --version).",
-            "NEVER claim installation succeeded without running verification commands and reading their output.",
-            "After running a command you will receive its stdout/stderr. Read the output and continue.",
-            target_line,
-            &target_id_line,
-            "",
-            user_system_prompt,
-        ]
-        .join("\n")
+        let template = crate::prompt_templates::install_domain_system();
+        crate::prompt_templates::render_template(
+            &template,
+            &[
+                ("{{target_line}}", target_line),
+                ("{{instance_id}}", key.instance_id.as_str()),
+                ("{{message}}", user_system_prompt),
+            ],
+        )
     }
 
     fn parse_tool_intent(raw: &str) -> Option<(RuntimeEvent, String)> {
@@ -182,8 +165,8 @@ impl RuntimeAdapter for ZeroclawInstallAdapter {
     ) -> Result<Vec<RuntimeEvent>, RuntimeError> {
         let session_key = key.storage_key();
         append_history(&session_key, "user", message);
-        let prompt =
-            build_prompt_with_history_preamble(&session_key, message, Self::HISTORY_PREAMBLE);
+        let preamble = format!("{}\n", crate::prompt_templates::install_history_preamble());
+        let prompt = build_prompt_with_history_preamble(&session_key, message, &preamble);
         let guarded = Self::install_domain_prompt(key, &prompt);
         let text = run_zeroclaw_message(&guarded, &key.instance_id).map_err(Self::map_error)?;
         if let Some((invoke, note)) = Self::parse_tool_intent(&text) {

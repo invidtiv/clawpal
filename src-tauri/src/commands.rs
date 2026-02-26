@@ -7061,6 +7061,16 @@ pub fn list_registered_instances() -> Result<Vec<clawpal_core::instance::Instanc
     Ok(registry.list())
 }
 
+#[tauri::command]
+pub async fn connect_docker_instance(
+    home: String,
+    label: Option<String>,
+) -> Result<clawpal_core::instance::Instance, String> {
+    clawpal_core::connect::connect_docker(&home, label.as_deref())
+        .await
+        .map_err(|e| e.to_string())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LegacyDockerInstance {
@@ -7473,6 +7483,32 @@ pub async fn remote_read_raw_config(
     pool.sftp_read(&host_id, "~/.openclaw/openclaw.json").await
 }
 
+fn is_owner_display_parse_error(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    lower.contains("ownerdisplay")
+        && (lower.contains("unknown field")
+            || lower.contains("invalid field")
+            || lower.contains("failed to parse")
+            || lower.contains("deserialize"))
+}
+
+async fn run_openclaw_remote_with_autofix(
+    pool: &SshConnectionPool,
+    host_id: &str,
+    args: &[&str],
+) -> Result<crate::cli_runner::CliOutput, String> {
+    let first = crate::cli_runner::run_openclaw_remote(pool, host_id, args).await?;
+    if first.exit_code == 0 {
+        return Ok(first);
+    }
+    let combined = format!("{}\n{}", first.stderr, first.stdout);
+    if !is_owner_display_parse_error(&combined) {
+        return Ok(first);
+    }
+    let _ = crate::cli_runner::run_openclaw_remote(pool, host_id, &["doctor", "--fix"]).await;
+    crate::cli_runner::run_openclaw_remote(pool, host_id, args).await
+}
+
 #[tauri::command]
 pub async fn remote_get_system_status(
     pool: State<'_, SshConnectionPool>,
@@ -7480,7 +7516,7 @@ pub async fn remote_get_system_status(
 ) -> Result<StatusLight, String> {
     // Tier 1: fast, essential — health check + agents config (2 SSH calls in parallel)
     let (config_res, pgrep_res) = tokio::join!(
-        crate::cli_runner::run_openclaw_remote(
+        run_openclaw_remote_with_autofix(
             &pool,
             &host_id,
             &["config", "get", "agents", "--json"]
@@ -7651,9 +7687,16 @@ pub async fn remote_list_agents_overview(
     pool: State<'_, SshConnectionPool>,
     host_id: String,
 ) -> Result<Vec<AgentOverview>, String> {
-    let output =
-        crate::cli_runner::run_openclaw_remote(&pool, &host_id, &["agents", "list", "--json"])
-            .await?;
+    let output = run_openclaw_remote_with_autofix(&pool, &host_id, &["agents", "list", "--json"])
+        .await?;
+    if output.exit_code != 0 {
+        let details = format!("{}\n{}", output.stderr.trim(), output.stdout.trim());
+        return Err(format!(
+            "openclaw agents list failed ({}): {}",
+            output.exit_code,
+            details.trim()
+        ));
+    }
     let json = crate::cli_runner::parse_json_output(&output)?;
     // Check which agents have sessions remotely (single command, batch check)
     // Lists agents whose sessions.json is larger than 2 bytes (not just "{}")

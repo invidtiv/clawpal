@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import i18n from "../i18n";
 import { api } from "./api";
+import { doctorStartPromptTemplate, renderPromptTemplate } from "./prompt-templates";
 import type { DoctorChatMessage, DoctorInvoke } from "./types";
 
 let msgCounter = 0;
@@ -13,6 +14,23 @@ function extractApprovalPattern(invoke: DoctorInvoke): string {
   const path = (invoke.args?.path as string) ?? "";
   const prefix = path.includes("/") ? path.substring(0, path.lastIndexOf("/") + 1) : path;
   return `${invoke.command}:${prefix}`;
+}
+
+function normalizeInvokeArgs(invoke: DoctorInvoke): string {
+  const raw = (invoke.args?.args as string) ?? "";
+  return raw.trim().replace(/\s+/g, " ").toLowerCase();
+}
+
+function isDoctorAutoSafeInvoke(invoke: DoctorInvoke, domain: "doctor" | "install"): boolean {
+  if (domain !== "doctor") return false;
+  const args = normalizeInvokeArgs(invoke);
+  if (invoke.command === "openclaw" && args === "doctor --fix") {
+    return true;
+  }
+  if (invoke.command === "clawpal" && args === "doctor fix-openclaw-path") {
+    return true;
+  }
+  return false;
 }
 
 export function useDoctorAgent() {
@@ -127,6 +145,7 @@ export function useDoctorAgent() {
         if (!sessionActiveRef.current) return;
 
         const invoke = e.payload;
+        const isSafeAuto = isDoctorAutoSafeInvoke(invoke, domainRef.current);
 
         // Deduplicate: gateway may send the same invoke twice
         setPendingInvokes((prev) => {
@@ -139,12 +158,24 @@ export function useDoctorAgent() {
           if (prev.some((m) => m.invoke?.id === invoke.id)) return prev; // already shown
           return [
             ...prev,
-            { id: nextMsgId(), role: "tool-call", content: invoke.command, invoke, status: isFullAuto ? "auto" : "pending" },
+            {
+              id: nextMsgId(),
+              role: "tool-call",
+              content: invoke.command,
+              invoke,
+              status: (isFullAuto || isSafeAuto) ? "auto" : "pending",
+            },
           ];
         });
 
         // Full-auto mode: approve everything immediately
         if (isFullAuto) {
+          autoApproveRef.current(invoke.id);
+          return;
+        }
+
+        // Explicit safe-list for doctor self-heal commands.
+        if (isSafeAuto) {
           autoApproveRef.current(invoke.id);
           return;
         }
@@ -300,14 +331,11 @@ export function useDoctorAgent() {
             : instanceTransport === "remote_ssh"
               ? `Current target transport is remote_ssh (instance: ${scope}).`
               : "Current target transport is local.";
-        prompt = [
-          `You are ClawPal's diagnostic assistant powered by Doctor Claw. Respond in ${lang}.`,
-          "Identity rule: you are Doctor Claw (the diagnosing engine), not the target machine itself.",
-          "When asked who/where you are, always state both: engine=Doctor Claw, target=<current target>.",
-          transportLine,
-          `\nSystem context:\n${context}\n`,
-          "Analyze issues directly and give concrete next actions. Keep response concise.",
-        ].join("\n");
+        prompt = renderPromptTemplate(doctorStartPromptTemplate(), {
+          "{{language}}": lang,
+          "{{transport_line}}": transportLine,
+          "{{context}}": context,
+        });
       }
       if (domain === "install") {
         await api.installStartSession(prompt, sessionKeyRef.current, agentId, scope);
@@ -352,6 +380,11 @@ export function useDoctorAgent() {
     try {
       await api.doctorApproveInvoke(invokeId, targetRef.current, sessionKeyRef.current, agentIdRef.current, domainRef.current);
     } catch (err) {
+      const text = String(err);
+      if (text.includes("No pending invoke with id")) {
+        // Already auto-approved/consumed; treat as idempotent success.
+        return;
+      }
       setError(`Approve failed: ${err}`);
     }
   }, []);

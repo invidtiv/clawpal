@@ -136,7 +136,17 @@ impl SshConnectionPool {
     }
 
     pub async fn exec_login(&self, id: &str, command: &str) -> Result<SshExecResult, String> {
-        let wrapped = format!("bash -lc {}", shell_quote(command));
+        let wrapped = format!(
+            "export CLAWPAL_LOGIN_CMD={cmd}; \
+LOGIN_SHELL=\"${{SHELL:-/bin/sh}}\"; \
+[ -x \"$LOGIN_SHELL\" ] || LOGIN_SHELL=\"/bin/sh\"; \
+case \"$LOGIN_SHELL\" in \
+  */zsh) \"$LOGIN_SHELL\" -lc '[ -f ~/.zprofile ] && . ~/.zprofile >/dev/null 2>&1 || true; [ -f ~/.zshrc ] && . ~/.zshrc >/dev/null 2>&1 || true; eval \"$CLAWPAL_LOGIN_CMD\"' ;; \
+  */bash) \"$LOGIN_SHELL\" -lc '[ -f ~/.bash_profile ] && . ~/.bash_profile >/dev/null 2>&1 || true; [ -f ~/.bashrc ] && . ~/.bashrc >/dev/null 2>&1 || true; eval \"$CLAWPAL_LOGIN_CMD\"' ;; \
+  *) \"$LOGIN_SHELL\" -lc 'eval \"$CLAWPAL_LOGIN_CMD\"' ;; \
+esac",
+            cmd = shell_quote(command)
+        );
         self.exec(id, &wrapped).await
     }
 

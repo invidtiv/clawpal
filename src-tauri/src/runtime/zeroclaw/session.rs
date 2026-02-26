@@ -24,7 +24,8 @@ pub fn append_history(session_key: &str, role: &str, content: &str) {
 }
 
 pub fn build_prompt_with_history(session_key: &str, latest_user_message: &str) -> String {
-    build_prompt_with_history_preamble(session_key, latest_user_message, "You are continuing a Doctor troubleshooting chat. Keep continuity with prior turns.\n")
+    let preamble = format!("{}\n", crate::prompt_templates::doctor_history_preamble());
+    build_prompt_with_history_preamble(session_key, latest_user_message, &preamble)
 }
 
 pub fn build_prompt_with_history_preamble(session_key: &str, latest_user_message: &str, preamble: &str) -> String {

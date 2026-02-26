@@ -618,11 +618,15 @@ fn run_zeroclaw_agent_decider(
             allowed_steps.push(candidate);
         }
     }
-    let prompt = format!(
-        "You are install orchestrator. Goal: {goal}. Method: {}. State: {}. Allowed steps: {}. Return ONLY JSON object with fields: step (string or null), reason (string).",
-        session.method.as_str(),
-        session.state.as_str(),
-        allowed_steps.join(",")
+    let template = crate::prompt_templates::install_orchestrator_decider();
+    let prompt = crate::prompt_templates::render_template(
+        &template,
+        &[
+            ("{{goal}}", goal),
+            ("{{method}}", session.method.as_str()),
+            ("{{state}}", session.state.as_str()),
+            ("{{allowed_steps}}", &allowed_steps.join(",")),
+        ],
     );
     let output_text = run_zeroclaw_agent_prompt_json(cmd, prompt)?;
     let parsed = parse_decider_json(&output_text)?;
@@ -782,8 +786,14 @@ fn run_zeroclaw_agent_target_decider(
         .collect();
     let methods_text = available_methods.join(",");
     let context_json = serde_json::to_string(context).unwrap_or_else(|_| "{}".to_string());
-    let prompt = format!(
-        "You are install target planner. Choose one install method from [{methods_text}] based on user goal and runtime context. Goal: {goal}. Context JSON: {context_json}. Return ONLY JSON with fields: method (string), reason (string), requiresSshHost (boolean), requiredFields (array of strings), uiActions (array of objects with id/kind/label/payload)."
+    let template = crate::prompt_templates::install_target_decider();
+    let prompt = crate::prompt_templates::render_template(
+        &template,
+        &[
+            ("{{methods_text}}", &methods_text),
+            ("{{goal}}", goal),
+            ("{{context_json}}", &context_json),
+        ],
     );
     let output_text = run_zeroclaw_agent_prompt_json(cmd, prompt)?;
     let parsed = parse_target_decider_json(&output_text)?;

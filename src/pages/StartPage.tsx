@@ -18,6 +18,29 @@ import { InstallHub } from "@/components/InstallHub";
 import { api } from "@/lib/api";
 import type { DockerInstance, SshHost, InstallSession, RegisteredInstance } from "@/lib/types";
 
+const DEFAULT_DOCKER_OPENCLAW_HOME = "~/.clawpal/docker-local";
+const DEFAULT_DOCKER_CLAWPAL_DATA_DIR = "~/.clawpal/docker-local/data";
+
+function deriveDockerPaths(instanceId: string): { openclawHome: string; clawpalDataDir: string } {
+  if (instanceId === "docker:local") {
+    return {
+      openclawHome: DEFAULT_DOCKER_OPENCLAW_HOME,
+      clawpalDataDir: DEFAULT_DOCKER_CLAWPAL_DATA_DIR,
+    };
+  }
+  const suffixRaw = instanceId.startsWith("docker:") ? instanceId.slice(7) : instanceId;
+  const suffix = suffixRaw === "local"
+    ? "docker-local"
+    : suffixRaw.startsWith("docker-")
+      ? suffixRaw
+      : `docker-${suffixRaw || "local"}`;
+  const openclawHome = `~/.clawpal/${suffix}`;
+  return {
+    openclawHome,
+    clawpalDataDir: `${openclawHome}/data`,
+  };
+}
+
 interface StartPageProps {
   dockerInstances: DockerInstance[];
   sshHosts: SshHost[];
@@ -117,11 +140,22 @@ export function StartPage({
       }
       for (const d of dockerInstances) {
         const existing = dockerTargetsById.get(d.id);
+        const fallback = deriveDockerPaths(d.id);
         dockerTargetsById.set(d.id, {
           id: d.id,
-          openclawHome: existing?.openclawHome || d.openclawHome,
-          clawpalDataDir: existing?.clawpalDataDir || d.clawpalDataDir,
+          openclawHome: existing?.openclawHome || d.openclawHome || fallback.openclawHome,
+          clawpalDataDir: existing?.clawpalDataDir || d.clawpalDataDir || fallback.clawpalDataDir,
         });
+      }
+      for (const [id, target] of dockerTargetsById.entries()) {
+        if (!target.openclawHome) {
+          const fallback = deriveDockerPaths(id);
+          dockerTargetsById.set(id, {
+            ...target,
+            openclawHome: fallback.openclawHome,
+            clawpalDataDir: target.clawpalDataDir || fallback.clawpalDataDir,
+          });
+        }
       }
       const dockerTargets = Array.from(dockerTargetsById.values());
 
@@ -149,10 +183,13 @@ export function StartPage({
         setHealthMap((prev) => ({ ...prev, ...updates }));
       }
     };
-    poll();
+    const initial = setTimeout(() => {
+      void poll();
+    }, 800);
     const timer = setInterval(poll, 30_000);
     return () => {
       cancelled = true;
+      clearTimeout(initial);
       clearInterval(timer);
     };
   }, [dockerInstances, registeredInstances]);

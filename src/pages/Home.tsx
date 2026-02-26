@@ -110,6 +110,23 @@ export function Home({
 
   const statusInFlightRef = useRef(false);
 
+  // On instance switch, immediately clear stale state so UI shows loading
+  // placeholders instead of previous instance data.
+  useEffect(() => {
+    setStatus(null);
+    setStatusExtra(null);
+    setVersion(null);
+    setUpdateInfo(null);
+    setCheckingUpdate(false);
+    setAgents(null);
+    setModelProfiles([]);
+    setStatusSettled(false);
+    retriesRef.current = 0;
+    remoteErrorShownRef.current = false;
+    remoteUnhealthyStreakRef.current = 0;
+    statusInFlightRef.current = false;
+  }, [ua.instanceToken]);
+
   const fetchStatus = useCallback(() => {
     if (ua.isRemote && !ua.isConnected) return; // Wait for SSH connection
     if (hasPendingRef.current) return; // Don't overwrite optimistic UI
@@ -166,10 +183,13 @@ export function Home({
   useEffect(() => {
     remoteErrorShownRef.current = false;
     remoteUnhealthyStreakRef.current = 0;
-    fetchStatus();
+    const initial = setTimeout(fetchStatus, 250);
     // Poll fast (2s) while not settled, slow (10s) once settled; remote always slow
     const interval = setInterval(fetchStatus, ua.isRemote ? 30000 : (statusSettled ? 10000 : 2000));
-    return () => clearInterval(interval);
+    return () => {
+      clearTimeout(initial);
+      clearInterval(interval);
+    };
   }, [fetchStatus, statusSettled, ua.isRemote]);
 
   // Tier 2: version + duplicate detection — called once on mount (not polled)
@@ -190,7 +210,8 @@ export function Home({
       const timer = setTimeout(fetchStatusExtra, 3000);
       return () => clearTimeout(timer);
     }
-    fetchStatusExtra();
+    const timer = setTimeout(fetchStatusExtra, 350);
+    return () => clearTimeout(timer);
   }, [fetchStatusExtra, ua.isRemote]);
 
   const refreshAgents = useCallback(() => {
@@ -211,7 +232,6 @@ export function Home({
             console.error("Failed to load remote agents:", e2);
             if (!remoteErrorShownRef.current) {
               remoteErrorShownRef.current = true;
-              showToast?.(t('home.remoteAgentsFailed', { error: String(e2) }), "error");
             }
           });
         }, 1500);
@@ -222,15 +242,21 @@ export function Home({
   }, [ua, showToast, t]);
 
   useEffect(() => {
-    refreshAgents();
+    const initial = setTimeout(refreshAgents, 300);
     // Auto-refresh agents (remote less frequently to avoid ssh process spam)
     const interval = setInterval(refreshAgents, ua.isRemote ? 30000 : 15000);
-    return () => clearInterval(interval);
+    return () => {
+      clearTimeout(initial);
+      clearInterval(interval);
+    };
   }, [refreshAgents, ua.isRemote]);
 
   useEffect(() => {
     if (ua.isRemote && !ua.isConnected) return;
-    ua.listModelProfiles().then((p) => setModelProfiles(p.filter((m) => m.enabled))).catch((e) => console.error("Failed to load model profiles:", e));
+    const timer = setTimeout(() => {
+      ua.listModelProfiles().then((p) => setModelProfiles(p.filter((m) => m.enabled))).catch((e) => console.error("Failed to load model profiles:", e));
+    }, 350);
+    return () => clearTimeout(timer);
   }, [ua]);
 
   // Match current global model value to a profile ID
