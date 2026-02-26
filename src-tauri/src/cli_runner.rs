@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::process::Command;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -8,6 +8,51 @@ use uuid::Uuid;
 
 use crate::models::resolve_paths;
 use crate::ssh::SshConnectionPool;
+
+static ACTIVE_OPENCLAW_HOME_OVERRIDE: LazyLock<Mutex<Option<String>>> =
+    LazyLock::new(|| Mutex::new(None));
+static ACTIVE_CLAWPAL_DATA_OVERRIDE: LazyLock<Mutex<Option<String>>> =
+    LazyLock::new(|| Mutex::new(None));
+
+pub fn set_active_openclaw_home_override(path: Option<String>) -> Result<(), String> {
+    let mut guard = ACTIVE_OPENCLAW_HOME_OVERRIDE
+        .lock()
+        .map_err(|_| "active openclaw home lock poisoned".to_string())?;
+    let next = path
+        .as_deref()
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .map(|raw| shellexpand::tilde(raw).to_string());
+    *guard = next;
+    Ok(())
+}
+
+pub fn get_active_openclaw_home_override() -> Option<String> {
+    ACTIVE_OPENCLAW_HOME_OVERRIDE
+        .lock()
+        .ok()
+        .and_then(|g| g.clone())
+}
+
+pub fn set_active_clawpal_data_override(path: Option<String>) -> Result<(), String> {
+    let mut guard = ACTIVE_CLAWPAL_DATA_OVERRIDE
+        .lock()
+        .map_err(|_| "active clawpal data lock poisoned".to_string())?;
+    let next = path
+        .as_deref()
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .map(|raw| shellexpand::tilde(raw).to_string());
+    *guard = next;
+    Ok(())
+}
+
+pub fn get_active_clawpal_data_override() -> Option<String> {
+    ACTIVE_CLAWPAL_DATA_OVERRIDE
+        .lock()
+        .ok()
+        .and_then(|g| g.clone())
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -33,6 +78,11 @@ pub fn run_openclaw_with_env(
     if let Some(env_vars) = env {
         for (k, v) in env_vars {
             cmd.env(k, v);
+        }
+    }
+    if let Some(path) = get_active_openclaw_home_override() {
+        if env.and_then(|m| m.get("OPENCLAW_HOME")).is_none() {
+            cmd.env("OPENCLAW_HOME", path);
         }
     }
 
@@ -295,9 +345,10 @@ pub async fn preview_queued_commands(
             }
         }
 
-        // Copy config file (the one we want to modify in-place)
+        // Seed config file for sandbox preview. Source config may not exist yet
+        // (fresh docker-local state), so write the already-loaded content.
         let preview_config = preview_dir.join("openclaw.json");
-        std::fs::copy(&paths.config_path, &preview_config).map_err(|e| e.to_string())?;
+        crate::config_io::write_text(&preview_config, &config_before)?;
 
         let mut env = HashMap::new();
         env.insert(

@@ -35,6 +35,8 @@ use crate::commands::{
     remote_extract_model_profiles_from_config, remote_refresh_model_catalog,
     remote_chat_via_openclaw, remote_check_openclaw_update,
     run_openclaw_upgrade, remote_run_openclaw_upgrade,
+    set_active_openclaw_home, set_active_clawpal_data_dir,
+    local_openclaw_config_exists, delete_local_instance_home,
     remote_backup_before_upgrade, remote_list_backups, remote_restore_from_backup, remote_delete_backup,
     list_cron_jobs, get_cron_runs, trigger_cron_job, delete_cron_job,
     remote_list_cron_jobs, remote_get_cron_runs, remote_trigger_cron_job, remote_delete_cron_job,
@@ -43,15 +45,19 @@ use crate::commands::{
     read_app_log, read_error_log, read_gateway_log, read_gateway_error_log,
     log_app_event,
     remote_read_app_log, remote_read_error_log, remote_read_gateway_log, remote_read_gateway_error_log,
+    ensure_access_profile, record_install_experience,
 };
-use crate::bridge_client::BridgeClient;
+use crate::install::commands::{
+    install_create_session, install_decide_target, install_get_session, install_list_methods, install_orchestrator_next, install_run_step,
+};
+use crate::install::session_store::InstallSessionStore;
 use crate::doctor_commands::{
-    doctor_port_forward, doctor_read_remote_credentials, doctor_auto_pair,
     doctor_connect, doctor_disconnect,
     doctor_start_diagnosis, doctor_send_message,
     doctor_approve_invoke, doctor_reject_invoke, collect_doctor_context,
-    collect_doctor_context_remote, doctor_bridge_connect, doctor_bridge_disconnect, doctor_bridge_node_id,
+    collect_doctor_context_remote,
 };
+use crate::install_commands::{install_start_session, install_send_message};
 use crate::cli_runner::{
     queue_command, remove_queued_command, list_queued_commands,
     discard_queued_commands, queued_commands_count,
@@ -65,16 +71,21 @@ use crate::node_client::NodeClient;
 use crate::ssh::SshConnectionPool;
 
 pub mod bridge_client;
+pub mod access_discovery;
 pub mod cli_runner;
 pub mod commands;
 pub mod config_io;
 pub mod doctor;
 pub mod doctor_commands;
+pub mod doctor_runtime_bridge;
+pub mod install_commands;
 pub mod history;
+pub mod install;
 pub mod logging;
 pub mod models;
 pub mod node_client;
 pub mod recipe;
+pub mod runtime;
 pub mod path_fix;
 pub mod ssh;
 
@@ -84,11 +95,23 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .manage(SshConnectionPool::new())
         .manage(NodeClient::new())
-        .manage(BridgeClient::new())
         .manage(CommandQueue::new())
         .manage(RemoteCommandQueues::new())
         .manage(CliCache::new())
+        .manage(InstallSessionStore::new())
         .invoke_handler(tauri::generate_handler![
+            install_create_session,
+            install_decide_target,
+            install_get_session,
+            install_list_methods,
+            install_orchestrator_next,
+            install_run_step,
+            set_active_openclaw_home,
+            set_active_clawpal_data_dir,
+            local_openclaw_config_exists,
+            delete_local_instance_home,
+            ensure_access_profile,
+            record_install_experience,
             get_system_status,
             get_status_light,
             get_status_extra,
@@ -228,9 +251,6 @@ pub fn run() {
             remote_queued_commands_count,
             remote_preview_queued_commands,
             remote_apply_queued_commands,
-            doctor_port_forward,
-            doctor_read_remote_credentials,
-            doctor_auto_pair,
             doctor_connect,
             doctor_disconnect,
             doctor_start_diagnosis,
@@ -239,9 +259,8 @@ pub fn run() {
             doctor_reject_invoke,
             collect_doctor_context,
             collect_doctor_context_remote,
-            doctor_bridge_connect,
-            doctor_bridge_disconnect,
-            doctor_bridge_node_id,
+            install_start_session,
+            install_send_message,
         ])
         .setup(|_app| {
             // Run PATH fix in background so it doesn't block window creation.

@@ -32,12 +32,27 @@ fn env_path(name: &str) -> Option<PathBuf> {
         .map(|value| expand_user_path(&value))
 }
 
+fn derive_openclaw_dir_from_override(home_override: PathBuf) -> PathBuf {
+    home_override.join(".openclaw")
+}
+
 pub fn resolve_paths() -> OpenClawPaths {
     let home = home_dir().unwrap_or_else(|| Path::new(".").to_path_buf());
-    let openclaw_dir =
-        env_path("CLAWPAL_OPENCLAW_DIR").or_else(|| env_path("OPENCLAW_HOME")).unwrap_or_else(|| home.join(".openclaw"));
+    let active_override = crate::cli_runner::get_active_openclaw_home_override()
+        .map(PathBuf::from);
+    let active_clawpal_data = crate::cli_runner::get_active_clawpal_data_override()
+        .map(PathBuf::from);
+    let openclaw_dir = if let Some(home_override) = active_override {
+        derive_openclaw_dir_from_override(home_override)
+    } else {
+        env_path("CLAWPAL_OPENCLAW_DIR")
+            .or_else(|| env_path("OPENCLAW_HOME"))
+            .unwrap_or_else(|| home.join(".openclaw"))
+    };
     let clawpal_dir =
-        env_path("CLAWPAL_DATA_DIR").unwrap_or_else(|| home.join(".clawpal"));
+        active_clawpal_data
+            .or_else(|| env_path("CLAWPAL_DATA_DIR"))
+            .unwrap_or_else(|| home.join(".clawpal"));
 
     // Migrate: ~/.openclaw/.clawpal → ~/.clawpal
     let legacy_dir = openclaw_dir.join(".clawpal");

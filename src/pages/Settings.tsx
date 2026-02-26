@@ -50,6 +50,10 @@ type ProfileForm = {
   enabled: boolean;
 };
 
+const MODEL_CATALOG_CACHE_TTL_MS = 5 * 60_000;
+let modelCatalogCache: { value: ModelCatalogProvider[]; expiresAt: number } | null = null;
+let profilesExtractedOnce = false;
+
 function emptyForm(): ProfileForm {
   return {
     id: "",
@@ -133,10 +137,12 @@ function AutocompleteField({
   );
 }
 
-export function Settings({ onDataChange, hasAppUpdate, onAppUpdateSeen }: {
+export function Settings({ onDataChange, hasAppUpdate, onAppUpdateSeen, globalMode = false, section = "all" }: {
   onDataChange?: () => void;
   hasAppUpdate?: boolean;
   onAppUpdateSeen?: () => void;
+  globalMode?: boolean;
+  section?: "all" | "profiles" | "preferences";
 }) {
   const { t, i18n } = useTranslation();
   const ua = useApi();
@@ -216,8 +222,13 @@ export function Settings({ onDataChange, hasAppUpdate, onAppUpdateSeen }: {
 
   // Extract profiles from config on first load
   useEffect(() => {
+    if (profilesExtractedOnce) return;
+    profilesExtractedOnce = true;
     ua.extractModelProfilesFromConfig()
-      .catch((e) => console.error("Failed to extract profiles:", e));
+      .catch((e) => {
+        profilesExtractedOnce = false;
+        console.error("Failed to extract profiles:", e);
+      });
   }, [ua]);
 
   const refreshProfiles = () => {
@@ -229,8 +240,22 @@ export function Settings({ onDataChange, hasAppUpdate, onAppUpdateSeen }: {
 
   // Load catalog on mount
   useEffect(() => {
+    const now = Date.now();
+    if (modelCatalogCache && modelCatalogCache.expiresAt > now) {
+      setCatalog(modelCatalogCache.value);
+      setCatalogRefreshed(true);
+      return;
+    }
     setCatalogRefreshed(false);
-    ua.refreshModelCatalog().then(setCatalog).catch((e) => console.error("Failed to load model catalog:", e));
+    ua.refreshModelCatalog()
+      .then((fresh) => {
+        setCatalog(fresh);
+        modelCatalogCache = {
+          value: fresh,
+          expiresAt: Date.now() + MODEL_CATALOG_CACHE_TTL_MS,
+        };
+      })
+      .catch((e) => console.error("Failed to load model catalog:", e));
   }, [ua]);
 
   // Refresh catalog from CLI when user focuses provider/model input
@@ -239,6 +264,10 @@ export function Settings({ onDataChange, hasAppUpdate, onAppUpdateSeen }: {
     setCatalogRefreshed(true);
     ua.refreshModelCatalog().then((fresh) => {
       if (fresh.length > 0) setCatalog(fresh);
+      modelCatalogCache = {
+        value: fresh,
+        expiresAt: Date.now() + MODEL_CATALOG_CACHE_TTL_MS,
+      };
     }).catch((e) => console.error("Failed to refresh model catalog:", e));
   };
 
@@ -382,12 +411,15 @@ export function Settings({ onDataChange, hasAppUpdate, onAppUpdateSeen }: {
     }
   };
 
+  const showProfiles = section !== "preferences";
+  const showPreferences = section !== "profiles";
+
   return (
     <section>
       <h2 className="text-2xl font-bold mb-4">{t('settings.title')}</h2>
 
       {/* ---- Model Profiles ---- */}
-      {!ua.isRemote && (
+      {showProfiles && !ua.isRemote && (
         <p className="text-sm text-muted-foreground mb-4">
           {t('settings.oauthHint')}
           <code className="mx-1 px-1.5 py-0.5 bg-muted rounded text-xs">openclaw models auth login</code>
@@ -399,6 +431,7 @@ export function Settings({ onDataChange, hasAppUpdate, onAppUpdateSeen }: {
 
           <div className="space-y-3">
             {/* Preferences: Version, Language, Theme */}
+            {showPreferences && (
             <Card>
               <CardContent className="space-y-4">
                 {/* Version */}
@@ -481,8 +514,10 @@ export function Settings({ onDataChange, hasAppUpdate, onAppUpdateSeen }: {
                 </div>
               </CardContent>
             </Card>
+            )}
 
             {/* Profiles list */}
+            {showProfiles && (
             <Card>
               <CardHeader>
                 <div className="flex items-center justify-between">
@@ -578,6 +613,7 @@ export function Settings({ onDataChange, hasAppUpdate, onAppUpdateSeen }: {
                 </div>
               </CardContent>
             </Card>
+            )}
           </div>
 
       {message && (
