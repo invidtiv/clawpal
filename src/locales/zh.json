@@ -606,5 +606,7 @@
   "start.opened": "已打开",
   "start.menuRename": "重命名",
   "start.menuEdit": "编辑",
-  "start.menuDelete": "删除"
+  "start.menuDelete": "删除",
+
+  "instance.close": "关闭标签页"
 }

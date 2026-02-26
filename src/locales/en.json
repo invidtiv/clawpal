@@ -606,5 +606,7 @@
   "start.opened": "Open",
   "start.menuRename": "Rename",
   "start.menuEdit": "Edit",
-  "start.menuDelete": "Delete"
+  "start.menuDelete": "Delete",
+
+  "instance.close": "Close tab"
 }
