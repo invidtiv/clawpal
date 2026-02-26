@@ -232,8 +232,24 @@ export function Settings({ onDataChange, hasAppUpdate, onAppUpdateSeen, globalMo
   }, [ua]);
 
   const refreshProfiles = () => {
-    ua.listModelProfiles().then(setProfiles).catch((e) => console.error("Failed to load profiles:", e));
-    ua.resolveApiKeys().then(setApiKeys).catch((e) => console.error("Failed to resolve API keys:", e));
+    const withTimeout = <T,>(promise: Promise<T>, timeoutMs: number, fallback: T): Promise<T> =>
+      Promise.race([
+        promise,
+        new Promise<T>((resolve) => setTimeout(() => resolve(fallback), timeoutMs)),
+      ]);
+
+    withTimeout(ua.listModelProfiles(), 8000, [])
+      .then(setProfiles)
+      .catch((e) => {
+        console.error("Failed to load profiles:", e);
+        setProfiles([]);
+      });
+    withTimeout(ua.resolveApiKeys(), 8000, [])
+      .then(setApiKeys)
+      .catch((e) => {
+        console.error("Failed to resolve API keys:", e);
+        setApiKeys([]);
+      });
   };
 
   useEffect(refreshProfiles, [ua]);

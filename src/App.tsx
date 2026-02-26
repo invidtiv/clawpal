@@ -36,7 +36,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { cn } from "@/lib/utils";
 import { Toaster } from "sonner";
-import type { DiscordGuildChannel, DockerInstance, InstallSession, SshHost } from "./lib/types";
+import type { DiscordGuildChannel, DockerInstance, InstallSession, RegisteredInstance, SshHost } from "./lib/types";
 
 const PING_URL = "https://api.clawpal.zhixian.io/ping";
 const DOCKER_INSTANCES_KEY = "clawpal_docker_instances";
@@ -111,6 +111,16 @@ function deriveDockerLabel(instanceId: string): string {
   return `Docker ${suffix}`;
 }
 
+function fallbackInstanceLabel(instanceId: string, t: (key: string) => string): string {
+  if (instanceId === "local") return t("instance.local");
+  if (instanceId.startsWith("docker:")) return deriveDockerLabel(instanceId);
+  if (instanceId.startsWith("ssh:")) {
+    const suffix = instanceId.slice("ssh:".length);
+    return suffix || instanceId;
+  }
+  return instanceId;
+}
+
 function hashInstanceToken(raw: string): number {
   let hash = 2166136261;
   for (let i = 0; i < raw.length; i += 1) {
@@ -157,6 +167,7 @@ export function App() {
   const [activeInstance, setActiveInstance] = useState("local");
   const [dockerInstances, setDockerInstances] = useState<DockerInstance[]>([]);
   const [sshHosts, setSshHosts] = useState<SshHost[]>([]);
+  const [registeredInstances, setRegisteredInstances] = useState<RegisteredInstance[]>([]);
   const [connectionStatus, setConnectionStatus] = useState<Record<string, "connected" | "disconnected" | "error">>({});
 
   const refreshHosts = useCallback(() => {
@@ -204,6 +215,15 @@ export function App() {
     }
   }, []);
 
+  const refreshRegisteredInstances = useCallback(() => {
+    api.listRegisteredInstances()
+      .then(setRegisteredInstances)
+      .catch((e) => {
+        console.error("Failed to load registered instances:", e);
+        setRegisteredInstances([]);
+      });
+  }, []);
+
   const upsertDockerInstance = useCallback((instance: DockerInstance) => {
     const normalized = normalizeDockerInstance(instance);
     setDockerInstances((prev) => {
@@ -247,7 +267,10 @@ export function App() {
   useEffect(() => {
     refreshHosts();
     void refreshDockerInstances();
-  }, [refreshHosts, refreshDockerInstances]);
+    refreshRegisteredInstances();
+    const timer = setInterval(refreshRegisteredInstances, 30_000);
+    return () => clearInterval(timer);
+  }, [refreshHosts, refreshDockerInstances, refreshRegisteredInstances]);
 
   const [appUpdateAvailable, setAppUpdateAvailable] = useState(false);
   const [hasEscalatedCron, setHasEscalatedCron] = useState(false);
@@ -279,6 +302,7 @@ export function App() {
 
   const [toasts, setToasts] = useState<ToastItem[]>([]);
   const sshHealthFailStreakRef = useRef<Record<string, number>>({});
+  const legacyMigrationDoneRef = useRef(false);
   const passphraseResolveRef = useRef<((value: string | null) => void) | null>(null);
   const [passphraseHostLabel, setPassphraseHostLabel] = useState<string>("");
   const [passphraseOpen, setPassphraseOpen] = useState(false);
@@ -301,11 +325,16 @@ export function App() {
 
   const resolveInstanceTransport = useCallback((instanceId: string) => {
     if (instanceId === "local") return "local";
+    const registered = registeredInstances.find((item) => item.id === instanceId);
+    if (registered?.instanceType === "docker") return "docker_local";
+    if (registered?.instanceType === "remote_ssh") return "remote_ssh";
+    if (instanceId.startsWith("docker:")) return "docker_local";
+    if (instanceId.startsWith("ssh:")) return "remote_ssh";
     if (dockerInstances.some((item) => item.id === instanceId)) return "docker_local";
     if (sshHosts.some((host) => host.id === instanceId)) return "remote_ssh";
     // Unknown id should not be treated as remote by default.
     return "local";
-  }, [dockerInstances, sshHosts]);
+  }, [dockerInstances, sshHosts, registeredInstances]);
 
   const ensureAccessForInstance = useCallback((instanceId: string) => {
     const transport = resolveInstanceTransport(instanceId);
@@ -330,6 +359,39 @@ export function App() {
     }, delayMs);
   }, [ensureAccessForInstance]);
 
+  const readLegacyDockerInstances = useCallback((): DockerInstance[] => {
+    try {
+      const raw = localStorage.getItem(DOCKER_INSTANCES_KEY);
+      if (!raw) return [];
+      const parsed = JSON.parse(raw) as DockerInstance[];
+      if (!Array.isArray(parsed)) return [];
+      const out: DockerInstance[] = [];
+      const seen = new Set<string>();
+      for (const item of parsed) {
+        if (!item?.id || typeof item.id !== "string") continue;
+        const id = item.id.trim();
+        if (!id || seen.has(id)) continue;
+        seen.add(id);
+        out.push(normalizeDockerInstance({ ...item, id }));
+      }
+      return out;
+    } catch {
+      return [];
+    }
+  }, []);
+
+  const readLegacyOpenTabs = useCallback((): string[] => {
+    try {
+      const raw = localStorage.getItem(OPEN_TABS_STORAGE_KEY);
+      if (!raw) return [];
+      const parsed = JSON.parse(raw);
+      if (!Array.isArray(parsed)) return [];
+      return parsed.filter((id): id is string => typeof id === "string" && id.trim().length > 0);
+    } catch {
+      return [];
+    }
+  }, []);
+
   useEffect(() => {
     return () => {
       if (accessProbeTimerRef.current !== null) {
@@ -338,6 +400,28 @@ export function App() {
       }
     };
   }, []);
+
+  useEffect(() => {
+    if (legacyMigrationDoneRef.current) return;
+    legacyMigrationDoneRef.current = true;
+    const legacyDockerInstances = readLegacyDockerInstances();
+    const legacyOpenTabIds = readLegacyOpenTabs();
+    api.migrateLegacyInstances(legacyDockerInstances, legacyOpenTabIds)
+      .then((result) => {
+        if (
+          result.importedSshHosts > 0
+          || result.importedDockerInstances > 0
+          || result.importedOpenTabInstances > 0
+        ) {
+          refreshRegisteredInstances();
+          refreshHosts();
+          void refreshDockerInstances();
+        }
+      })
+      .catch((e) => {
+        console.error("Legacy instance migration failed:", e);
+      });
+  }, [readLegacyDockerInstances, readLegacyOpenTabs, refreshRegisteredInstances, refreshHosts, refreshDockerInstances]);
 
   const dismissToast = useCallback((id: number) => {
     setToasts((prev) => prev.filter((t) => t.id !== id));
@@ -459,8 +543,10 @@ export function App() {
   const [configVersion, setConfigVersion] = useState(0);
   const [instanceToken, setInstanceToken] = useState(0);
 
-  const isDocker = dockerInstances.some((item) => item.id === activeInstance);
-  const isRemote = sshHosts.some((host) => host.id === activeInstance);
+  const isDocker = registeredInstances.some((item) => item.id === activeInstance && item.instanceType === "docker")
+    || dockerInstances.some((item) => item.id === activeInstance);
+  const isRemote = registeredInstances.some((item) => item.id === activeInstance && item.instanceType === "remote_ssh")
+    || sshHosts.some((host) => host.id === activeInstance);
   const isConnected = !isRemote || connectionStatus[activeInstance] === "connected";
 
   useEffect(() => {
@@ -610,15 +696,26 @@ export function App() {
 
   // Derive openTabs array for InstanceTabBar
   const openTabs = useMemo(() => {
+    const registryById = new Map(registeredInstances.map((item) => [item.id, item]));
     return openTabIds.map((id) => {
       if (id === "local") return { id, label: t("instance.local"), type: "local" as const };
+      const registered = registryById.get(id);
+      if (registered) {
+        return {
+          id,
+          label: registered.label || id,
+          type: registered.instanceType === "remote_ssh" ? "ssh" as const : registered.instanceType as "local" | "docker",
+        };
+      }
       const docker = dockerInstances.find((d) => d.id === id);
       if (docker) return { id, label: docker.label || id, type: "docker" as const };
       const ssh = sshHosts.find((h) => h.id === id);
       if (ssh) return { id, label: ssh.label || ssh.host, type: "ssh" as const };
-      return { id, label: id, type: "local" as const };
+      if (id.startsWith("docker:")) return { id, label: fallbackInstanceLabel(id, t), type: "docker" as const };
+      if (id.startsWith("ssh:")) return { id, label: fallbackInstanceLabel(id, t), type: "ssh" as const };
+      return { id, label: fallbackInstanceLabel(id, t), type: "local" as const };
     });
-  }, [openTabIds, dockerInstances, sshHosts, t]);
+  }, [openTabIds, dockerInstances, sshHosts, registeredInstances, t]);
 
   // Handle install completion — register docker instance and open tab
   const handleInstallReady = useCallback((session: InstallSession) => {
@@ -802,12 +899,16 @@ export function App() {
             <StartPage
               dockerInstances={dockerInstances}
               sshHosts={sshHosts}
+              registeredInstances={registeredInstances}
               openTabIds={new Set(openTabIds)}
               onOpenInstance={openTab}
               onRenameDocker={renameDockerInstance}
               onDeleteDocker={deleteDockerInstance}
               onDeleteSsh={(hostId) => {
-                api.deleteSshHost(hostId).then(refreshHosts);
+                api.deleteSshHost(hostId).then(() => {
+                  refreshHosts();
+                  refreshRegisteredInstances();
+                });
               }}
               onEditSsh={() => {}}
               onInstallReady={handleInstallReady}

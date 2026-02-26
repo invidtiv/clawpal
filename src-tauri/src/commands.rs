@@ -5082,14 +5082,6 @@ fn save_model_profiles(
     Ok(())
 }
 
-fn sync_profile_auth_to_main_agent(
-    paths: &crate::models::OpenClawPaths,
-    profile: &ModelProfile,
-) -> Result<(), String> {
-    let source_base_dir = global_profile_base_dir();
-    sync_profile_auth_to_main_agent_with_source(paths, profile, &source_base_dir)
-}
-
 fn sync_profile_auth_to_main_agent_with_source(
     paths: &crate::models::OpenClawPaths,
     profile: &ModelProfile,
@@ -7061,6 +7053,197 @@ fn resolve_model_provider_base_url(cfg: &Value, provider: &str) -> Option<String
 pub fn list_registered_instances() -> Result<Vec<clawpal_core::instance::Instance>, String> {
     let registry = clawpal_core::instance::InstanceRegistry::load().map_err(|e| e.to_string())?;
     Ok(registry.list())
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LegacyDockerInstance {
+    pub id: String,
+    pub label: String,
+    pub openclaw_home: Option<String>,
+    pub clawpal_data_dir: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LegacyMigrationResult {
+    pub imported_ssh_hosts: usize,
+    pub imported_docker_instances: usize,
+    pub imported_open_tab_instances: usize,
+    pub total_instances: usize,
+}
+
+fn fallback_label_from_instance_id(instance_id: &str) -> String {
+    if instance_id == "local" {
+        return "Local".to_string();
+    }
+    if let Some(suffix) = instance_id.strip_prefix("docker:") {
+        if suffix.is_empty() {
+            return "Docker".to_string();
+        }
+        return format!("Docker {suffix}");
+    }
+    if let Some(suffix) = instance_id.strip_prefix("ssh:") {
+        return if suffix.is_empty() {
+            "SSH".to_string()
+        } else {
+            suffix.to_string()
+        };
+    }
+    instance_id.to_string()
+}
+
+fn upsert_registry_instance(
+    registry: &mut clawpal_core::instance::InstanceRegistry,
+    instance: clawpal_core::instance::Instance,
+) -> Result<(), String> {
+    let _ = registry.remove(&instance.id);
+    registry.add(instance).map_err(|e| e.to_string())
+}
+
+fn migrate_legacy_ssh_file(
+    paths: &crate::models::OpenClawPaths,
+    registry: &mut clawpal_core::instance::InstanceRegistry,
+) -> Result<usize, String> {
+    let legacy_path = paths.clawpal_dir.join("remote-instances.json");
+    if !legacy_path.exists() {
+        return Ok(0);
+    }
+    let text = fs::read_to_string(&legacy_path).map_err(|e| e.to_string())?;
+    let hosts: Vec<SshHostConfig> = serde_json::from_str(&text).unwrap_or_default();
+    let mut count = 0usize;
+    for host in hosts {
+        let ssh_host = map_ssh_host_to_core(&host);
+        let instance = clawpal_core::instance::Instance {
+            id: ssh_host.id.clone(),
+            instance_type: clawpal_core::instance::InstanceType::RemoteSsh,
+            label: if ssh_host.label.trim().is_empty() {
+                ssh_host.host.clone()
+            } else {
+                ssh_host.label.clone()
+            },
+            openclaw_home: None,
+            clawpal_data_dir: None,
+            ssh_host_config: Some(ssh_host),
+        };
+        upsert_registry_instance(registry, instance)?;
+        count += 1;
+    }
+    Ok(count)
+}
+
+#[tauri::command]
+pub fn migrate_legacy_instances(
+    legacy_docker_instances: Vec<LegacyDockerInstance>,
+    legacy_open_tab_ids: Vec<String>,
+) -> Result<LegacyMigrationResult, String> {
+    let paths = resolve_paths();
+    let mut registry =
+        clawpal_core::instance::InstanceRegistry::load().map_err(|e| e.to_string())?;
+
+    // Ensure local instance exists for old users.
+    if registry.get("local").is_none() {
+        upsert_registry_instance(
+            &mut registry,
+            clawpal_core::instance::Instance {
+                id: "local".to_string(),
+                instance_type: clawpal_core::instance::InstanceType::Local,
+                label: "Local".to_string(),
+                openclaw_home: None,
+                clawpal_data_dir: None,
+                ssh_host_config: None,
+            },
+        )?;
+    }
+
+    let imported_ssh_hosts = migrate_legacy_ssh_file(&paths, &mut registry)?;
+
+    let mut imported_docker_instances = 0usize;
+    for docker in legacy_docker_instances {
+        let id = docker.id.trim();
+        if id.is_empty() {
+            continue;
+        }
+        let label = if docker.label.trim().is_empty() {
+            fallback_label_from_instance_id(id)
+        } else {
+            docker.label.clone()
+        };
+        upsert_registry_instance(
+            &mut registry,
+            clawpal_core::instance::Instance {
+                id: id.to_string(),
+                instance_type: clawpal_core::instance::InstanceType::Docker,
+                label,
+                openclaw_home: docker.openclaw_home.clone(),
+                clawpal_data_dir: docker.clawpal_data_dir.clone(),
+                ssh_host_config: None,
+            },
+        )?;
+        imported_docker_instances += 1;
+    }
+
+    let mut imported_open_tab_instances = 0usize;
+    for tab_id in legacy_open_tab_ids {
+        let id = tab_id.trim();
+        if id.is_empty() {
+            continue;
+        }
+        if registry.get(id).is_some() {
+            continue;
+        }
+        if id == "local" {
+            continue;
+        }
+        if id.starts_with("docker:") {
+            upsert_registry_instance(
+                &mut registry,
+                clawpal_core::instance::Instance {
+                    id: id.to_string(),
+                    instance_type: clawpal_core::instance::InstanceType::Docker,
+                    label: fallback_label_from_instance_id(id),
+                    openclaw_home: None,
+                    clawpal_data_dir: None,
+                    ssh_host_config: None,
+                },
+            )?;
+            imported_open_tab_instances += 1;
+            continue;
+        }
+        if id.starts_with("ssh:") {
+            let host_alias = id.strip_prefix("ssh:").unwrap_or("").to_string();
+            upsert_registry_instance(
+                &mut registry,
+                clawpal_core::instance::Instance {
+                    id: id.to_string(),
+                    instance_type: clawpal_core::instance::InstanceType::RemoteSsh,
+                    label: fallback_label_from_instance_id(id),
+                    openclaw_home: None,
+                    clawpal_data_dir: None,
+                    ssh_host_config: Some(clawpal_core::instance::SshHostConfig {
+                        id: id.to_string(),
+                        label: fallback_label_from_instance_id(id),
+                        host: host_alias,
+                        port: 22,
+                        username: String::new(),
+                        auth_method: "ssh_config".to_string(),
+                        key_path: None,
+                        password: None,
+                    }),
+                },
+            )?;
+            imported_open_tab_instances += 1;
+        }
+    }
+
+    registry.save().map_err(|e| e.to_string())?;
+    let total_instances = registry.list().len();
+    Ok(LegacyMigrationResult {
+        imported_ssh_hosts,
+        imported_docker_instances,
+        imported_open_tab_instances,
+        total_instances,
+    })
 }
 
 // ---------------------------------------------------------------------------
