@@ -39,6 +39,11 @@ impl SshSession {
         if config.host.trim().is_empty() {
             return Err(SshError::InvalidConfig("host is empty".to_string()));
         }
+        if config.auth_method.trim().eq_ignore_ascii_case("password") {
+            return Err(SshError::InvalidConfig(
+                "password auth is not supported in stateless ssh mode".to_string(),
+            ));
+        }
         Ok(Self {
             config: config.clone(),
         })
