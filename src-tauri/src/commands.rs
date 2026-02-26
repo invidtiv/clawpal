@@ -7115,16 +7115,6 @@ pub fn list_registered_instances() -> Result<Vec<clawpal_core::instance::Instanc
 // Task 3: Remote instance config CRUD
 // ---------------------------------------------------------------------------
 
-fn remote_instances_path() -> PathBuf {
-    // SSH host definitions are user-global and must not follow per-instance
-    // active data-dir overrides (e.g. docker-local).
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    let clawpal_dir = std::env::var("CLAWPAL_DATA_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from(home).join(".clawpal"));
-    clawpal_dir.join("remote-instances.json")
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SshConfigHostSuggestion {
@@ -7398,35 +7388,55 @@ fn parse_ssh_config_hosts(data: &str) -> Vec<SshConfigHostSuggestion> {
     dedup.into_values().collect()
 }
 
-fn read_hosts_from_disk() -> Result<Vec<SshHostConfig>, String> {
-    let path = remote_instances_path();
-    if !path.exists() {
-        return Ok(Vec::new());
+fn map_ssh_host_to_core(host: &SshHostConfig) -> clawpal_core::instance::SshHostConfig {
+    clawpal_core::instance::SshHostConfig {
+        id: host.id.clone(),
+        label: host.label.clone(),
+        host: host.host.clone(),
+        port: host.port,
+        username: host.username.clone(),
+        auth_method: host.auth_method.clone(),
+        key_path: host.key_path.clone(),
+        password: host.password.clone(),
     }
-    let data = fs::read_to_string(&path)
-        .map_err(|e| format!("Failed to read remote-instances.json: {e}"))?;
-    serde_json::from_str(&data).map_err(|e| format!("Failed to parse remote-instances.json: {e}"))
 }
 
-fn write_hosts_to_disk(hosts: &[SshHostConfig]) -> Result<(), String> {
-    let path = remote_instances_path();
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|e| format!("Failed to create dir: {e}"))?;
+fn map_ssh_host_from_core(host: &clawpal_core::instance::SshHostConfig) -> SshHostConfig {
+    SshHostConfig {
+        id: host.id.clone(),
+        label: host.label.clone(),
+        host: host.host.clone(),
+        port: host.port,
+        username: host.username.clone(),
+        auth_method: host.auth_method.clone(),
+        key_path: host.key_path.clone(),
+        password: host.password.clone(),
     }
-    let json = serde_json::to_string_pretty(hosts)
-        .map_err(|e| format!("Failed to serialize hosts: {e}"))?;
-    fs::write(&path, &json).map_err(|e| format!("Failed to write remote-instances.json: {e}"))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o600));
-    }
-    Ok(())
+}
+
+fn read_hosts_from_registry() -> Result<Vec<SshHostConfig>, String> {
+    let registry = clawpal_core::instance::InstanceRegistry::load().map_err(|e| e.to_string())?;
+    Ok(registry
+        .list()
+        .into_iter()
+        .filter(|instance| {
+            matches!(
+                instance.instance_type,
+                clawpal_core::instance::InstanceType::RemoteSsh
+            )
+        })
+        .filter_map(|instance| {
+            instance
+                .ssh_host_config
+                .as_ref()
+                .map(map_ssh_host_from_core)
+        })
+        .collect())
 }
 
 #[tauri::command]
 pub fn list_ssh_hosts() -> Result<Vec<SshHostConfig>, String> {
-    read_hosts_from_disk()
+    read_hosts_from_registry()
 }
 
 #[tauri::command]
@@ -7444,23 +7454,36 @@ pub fn list_ssh_config_hosts() -> Result<Vec<SshConfigHostSuggestion>, String> {
 
 #[tauri::command]
 pub fn upsert_ssh_host(host: SshHostConfig) -> Result<SshHostConfig, String> {
-    let mut hosts = read_hosts_from_disk()?;
-    if let Some(existing) = hosts.iter_mut().find(|h| h.id == host.id) {
-        *existing = host.clone();
-    } else {
-        hosts.push(host.clone());
+    let mut registry =
+        clawpal_core::instance::InstanceRegistry::load().map_err(|e| e.to_string())?;
+    let id = host.id.clone();
+    let existing = registry.get(&id).cloned();
+    if existing.is_some() {
+        let _ = registry.remove(&id);
     }
-    write_hosts_to_disk(&hosts)?;
+    let instance = clawpal_core::instance::Instance {
+        id: id.clone(),
+        instance_type: clawpal_core::instance::InstanceType::RemoteSsh,
+        label: host.label.clone(),
+        openclaw_home: existing
+            .as_ref()
+            .and_then(|instance| instance.openclaw_home.clone()),
+        clawpal_data_dir: existing
+            .as_ref()
+            .and_then(|instance| instance.clawpal_data_dir.clone()),
+        ssh_host_config: Some(map_ssh_host_to_core(&host)),
+    };
+    registry.add(instance).map_err(|e| e.to_string())?;
+    registry.save().map_err(|e| e.to_string())?;
     Ok(host)
 }
 
 #[tauri::command]
 pub fn delete_ssh_host(host_id: String) -> Result<bool, String> {
-    let mut hosts = read_hosts_from_disk()?;
-    let before = hosts.len();
-    hosts.retain(|h| h.id != host_id);
-    let removed = hosts.len() < before;
-    write_hosts_to_disk(&hosts)?;
+    let mut registry =
+        clawpal_core::instance::InstanceRegistry::load().map_err(|e| e.to_string())?;
+    let removed = registry.remove(&host_id).is_some();
+    registry.save().map_err(|e| e.to_string())?;
     Ok(removed)
 }
 
@@ -7477,7 +7500,7 @@ pub async fn ssh_connect(
     if pool.is_connected(&host_id).await {
         return Ok(true);
     }
-    let hosts = read_hosts_from_disk()?;
+    let hosts = read_hosts_from_registry()?;
     let host = hosts
         .into_iter()
         .find(|h| h.id == host_id)
@@ -7495,7 +7518,7 @@ pub async fn ssh_connect_with_passphrase(
     if pool.is_connected(&host_id).await {
         return Ok(true);
     }
-    let hosts = read_hosts_from_disk()?;
+    let hosts = read_hosts_from_registry()?;
     let host = hosts
         .into_iter()
         .find(|h| h.id == host_id)
