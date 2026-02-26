@@ -1,5 +1,6 @@
 use clap::{Parser, Subcommand};
 use clawpal_core::health::{check_instance, HealthStatus};
+use clawpal_core::install;
 use clawpal_core::instance::{Instance, InstanceRegistry, InstanceType};
 use clawpal_core::openclaw::OpenclawCli;
 use clawpal_core::profile::{
@@ -51,8 +52,20 @@ enum InstanceCommands {
 
 #[derive(Subcommand, Debug)]
 enum InstallCommands {
-    Docker,
+    Docker {
+        #[arg(long)]
+        home: Option<String>,
+        #[command(subcommand)]
+        command: Option<InstallDockerSubcommands>,
+    },
     Local,
+}
+
+#[derive(Subcommand, Debug)]
+enum InstallDockerSubcommands {
+    Pull,
+    Configure,
+    Up,
 }
 
 #[derive(Subcommand, Debug)]
@@ -103,6 +116,7 @@ fn main() {
     let result = match cli.command {
         Commands::Instance { command } => run_instance_command(command),
         Commands::Health { command } => run_health_command(command),
+        Commands::Install { command } => run_install_command(command),
         Commands::Profile { command } => run_profile_command(command),
         command => Ok(json!({
             "status": "not yet implemented",
@@ -205,6 +219,36 @@ fn run_profile_command(command: ProfileCommands) -> Result<serde_json::Value, St
             let result = test_profile(&openclaw, &id).map_err(|e| e.to_string())?;
             Ok(json!(result))
         }
+    }
+}
+
+fn run_install_command(command: InstallCommands) -> Result<serde_json::Value, String> {
+    match command {
+        InstallCommands::Docker { home, command } => {
+            let options = install::DockerInstallOptions {
+                home,
+                label: None,
+                dry_run: false,
+            };
+            let value = match command {
+                Some(InstallDockerSubcommands::Pull) => install::docker::pull(&options)
+                    .map_err(|e| e.to_string())
+                    .map(|r| json!(r))?,
+                Some(InstallDockerSubcommands::Configure) => install::docker::configure(&options)
+                    .map_err(|e| e.to_string())
+                    .map(|r| json!(r))?,
+                Some(InstallDockerSubcommands::Up) => install::docker::up(&options)
+                    .map_err(|e| e.to_string())
+                    .map(|r| json!(r))?,
+                None => install::install_docker(options)
+                    .map_err(|e| e.to_string())
+                    .map(|r| json!(r))?,
+            };
+            Ok(value)
+        }
+        InstallCommands::Local => install::install_local(install::LocalInstallOptions::default())
+            .map_err(|e| e.to_string())
+            .map(|r| json!(r)),
     }
 }
 
