@@ -120,7 +120,8 @@ function normalizeErrorSignature(raw: string): string {
 function isSshCooldownProtectionError(errorText: string): boolean {
   const text = errorText.toLowerCase();
   return (
-    text.includes("cooling down after repeated timeouts")
+    text.includes("ssh_cooldown:")
+    || text.includes("cooling down after repeated timeouts")
     || text.includes("are cooling down")
     || text.includes("retry in")
     || text.includes("冷却期")

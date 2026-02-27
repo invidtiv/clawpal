@@ -3,7 +3,6 @@ use std::time::{Duration as StdDuration, Instant};
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, Semaphore};
-use tokio::time::{timeout, Duration};
 
 pub type SshHostConfig = clawpal_core::instance::SshHostConfig;
 
@@ -42,8 +41,6 @@ pub struct SshConnectionPool {
 }
 
 const SSH_OP_MAX_CONCURRENCY_PER_HOST: usize = 2;
-const SSH_EXEC_TIMEOUT_SECS: u64 = 30;
-const SSH_SFTP_TIMEOUT_SECS: u64 = 45;
 const SSH_TIMEOUT_COOLDOWN_BASE_SECS: u64 = 20;
 const SSH_TIMEOUT_COOLDOWN_MAX_SECS: u64 = 120;
 
@@ -139,21 +136,10 @@ impl SshConnectionPool {
             .acquire_owned()
             .await
             .map_err(|e| format!("ssh limiter acquire failed: {e}"))?;
-        let session_connect = timeout(
-            Duration::from_secs(SSH_EXEC_TIMEOUT_SECS),
-            clawpal_core::ssh::SshSession::connect(&conn.config),
-        ).await;
-        let session = match session_connect {
-            Ok(Ok(s)) => s,
-            Ok(Err(e)) => return Err(e.to_string()),
-            Err(_) => {
-                self.mark_timeout_and_cooldown(&conn).await;
-                return Err(format!("ssh connect timeout after {SSH_EXEC_TIMEOUT_SECS}s"));
-            }
-        };
-        let result = timeout(Duration::from_secs(SSH_EXEC_TIMEOUT_SECS), session.exec(command))
+        let session = clawpal_core::ssh::SshSession::connect(&conn.config)
             .await
-            .map_err(|_| format!("ssh exec timeout after {SSH_EXEC_TIMEOUT_SECS}s"))?;
+            .map_err(|e| e.to_string())?;
+        let result = session.exec(command).await;
         let result = match result {
             Ok(v) => v,
             Err(e) => {
@@ -197,24 +183,10 @@ esac",
             .acquire_owned()
             .await
             .map_err(|e| format!("ssh limiter acquire failed: {e}"))?;
-        let session_connect = timeout(
-            Duration::from_secs(SSH_EXEC_TIMEOUT_SECS),
-            clawpal_core::ssh::SshSession::connect(&conn.config),
-        ).await;
-        let session = match session_connect {
-            Ok(Ok(s)) => s,
-            Ok(Err(e)) => return Err(e.to_string()),
-            Err(_) => {
-                self.mark_timeout_and_cooldown(&conn).await;
-                return Err(format!("ssh connect timeout after {SSH_EXEC_TIMEOUT_SECS}s"));
-            }
-        };
-        let bytes = timeout(
-            Duration::from_secs(SSH_SFTP_TIMEOUT_SECS),
-            session.sftp_read(&resolved),
-        )
-        .await
-        .map_err(|_| format!("sftp read timeout after {SSH_SFTP_TIMEOUT_SECS}s"))?;
+        let session = clawpal_core::ssh::SshSession::connect(&conn.config)
+            .await
+            .map_err(|e| e.to_string())?;
+        let bytes = session.sftp_read(&resolved).await;
         let bytes = match bytes {
             Ok(v) => v,
             Err(e) => {
@@ -239,24 +211,10 @@ esac",
             .acquire_owned()
             .await
             .map_err(|e| format!("ssh limiter acquire failed: {e}"))?;
-        let session_connect = timeout(
-            Duration::from_secs(SSH_EXEC_TIMEOUT_SECS),
-            clawpal_core::ssh::SshSession::connect(&conn.config),
-        ).await;
-        let session = match session_connect {
-            Ok(Ok(s)) => s,
-            Ok(Err(e)) => return Err(e.to_string()),
-            Err(_) => {
-                self.mark_timeout_and_cooldown(&conn).await;
-                return Err(format!("ssh connect timeout after {SSH_EXEC_TIMEOUT_SECS}s"));
-            }
-        };
-        let write_res = timeout(
-            Duration::from_secs(SSH_SFTP_TIMEOUT_SECS),
-            session.sftp_write(&resolved, content.as_bytes()),
-        )
-        .await
-        .map_err(|_| format!("sftp write timeout after {SSH_SFTP_TIMEOUT_SECS}s"))?;
+        let session = clawpal_core::ssh::SshSession::connect(&conn.config)
+            .await
+            .map_err(|e| e.to_string())?;
+        let write_res = session.sftp_write(&resolved, content.as_bytes()).await;
         match write_res {
             Ok(()) => {
                 self.clear_timeout_cooldown(&conn).await;
@@ -325,7 +283,7 @@ esac",
             if Instant::now() < until {
                 let left = until.saturating_duration_since(Instant::now()).as_secs();
                 return Err(format!(
-                    "ssh operations for {id} are cooling down after repeated timeouts; retry in {left}s"
+                    "SSH_COOLDOWN: operations for {id} are cooling down after repeated timeouts; retry in {left}s"
                 ));
             }
             state.cool_down_until = None;
