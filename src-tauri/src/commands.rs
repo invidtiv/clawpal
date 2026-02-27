@@ -8637,45 +8637,8 @@ pub async fn remote_run_openclaw_upgrade(
 // ---------------------------------------------------------------------------
 
 fn parse_cron_jobs(text: &str) -> Value {
-    let parsed: Value = serde_json::from_str(text).unwrap_or(Value::Array(vec![]));
-    // Handle { "version": N, "jobs": [...] } wrapper
-    let jobs = if let Some(arr) = parsed.pointer("/jobs") {
-        arr.clone()
-    } else {
-        parsed
-    };
-    match jobs {
-        Value::Array(arr) => {
-            let mapped: Vec<Value> = arr
-                .into_iter()
-                .map(|mut v| {
-                    // Map "id" → "jobId" for frontend compatibility
-                    if let Value::Object(ref mut obj) = v {
-                        if let Some(id) = obj.get("id").cloned() {
-                            obj.entry("jobId".to_string()).or_insert(id);
-                        }
-                    }
-                    v
-                })
-                .collect();
-            Value::Array(mapped)
-        }
-        Value::Object(map) => {
-            let arr: Vec<Value> = map
-                .into_iter()
-                .map(|(k, mut v)| {
-                    if let Value::Object(ref mut obj) = v {
-                        obj.entry("jobId".to_string())
-                            .or_insert(Value::String(k.clone()));
-                        obj.entry("id".to_string()).or_insert(Value::String(k));
-                    }
-                    v
-                })
-                .collect();
-            Value::Array(arr)
-        }
-        _ => Value::Array(vec![]),
-    }
+    let jobs = clawpal_core::cron::parse_cron_jobs(text).unwrap_or_default();
+    Value::Array(jobs)
 }
 
 #[tauri::command]
@@ -8701,12 +8664,7 @@ pub fn get_cron_runs(job_id: String, limit: Option<usize>) -> Result<Vec<Value>,
         return Ok(vec![]);
     }
     let text = std::fs::read_to_string(&runs_path).map_err(|e| e.to_string())?;
-    let mut runs: Vec<Value> = text
-        .lines()
-        .filter(|l| !l.trim().is_empty())
-        .filter_map(|l| serde_json::from_str(l).ok())
-        .collect();
-    runs.reverse();
+    let mut runs = clawpal_core::cron::parse_cron_runs(&text)?;
     let limit = limit.unwrap_or(10);
     runs.truncate(limit);
     Ok(runs)
@@ -8783,12 +8741,7 @@ pub async fn remote_get_cron_runs(
     let raw = pool.sftp_read(&host_id, &path).await;
     match raw {
         Ok(text) => {
-            let mut runs: Vec<Value> = text
-                .lines()
-                .filter(|l| !l.trim().is_empty())
-                .filter_map(|l| serde_json::from_str(l).ok())
-                .collect();
-            runs.reverse();
+            let mut runs = clawpal_core::cron::parse_cron_runs(&text)?;
             let limit = limit.unwrap_or(10);
             runs.truncate(limit);
             Ok(runs)
