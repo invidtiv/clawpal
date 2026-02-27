@@ -381,6 +381,56 @@ pub fn owner_display_parse_error(text: &str) -> bool {
             || lower.contains("deserialize"))
 }
 
+pub fn rescue_cleanup_noop(
+    action: &str,
+    command: &[String],
+    exit_code: i32,
+    stderr: &str,
+    stdout: &str,
+) -> bool {
+    if exit_code == 0 || !matches!(action, "deactivate" | "unset") {
+        return false;
+    }
+    let details = format!("{stderr}\n{stdout}").to_ascii_lowercase();
+    if details.contains("profile") && details.contains("not found") {
+        return true;
+    }
+    if command.len() >= 2 && command[command.len() - 2] == "gateway" && command[command.len() - 1] == "stop" {
+        return details.contains("not running")
+            || details.contains("already stopped")
+            || details.contains("isn't running")
+            || details.contains("is not running");
+    }
+    if command.len() >= 2
+        && command[command.len() - 2] == "gateway"
+        && command[command.len() - 1] == "uninstall"
+    {
+        return details.contains("not installed")
+            || details.contains("already uninstalled")
+            || details.contains("isn't installed")
+            || details.contains("is not installed");
+    }
+    if command.windows(3).any(|window| {
+        window[0] == "config" && window[1] == "unset" && window[2] == "gateway.port"
+    }) {
+        return details.contains("not found")
+            || details.contains("not set")
+            || details.contains("does not exist")
+            || details.contains("missing");
+    }
+    if command
+        .windows(2)
+        .any(|window| window[0] == "gateway" && window[1] == "status")
+    {
+        return details.contains("not running")
+            || details.contains("not installed")
+            || details.contains("not found")
+            || details.contains("is not running")
+            || details.contains("isn't running");
+    }
+    false
+}
+
 pub fn apply_issue_fixes(config: &mut Value, ids: &[String]) -> Result<Vec<String>, String> {
     let mut applied = Vec::new();
     for id in ids {
@@ -928,6 +978,41 @@ mod tests {
             "unknown field ownerDisplay while deserialize config"
         ));
         assert!(!owner_display_parse_error("connection refused"));
+    }
+
+    #[test]
+    fn rescue_cleanup_noop_matches_stop_not_running() {
+        let command = vec![
+            "--profile".to_string(),
+            "rescue".to_string(),
+            "gateway".to_string(),
+            "stop".to_string(),
+        ];
+        assert!(rescue_cleanup_noop(
+            "deactivate",
+            &command,
+            1,
+            "Gateway is not running",
+            ""
+        ));
+    }
+
+    #[test]
+    fn rescue_cleanup_noop_matches_unset_missing_key() {
+        let command = vec![
+            "--profile".to_string(),
+            "rescue".to_string(),
+            "config".to_string(),
+            "unset".to_string(),
+            "gateway.port".to_string(),
+        ];
+        assert!(rescue_cleanup_noop(
+            "unset",
+            &command,
+            1,
+            "config key gateway.port not found",
+            ""
+        ));
     }
 
     #[test]

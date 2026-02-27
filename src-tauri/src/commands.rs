@@ -3024,30 +3024,6 @@ fn is_gateway_restart_command(command: &[String]) -> bool {
         && command[command.len() - 1] == "restart"
 }
 
-fn is_gateway_stop_command(command: &[String]) -> bool {
-    command.len() >= 2
-        && command[command.len() - 2] == "gateway"
-        && command[command.len() - 1] == "stop"
-}
-
-fn is_gateway_uninstall_command(command: &[String]) -> bool {
-    command.len() >= 2
-        && command[command.len() - 2] == "gateway"
-        && command[command.len() - 1] == "uninstall"
-}
-
-fn is_gateway_status_command(command: &[String]) -> bool {
-    command
-        .windows(2)
-        .any(|window| window[0] == "gateway" && window[1] == "status")
-}
-
-fn is_config_unset_gateway_port_command(command: &[String]) -> bool {
-    command
-        .windows(3)
-        .any(|window| window[0] == "config" && window[1] == "unset" && window[2] == "gateway.port")
-}
-
 fn is_gateway_restart_timeout(output: &OpenclawCommandOutput) -> bool {
     clawpal_core::doctor::gateway_restart_timeout(&output.stderr, &output.stdout)
 }
@@ -3057,41 +3033,13 @@ fn is_rescue_cleanup_noop(
     command: &[String],
     output: &OpenclawCommandOutput,
 ) -> bool {
-    if output.exit_code == 0
-        || !matches!(action, RescueBotAction::Deactivate | RescueBotAction::Unset)
-    {
-        return false;
-    }
-    let details = format!("{}\n{}", output.stderr, output.stdout).to_ascii_lowercase();
-    if details.contains("profile") && details.contains("not found") {
-        return true;
-    }
-    if is_gateway_stop_command(command) {
-        return details.contains("not running")
-            || details.contains("already stopped")
-            || details.contains("isn't running")
-            || details.contains("is not running");
-    }
-    if is_gateway_uninstall_command(command) {
-        return details.contains("not installed")
-            || details.contains("already uninstalled")
-            || details.contains("isn't installed")
-            || details.contains("is not installed");
-    }
-    if is_config_unset_gateway_port_command(command) {
-        return details.contains("not found")
-            || details.contains("not set")
-            || details.contains("does not exist")
-            || details.contains("missing");
-    }
-    if is_gateway_status_command(command) {
-        return details.contains("not running")
-            || details.contains("not installed")
-            || details.contains("not found")
-            || details.contains("is not running")
-            || details.contains("isn't running");
-    }
-    false
+    clawpal_core::doctor::rescue_cleanup_noop(
+        action.as_str(),
+        command,
+        output.exit_code,
+        &output.stderr,
+        &output.stdout,
+    )
 }
 
 fn run_local_rescue_bot_command(command: Vec<String>) -> Result<RescueBotCommandResult, String> {
