@@ -1,5 +1,6 @@
 use crate::runtime::zeroclaw::process::run_zeroclaw_message;
 use crate::ssh::SshConnectionPool;
+use crate::json_util::extract_json_objects;
 use serde::Serialize;
 use serde_json::Value;
 use tauri::State;
@@ -25,58 +26,6 @@ struct OpenclawProbe {
     openclaw_path: Option<String>,
     path: Option<String>,
     probe_error: Option<String>,
-}
-
-fn extract_json_objects(raw: &str) -> Vec<String> {
-    let bytes = raw.as_bytes();
-    let mut out = Vec::new();
-    let mut start: Option<usize> = None;
-    let mut depth = 0usize;
-    let mut in_string = false;
-    let mut escaped = false;
-
-    for (i, b) in bytes.iter().enumerate() {
-        if in_string {
-            if escaped {
-                escaped = false;
-                continue;
-            }
-            if *b == b'\\' {
-                escaped = true;
-                continue;
-            }
-            if *b == b'"' {
-                in_string = false;
-            }
-            continue;
-        }
-
-        if *b == b'"' {
-            in_string = true;
-            continue;
-        }
-        if *b == b'{' {
-            if start.is_none() {
-                start = Some(i);
-            }
-            depth += 1;
-            continue;
-        }
-        if *b == b'}' {
-            if depth == 0 {
-                continue;
-            }
-            depth -= 1;
-            if depth == 0 {
-                if let Some(s) = start {
-                    out.push(raw[s..=i].to_string());
-                    start = None;
-                }
-            }
-        }
-    }
-
-    out
 }
 
 fn parse_guidance_json(raw: &str) -> Option<GuidanceBody> {
@@ -250,6 +199,7 @@ pub async fn explain_operation_error(
         "English"
     };
     let template = crate::prompt_templates::error_guidance_operation_fallback();
+    let probe_json = serde_json::to_string(&probe).unwrap_or_else(|_| "null".to_string());
     let prompt = crate::prompt_templates::render_template(
         &template,
         &[
@@ -258,12 +208,13 @@ pub async fn explain_operation_error(
             ("{{transport}}", &transport),
             ("{{operation}}", &operation),
             ("{{error}}", &error),
-            ("{{probe}}", &format!("{probe:?}")),
+            ("{{probe}}", &probe_json),
             ("{{language}}", &language),
         ],
     );
 
-    let from_agent = run_zeroclaw_message(&prompt, &instance_id)
+    let fallback_scope = format!("fallback-{}", uuid::Uuid::new_v4());
+    let from_agent = run_zeroclaw_message(&prompt, &instance_id, &fallback_scope)
         .ok()
         .and_then(|raw| parse_guidance_json(&raw));
 

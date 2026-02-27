@@ -70,6 +70,7 @@ pub mod doctor_runtime_bridge;
 pub mod history;
 pub mod install;
 pub mod install_commands;
+pub mod json_util;
 pub mod logging;
 pub mod models;
 pub mod node_client;

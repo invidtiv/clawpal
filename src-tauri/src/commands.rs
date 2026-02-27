@@ -5834,23 +5834,22 @@ mod model_profile_upsert_tests {
 
     #[test]
     fn preserve_existing_auth_fields_on_edit_when_payload_is_blank() {
-        let mut profiles = vec![mk_profile(
+        let profiles = vec![mk_profile(
             "p-1",
             "kimi-coding",
             "k2p5",
             "kimi-coding:default",
             Some("sk-old"),
         )];
-        let mut incoming = mk_profile("p-1", "kimi-coding", "k2.5", "", None);
-        fill_profile_auth_from_existing_or_provider_donor(&mut incoming, &profiles);
-
-        assert_eq!(incoming.auth_ref, "kimi-coding:default");
-        assert_eq!(incoming.api_key.as_deref(), Some("sk-old"));
-
-        let persisted = upsert_profile_in_storage(&mut profiles, incoming);
+        let incoming = mk_profile("p-1", "kimi-coding", "k2.5", "", None);
+        let content = serde_json::json!({ "profiles": profiles, "version": 1 }).to_string();
+        let (persisted, next_json) =
+            clawpal_core::profile::upsert_profile_in_storage_json(&content, incoming)
+                .expect("upsert");
         assert_eq!(persisted.api_key.as_deref(), Some("sk-old"));
         assert_eq!(persisted.auth_ref, "kimi-coding:default");
-        assert_eq!(profiles[0].model, "k2.5");
+        let next_profiles = clawpal_core::profile::list_profiles_from_storage_json(&next_json);
+        assert_eq!(next_profiles[0].model, "k2.5");
     }
 
     #[test]
@@ -5862,11 +5861,12 @@ mod model_profile_upsert_tests {
             "openrouter:default",
             Some("sk-donor"),
         );
-        let mut incoming = mk_profile("", "openrouter", "model-b", "", None);
-        fill_profile_auth_from_existing_or_provider_donor(&mut incoming, &[donor]);
-
-        assert_eq!(incoming.auth_ref, "openrouter:default");
-        assert_eq!(incoming.api_key.as_deref(), Some("sk-donor"));
+        let incoming = mk_profile("", "openrouter", "model-b", "", None);
+        let content = serde_json::json!({ "profiles": [donor], "version": 1 }).to_string();
+        let (saved, _) = clawpal_core::profile::upsert_profile_in_storage_json(&content, incoming)
+            .expect("upsert");
+        assert_eq!(saved.auth_ref, "openrouter:default");
+        assert_eq!(saved.api_key.as_deref(), Some("sk-donor"));
     }
 
     #[test]

@@ -1,4 +1,5 @@
 use crate::doctor::classify_engine_error;
+use crate::json_util::extract_json_objects;
 use crate::runtime::types::{
     RuntimeAdapter, RuntimeError, RuntimeErrorCode, RuntimeEvent, RuntimeSessionKey,
 };
@@ -26,55 +27,6 @@ impl ZeroclawDoctorAdapter {
         }
     }
 
-    fn extract_json_objects(raw: &str) -> Vec<String> {
-        let bytes = raw.as_bytes();
-        let mut out = Vec::new();
-        let mut start: Option<usize> = None;
-        let mut depth = 0usize;
-        let mut in_string = false;
-        let mut escaped = false;
-        for (i, b) in bytes.iter().enumerate() {
-            if in_string {
-                if escaped {
-                    escaped = false;
-                    continue;
-                }
-                if *b == b'\\' {
-                    escaped = true;
-                    continue;
-                }
-                if *b == b'"' {
-                    in_string = false;
-                }
-                continue;
-            }
-            if *b == b'"' {
-                in_string = true;
-                continue;
-            }
-            if *b == b'{' {
-                if start.is_none() {
-                    start = Some(i);
-                }
-                depth += 1;
-                continue;
-            }
-            if *b == b'}' {
-                if depth == 0 {
-                    continue;
-                }
-                depth -= 1;
-                if depth == 0 {
-                    if let Some(s) = start {
-                        out.push(raw[s..=i].to_string());
-                        start = None;
-                    }
-                }
-            }
-        }
-        out
-    }
-
     fn doctor_domain_prompt(key: &RuntimeSessionKey, message: &str) -> String {
         let target_line = if key.instance_id == "local" {
             "Target is local machine."
@@ -97,7 +49,7 @@ impl ZeroclawDoctorAdapter {
     fn normalize_doctor_output(raw: String) -> String {
         let trimmed = raw.trim();
         let mut candidates = vec![trimmed.to_string()];
-        for extracted in Self::extract_json_objects(trimmed) {
+        for extracted in extract_json_objects(trimmed) {
             if extracted != trimmed {
                 candidates.push(extracted);
             }
