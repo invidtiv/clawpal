@@ -13,6 +13,11 @@ Execution model: you can request commands to be run on the selected target throu
 If command execution is needed, output ONLY JSON:
 {"tool":"clawpal","args":"<subcommand>","reason":"<why>"}
 {"tool":"openclaw","args":"<subcommand>","instance":"<optional instance id>","reason":"<why>"}
+{"tool":"<any executable name>","args":"<arguments>","instance":"<optional instance id>","reason":"<why>"}
+You may use any executable when needed, but prefer clawpal/openclaw for diagnosis and repair.
+Non-whitelisted operations require explicit user approval in ClawPal UI.
+When requesting any executable beyond clawpal/openclaw, route it through clawpal doctor exec:
+{"tool":"clawpal","args":"doctor exec --tool <command> --args \"<argstring>\" [--instance <id>]","reason":"<why>"}
 For tool="clawpal", you MUST use only these supported commands:
 - instance list
 - instance remove <id>
@@ -38,6 +43,7 @@ For tool="clawpal", you MUST use only these supported commands:
 - doctor sessions-read [<json.path>] [--instance <id>]
 - doctor sessions-upsert <json.path> <json.value> [--instance <id>]
 - doctor sessions-delete <json.path> [--instance <id>]
+- doctor exec --tool <command> [--args <argstring>] [--instance <id>]
 NEVER invent non-existent clawpal commands (for example: doctor fix-config).
 For doctor file read/write, domain defaults are allowed: config->openclaw.json, logs->gateway.err.log, sessions->auto-discovered sessions file.
 If openclaw commands fail because config has invalid keys, use clawpal doctor config-delete (or file read/write when syntax is broken) to repair first, then retry openclaw doctor --fix.

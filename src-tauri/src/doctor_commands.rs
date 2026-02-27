@@ -1,5 +1,5 @@
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Mutex, OnceLock};
 use tauri::{AppHandle, Emitter, State};
 
@@ -132,9 +132,12 @@ pub async fn doctor_approve_invoke(
         "clawpal" => run_clawpal_tool(&pool, &args, &target).await,
         "openclaw" => run_openclaw_tool(&pool, &args, &target).await,
         _ => {
-            return Err(format!(
-                "unsupported tool '{command}', expected 'clawpal' or 'openclaw'"
-            ))
+            let raw_args = args
+                .get("args")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim();
+            run_doctor_exec_tool(&pool, command, raw_args, &target).await
         }
     };
     let result = match exec_result {
@@ -523,6 +526,22 @@ fn sh_single_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
+const DOCTOR_LOG_READ_MAX_LINES: usize = 400;
+
+fn trim_to_last_lines(content: &str, max_lines: usize) -> String {
+    if max_lines == 0 {
+        return String::new();
+    }
+    let mut ring: VecDeque<&str> = VecDeque::with_capacity(max_lines + 1);
+    for line in content.lines() {
+        ring.push_back(line);
+        if ring.len() > max_lines {
+            let _ = ring.pop_front();
+        }
+    }
+    ring.into_iter().collect::<Vec<_>>().join("\n")
+}
+
 fn local_openclaw_root() -> Result<std::path::PathBuf, String> {
     let paths = resolve_paths();
     paths
@@ -581,7 +600,18 @@ async fn doctor_file_read(
         clawpal_core::doctor::validate_doctor_relative_path(&rel)?;
         let full_path = format!("{}/{}", root.trim_end_matches('/'), rel);
         validate_not_sensitive(&full_path)?;
-        let content = pool.sftp_read(target, &full_path).await?;
+        let content = if domain == "logs" {
+            // Guardrail: logs can be very large; always tail a bounded window for doctor context.
+            let cmd = format!(
+                "tail -n {} {} 2>/dev/null || true",
+                DOCTOR_LOG_READ_MAX_LINES,
+                sh_single_quote(&full_path)
+            );
+            let out = pool.exec_login(target, &cmd).await?;
+            out.stdout
+        } else {
+            pool.sftp_read(target, &full_path).await?
+        };
         return Ok(json!({
             "target": target,
             "remote": true,
@@ -614,8 +644,13 @@ async fn doctor_file_read(
     clawpal_core::doctor::validate_doctor_relative_path(&rel)?;
     let full_path = root.join(&rel);
     validate_not_sensitive(&full_path.to_string_lossy())?;
-    let content =
-        std::fs::read_to_string(&full_path).map_err(|e| format!("failed to read file: {e}"))?;
+    let content = if domain == "logs" {
+        let raw =
+            std::fs::read_to_string(&full_path).map_err(|e| format!("failed to read file: {e}"))?;
+        trim_to_last_lines(&raw, DOCTOR_LOG_READ_MAX_LINES)
+    } else {
+        std::fs::read_to_string(&full_path).map_err(|e| format!("failed to read file: {e}"))?
+    };
     Ok(json!({
         "target": target,
         "remote": false,
@@ -1061,6 +1096,7 @@ const DOCTOR_SUPPORTED_CLAWPAL_COMMANDS: &[&str] = &[
     "doctor sessions-read [<json.path>] [--instance <id>]",
     "doctor sessions-upsert <json.path> <json.value> [--instance <id>]",
     "doctor sessions-delete <json.path> [--instance <id>]",
+    "doctor exec --tool <command> [--args <argstring>] [--instance <id>]",
 ];
 
 async fn run_clawpal_tool(
@@ -1213,6 +1249,24 @@ async fn run_clawpal_tool(
             .ok_or_else(|| "clawpal doctor sessions-delete requires <json.path>".to_string())?;
         let out = doctor_sessions_delete(pool, target, key_path).await?;
         return tool_stdout_json(out);
+    }
+    if token_refs.first().copied() == Some("doctor")
+        && token_refs.get(1).copied() == Some("exec")
+    {
+        let parsed = parse_cli_args(&token_refs[2..]);
+        let target = resolved_target(target, &parsed)?;
+        let tool = parsed
+            .options
+            .get("tool")
+            .and_then(|v| v.as_deref())
+            .ok_or_else(|| "clawpal doctor exec requires --tool".to_string())?;
+        let tool_args = parsed
+            .options
+            .get("args")
+            .and_then(|v| v.as_deref())
+            .unwrap_or("");
+        let out = run_doctor_exec_tool(pool, tool, tool_args, target).await?;
+        return Ok(out);
     }
 
     match (token_refs.first().copied(), token_refs.get(1).copied()) {
@@ -1522,6 +1576,48 @@ async fn run_openclaw_tool(
     }))
 }
 
+async fn run_doctor_exec_tool(
+    pool: &SshConnectionPool,
+    tool: &str,
+    raw_args: &str,
+    target: &str,
+) -> Result<Value, String> {
+    let command = tool.trim();
+    if command.is_empty() {
+        return Err("doctor exec --tool cannot be empty".to_string());
+    }
+    let raw = raw_args.trim();
+    let tokens = if raw.is_empty() {
+        Vec::new()
+    } else {
+        parse_tool_tokens(raw)?
+    };
+
+    if target_is_remote_instance(target) {
+        let mut cmd = sh_single_quote(command);
+        for token in &tokens {
+            cmd.push(' ');
+            cmd.push_str(&sh_single_quote(token));
+        }
+        let out = pool.exec_login(target, &cmd).await?;
+        return Ok(json!({
+            "stdout": out.stdout,
+            "stderr": out.stderr,
+            "exitCode": out.exit_code,
+        }));
+    }
+
+    let output = std::process::Command::new(command)
+        .args(tokens.iter())
+        .output()
+        .map_err(|e| format!("failed to execute '{command}': {e}"))?;
+    Ok(json!({
+        "stdout": String::from_utf8_lossy(&output.stdout).to_string(),
+        "stderr": String::from_utf8_lossy(&output.stderr).to_string(),
+        "exitCode": output.status.code().unwrap_or(-1),
+    }))
+}
+
 fn validate_openclaw_tokens(tokens: &[String]) -> Result<(), String> {
     let first = tokens
         .first()
@@ -1722,5 +1818,12 @@ mod tests {
             prompt.contains("NEVER invent non-existent clawpal commands (for example: doctor fix-config)."),
             "prompt should explicitly forbid legacy doctor fix-config command"
         );
+    }
+
+    #[test]
+    fn trim_to_last_lines_limits_output() {
+        let text = "1\n2\n3\n4\n5";
+        let trimmed = trim_to_last_lines(text, 3);
+        assert_eq!(trimmed, "3\n4\n5");
     }
 }

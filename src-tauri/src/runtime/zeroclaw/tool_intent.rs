@@ -25,6 +25,7 @@ pub fn classify_invoke_type(tool: &str, args: &str) -> &'static str {
             "install docker",
             "ssh connect",
             "ssh disconnect",
+            "doctor exec",
             "doctor fix-openclaw-path",
             "doctor file write",
             "doctor config-upsert",
@@ -161,6 +162,10 @@ mod tests {
     fn classify_invoke_type_marks_mutations_as_write() {
         assert_eq!(
             classify_invoke_type("clawpal", "doctor file write --domain config --content {}"),
+            "write"
+        );
+        assert_eq!(
+            classify_invoke_type("clawpal", "doctor exec --tool sudo --args \"rm -rf /tmp/x\""),
             "write"
         );
         assert_eq!(classify_invoke_type("openclaw", "doctor --fix"), "write");
