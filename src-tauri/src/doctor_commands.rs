@@ -485,6 +485,14 @@ fn parse_cli_args(tokens: &[&str]) -> ParsedCliArgs {
     parsed
 }
 
+fn resolved_target<'a>(default_target: &'a str, parsed: &'a ParsedCliArgs) -> Result<&'a str, String> {
+    match parsed.options.get("instance").and_then(|v| v.as_deref()) {
+        Some(id) if id.trim().is_empty() => Err("clawpal doctor --instance cannot be empty".to_string()),
+        Some(id) => Ok(id),
+        None => Ok(default_target),
+    }
+}
+
 fn tool_stdout_json(value: Value) -> Result<Value, String> {
     let stdout =
         serde_json::to_string(&value).map_err(|e| format!("failed to serialize tool output: {e}"))?;
@@ -1199,16 +1207,16 @@ const DOCTOR_SUPPORTED_CLAWPAL_COMMANDS: &[&str] = &[
     "connect ssh --host <host> [--port <port>] [--user <user>] [--id <id>] [--label <label>] [--key-path <path>]",
     "install local",
     "install docker [--home <path>] [--label <label>] [--dry-run] [pull|configure|up]",
-    "doctor probe-openclaw",
-    "doctor fix-openclaw-path",
-    "doctor file read --domain <config|sessions|logs|state> [--path <relpath>]",
-    "doctor file write --domain <config|sessions|logs|state> [--path <relpath>] --content <text> [--backup]",
-    "doctor config-read [<json.path>]",
-    "doctor config-upsert <json.path> <json.value>",
-    "doctor config-delete <json.path>",
-    "doctor sessions-read [<json.path>]",
-    "doctor sessions-upsert <json.path> <json.value>",
-    "doctor sessions-delete <json.path>",
+    "doctor probe-openclaw [--instance <id>]",
+    "doctor fix-openclaw-path [--instance <id>]",
+    "doctor file read --domain <config|sessions|logs|state> [--path <relpath>] [--instance <id>]",
+    "doctor file write --domain <config|sessions|logs|state> [--path <relpath>] --content <text> [--backup] [--instance <id>]",
+    "doctor config-read [<json.path>] [--instance <id>]",
+    "doctor config-upsert <json.path> <json.value> [--instance <id>]",
+    "doctor config-delete <json.path> [--instance <id>]",
+    "doctor sessions-read [<json.path>] [--instance <id>]",
+    "doctor sessions-upsert <json.path> <json.value> [--instance <id>]",
+    "doctor sessions-delete <json.path> [--instance <id>]",
 ];
 
 async fn run_clawpal_tool(
@@ -1230,11 +1238,19 @@ async fn run_clawpal_tool(
         return Err("clawpal: missing args".to_string());
     }
 
-    if token_refs.as_slice() == ["doctor", "probe-openclaw"] {
+    if token_refs.first().copied() == Some("doctor")
+        && token_refs.get(1).copied() == Some("probe-openclaw")
+    {
+        let parsed = parse_cli_args(&token_refs[2..]);
+        let target = resolved_target(target, &parsed)?;
         let probed = probe_openclaw_on_target(pool, target).await?;
         return tool_stdout_json(probed);
     }
-    if token_refs.as_slice() == ["doctor", "fix-openclaw-path"] {
+    if token_refs.first().copied() == Some("doctor")
+        && token_refs.get(1).copied() == Some("fix-openclaw-path")
+    {
+        let parsed = parse_cli_args(&token_refs[2..]);
+        let target = resolved_target(target, &parsed)?;
         let fixed = fix_openclaw_path_on_target(pool, target).await?;
         return tool_stdout_json(fixed);
     }
@@ -1243,6 +1259,7 @@ async fn run_clawpal_tool(
         && token_refs.get(2).copied() == Some("read")
     {
         let parsed = parse_cli_args(&token_refs[3..]);
+        let target = resolved_target(target, &parsed)?;
         let domain = parsed
             .options
             .get("domain")
@@ -1257,6 +1274,7 @@ async fn run_clawpal_tool(
         && token_refs.get(2).copied() == Some("write")
     {
         let parsed = parse_cli_args(&token_refs[3..]);
+        let target = resolved_target(target, &parsed)?;
         let domain = parsed
             .options
             .get("domain")
@@ -1275,20 +1293,26 @@ async fn run_clawpal_tool(
     if token_refs.first().copied() == Some("doctor")
         && token_refs.get(1).copied() == Some("config-read")
     {
-        let path = token_refs.get(2).copied();
+        let parsed = parse_cli_args(&token_refs[2..]);
+        let target = resolved_target(target, &parsed)?;
+        let path = parsed.positionals.first().map(String::as_str);
         let out = doctor_config_read(pool, target, path).await?;
         return tool_stdout_json(out);
     }
     if token_refs.first().copied() == Some("doctor")
         && token_refs.get(1).copied() == Some("config-upsert")
     {
-        let key_path = token_refs
-            .get(2)
-            .copied()
+        let parsed = parse_cli_args(&token_refs[2..]);
+        let target = resolved_target(target, &parsed)?;
+        let key_path = parsed
+            .positionals
+            .first()
+            .map(String::as_str)
             .ok_or_else(|| "clawpal doctor config-upsert requires <json.path> <json.value>".to_string())?;
-        let value_json = token_refs
-            .get(3)
-            .copied()
+        let value_json = parsed
+            .positionals
+            .get(1)
+            .map(String::as_str)
             .ok_or_else(|| "clawpal doctor config-upsert requires <json.path> <json.value>".to_string())?;
         let out = doctor_config_upsert(pool, target, key_path, value_json).await?;
         return tool_stdout_json(out);
@@ -1296,9 +1320,12 @@ async fn run_clawpal_tool(
     if token_refs.first().copied() == Some("doctor")
         && token_refs.get(1).copied() == Some("config-delete")
     {
-        let key_path = token_refs
-            .get(2)
-            .copied()
+        let parsed = parse_cli_args(&token_refs[2..]);
+        let target = resolved_target(target, &parsed)?;
+        let key_path = parsed
+            .positionals
+            .first()
+            .map(String::as_str)
             .ok_or_else(|| "clawpal doctor config-delete requires <json.path>".to_string())?;
         let out = doctor_config_delete(pool, target, key_path).await?;
         return tool_stdout_json(out);
@@ -1306,20 +1333,26 @@ async fn run_clawpal_tool(
     if token_refs.first().copied() == Some("doctor")
         && token_refs.get(1).copied() == Some("sessions-read")
     {
-        let path = token_refs.get(2).copied();
+        let parsed = parse_cli_args(&token_refs[2..]);
+        let target = resolved_target(target, &parsed)?;
+        let path = parsed.positionals.first().map(String::as_str);
         let out = doctor_sessions_read(pool, target, path).await?;
         return tool_stdout_json(out);
     }
     if token_refs.first().copied() == Some("doctor")
         && token_refs.get(1).copied() == Some("sessions-upsert")
     {
-        let key_path = token_refs
-            .get(2)
-            .copied()
+        let parsed = parse_cli_args(&token_refs[2..]);
+        let target = resolved_target(target, &parsed)?;
+        let key_path = parsed
+            .positionals
+            .first()
+            .map(String::as_str)
             .ok_or_else(|| "clawpal doctor sessions-upsert requires <json.path> <json.value>".to_string())?;
-        let value_json = token_refs
-            .get(3)
-            .copied()
+        let value_json = parsed
+            .positionals
+            .get(1)
+            .map(String::as_str)
             .ok_or_else(|| "clawpal doctor sessions-upsert requires <json.path> <json.value>".to_string())?;
         let out = doctor_sessions_upsert(pool, target, key_path, value_json).await?;
         return tool_stdout_json(out);
@@ -1327,9 +1360,12 @@ async fn run_clawpal_tool(
     if token_refs.first().copied() == Some("doctor")
         && token_refs.get(1).copied() == Some("sessions-delete")
     {
-        let key_path = token_refs
-            .get(2)
-            .copied()
+        let parsed = parse_cli_args(&token_refs[2..]);
+        let target = resolved_target(target, &parsed)?;
+        let key_path = parsed
+            .positionals
+            .first()
+            .map(String::as_str)
             .ok_or_else(|| "clawpal doctor sessions-delete requires <json.path>".to_string())?;
         let out = doctor_sessions_delete(pool, target, key_path).await?;
         return tool_stdout_json(out);
@@ -1746,6 +1782,19 @@ mod tests {
         assert_eq!(
             parsed.options.get("label").and_then(|v| v.as_deref()),
             Some("Docker Local")
+        );
+    }
+
+    #[test]
+    fn parse_cli_args_supports_doctor_instance_override() {
+        let tokens = parse_tool_tokens("doctor config-read commands --instance ssh:vm1")
+            .expect("parse tokens");
+        let token_refs: Vec<&str> = tokens.iter().map(String::as_str).collect();
+        let parsed = parse_cli_args(&token_refs[2..]);
+        assert_eq!(parsed.positionals.first().map(String::as_str), Some("commands"));
+        assert_eq!(
+            resolved_target("local", &parsed).expect("resolve target"),
+            "ssh:vm1"
         );
     }
 

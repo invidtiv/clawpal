@@ -24,16 +24,16 @@ For tool="clawpal", you MUST use only these supported commands:
 - connect ssh --host <host> [--port <port>] [--user <user>] [--id <id>] [--label <label>] [--key-path <path>]
 - install local
 - install docker [--home <path>] [--label <label>] [--dry-run] [pull|configure|up]
-- doctor probe-openclaw
-- doctor fix-openclaw-path
-- doctor file read --domain <config|sessions|logs|state> [--path <relpath>]
-- doctor file write --domain <config|sessions|logs|state> [--path <relpath>] --content <text> [--backup]
-- doctor config-read [<json.path>]
-- doctor config-upsert <json.path> <json.value>
-- doctor config-delete <json.path>
-- doctor sessions-read [<json.path>]
-- doctor sessions-upsert <json.path> <json.value>
-- doctor sessions-delete <json.path>
+- doctor probe-openclaw [--instance <id>]
+- doctor fix-openclaw-path [--instance <id>]
+- doctor file read --domain <config|sessions|logs|state> [--path <relpath>] [--instance <id>]
+- doctor file write --domain <config|sessions|logs|state> [--path <relpath>] --content <text> [--backup] [--instance <id>]
+- doctor config-read [<json.path>] [--instance <id>]
+- doctor config-upsert <json.path> <json.value> [--instance <id>]
+- doctor config-delete <json.path> [--instance <id>]
+- doctor sessions-read [<json.path>] [--instance <id>]
+- doctor sessions-upsert <json.path> <json.value> [--instance <id>]
+- doctor sessions-delete <json.path> [--instance <id>]
 NEVER invent non-existent clawpal commands (for example: doctor fix-config).
 For doctor file read/write, domain defaults are allowed: config->openclaw.json, logs->gateway.err.log, sessions->auto-discovered sessions file.
 Do NOT claim you cannot access the host or lack permissions.
