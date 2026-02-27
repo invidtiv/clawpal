@@ -697,7 +697,7 @@ export function App() {
   // Derive openTabs array for InstanceTabBar
   const openTabs = useMemo(() => {
     const registryById = new Map(registeredInstances.map((item) => [item.id, item]));
-    return openTabIds.map((id) => {
+    return openTabIds.flatMap((id) => {
       if (id === "local") return { id, label: t("instance.local"), type: "local" as const };
       const registered = registryById.get(id);
       if (registered) {
@@ -707,15 +707,9 @@ export function App() {
           type: registered.instanceType === "remote_ssh" ? "ssh" as const : registered.instanceType as "local" | "docker",
         };
       }
-      const docker = dockerInstances.find((d) => d.id === id);
-      if (docker) return { id, label: docker.label || id, type: "docker" as const };
-      const ssh = sshHosts.find((h) => h.id === id);
-      if (ssh) return { id, label: ssh.label || ssh.host, type: "ssh" as const };
-      if (id.startsWith("docker:")) return { id, label: fallbackInstanceLabel(id, t), type: "docker" as const };
-      if (id.startsWith("ssh:")) return { id, label: fallbackInstanceLabel(id, t), type: "ssh" as const };
-      return { id, label: fallbackInstanceLabel(id, t), type: "local" as const };
+      return [];
     });
-  }, [openTabIds, dockerInstances, sshHosts, registeredInstances, t]);
+  }, [openTabIds, registeredInstances, t]);
 
   // Handle install completion — register docker instance and open tab
   const handleInstallReady = useCallback((session: InstallSession) => {

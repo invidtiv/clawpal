@@ -225,23 +225,6 @@ export function StartPage({
       type: r.instanceType === "remote_ssh" ? "ssh" : r.instanceType,
     });
   }
-  for (const d of dockerInstances) {
-    if (instancesMap.has(d.id)) continue;
-    instancesMap.set(d.id, { id: d.id, label: d.label || d.id, type: "docker" });
-  }
-  for (const h of sshHosts) {
-    if (instancesMap.has(h.id)) continue;
-    instancesMap.set(h.id, { id: h.id, label: h.label || h.host, type: "ssh" });
-  }
-  for (const id of openTabIds) {
-    if (instancesMap.has(id)) continue;
-    const type = id.startsWith("docker:")
-      ? "docker"
-      : id.startsWith("ssh:")
-        ? "ssh"
-        : "local";
-    instancesMap.set(id, { id, label: fallbackLabelForId(id), type });
-  }
   const instances = Array.from(instancesMap.values());
 
   // Docker rename handlers
