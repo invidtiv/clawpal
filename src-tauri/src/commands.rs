@@ -3049,9 +3049,7 @@ fn is_config_unset_gateway_port_command(command: &[String]) -> bool {
 }
 
 fn is_gateway_restart_timeout(output: &OpenclawCommandOutput) -> bool {
-    let details = format!("{}\n{}", output.stderr, output.stdout).to_ascii_lowercase();
-    details.contains("gateway restart timed out")
-        || (details.contains("timed out") && details.contains("health check"))
+    clawpal_core::doctor::gateway_restart_timeout(&output.stderr, &output.stdout)
 }
 
 fn is_rescue_cleanup_noop(
@@ -5311,7 +5309,10 @@ mod rescue_bot_tests {
             stderr: "Gateway restart timed out after 60s waiting for health checks.".into(),
             exit_code: 1,
         };
-        assert!(is_gateway_restart_timeout(&output));
+        assert!(clawpal_core::doctor::gateway_restart_timeout(
+            &output.stderr,
+            &output.stdout
+        ));
     }
 
     #[test]
@@ -5321,7 +5322,10 @@ mod rescue_bot_tests {
             stderr: "gateway start failed: address already in use".into(),
             exit_code: 1,
         };
-        assert!(!is_gateway_restart_timeout(&output));
+        assert!(!clawpal_core::doctor::gateway_restart_timeout(
+            &output.stderr,
+            &output.stdout
+        ));
     }
 
     #[test]
@@ -7039,12 +7043,7 @@ pub async fn remote_read_raw_config(
 }
 
 fn is_owner_display_parse_error(text: &str) -> bool {
-    let lower = text.to_lowercase();
-    lower.contains("ownerdisplay")
-        && (lower.contains("unknown field")
-            || lower.contains("invalid field")
-            || lower.contains("failed to parse")
-            || lower.contains("deserialize"))
+    clawpal_core::doctor::owner_display_parse_error(text)
 }
 
 async fn run_openclaw_remote_with_autofix(

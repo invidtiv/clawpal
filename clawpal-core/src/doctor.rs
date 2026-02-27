@@ -366,6 +366,21 @@ pub fn build_primary_issue_fix_tail(issue_id: &str) -> Option<(String, Vec<Strin
     }
 }
 
+pub fn gateway_restart_timeout(stderr: &str, stdout: &str) -> bool {
+    let details = format!("{stderr}\n{stdout}").to_ascii_lowercase();
+    details.contains("gateway restart timed out")
+        || (details.contains("timed out") && details.contains("health check"))
+}
+
+pub fn owner_display_parse_error(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    lower.contains("ownerdisplay")
+        && (lower.contains("unknown field")
+            || lower.contains("invalid field")
+            || lower.contains("failed to parse")
+            || lower.contains("deserialize"))
+}
+
 pub fn apply_issue_fixes(config: &mut Value, ids: &[String]) -> Result<Vec<String>, String> {
     let mut applied = Vec::new();
     for id in ids {
@@ -893,6 +908,26 @@ mod tests {
                 "--json".to_string()
             ]
         );
+    }
+
+    #[test]
+    fn gateway_restart_timeout_matches_health_check_timeout() {
+        assert!(gateway_restart_timeout(
+            "Gateway restart timed out after 60s waiting for health checks.",
+            ""
+        ));
+        assert!(!gateway_restart_timeout(
+            "gateway start failed: address already in use",
+            ""
+        ));
+    }
+
+    #[test]
+    fn owner_display_parse_error_matches_known_patterns() {
+        assert!(owner_display_parse_error(
+            "unknown field ownerDisplay while deserialize config"
+        ));
+        assert!(!owner_display_parse_error("connection refused"));
     }
 
     #[test]
