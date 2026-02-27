@@ -107,6 +107,16 @@ pub fn resolve_agent_workspace_from_config(
         .ok_or_else(|| format!("Agent '{}' has no workspace configured", agent_id))
 }
 
+pub fn doctor_json_option_unsupported(stderr: &str, stdout: &str) -> bool {
+    let details = format!("{stderr}\n{stdout}").to_ascii_lowercase();
+    (details.contains("unknown option")
+        || details.contains("unknown argument")
+        || details.contains("unrecognized option")
+        || details.contains("unexpected argument")
+        || details.contains("no such option"))
+        && details.contains("--json")
+}
+
 pub fn apply_issue_fixes(config: &mut Value, ids: &[String]) -> Result<Vec<String>, String> {
     let mut applied = Vec::new();
     for id in ids {
@@ -424,6 +434,14 @@ mod tests {
             resolve_agent_workspace_from_config(&doc, "main", Some("~/.openclaw/agents"))
                 .expect("workspace");
         assert_eq!(workspace, "~/workspace/main");
+    }
+
+    #[test]
+    fn doctor_json_option_unsupported_matches_unknown_option_errors() {
+        assert!(doctor_json_option_unsupported(
+            "error: unknown option '--json'",
+            ""
+        ));
     }
 
     #[test]

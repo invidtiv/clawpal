@@ -3247,16 +3247,6 @@ fn is_gateway_restart_timeout(output: &OpenclawCommandOutput) -> bool {
         || (details.contains("timed out") && details.contains("health check"))
 }
 
-fn is_doctor_json_option_unsupported(output: &OpenclawCommandOutput) -> bool {
-    let details = format!("{}\n{}", output.stderr, output.stdout).to_ascii_lowercase();
-    (details.contains("unknown option")
-        || details.contains("unknown argument")
-        || details.contains("unrecognized option")
-        || details.contains("unexpected argument")
-        || details.contains("no such option"))
-        && details.contains("--json")
-}
-
 fn is_rescue_cleanup_noop(
     action: RescueBotAction,
     command: &[String],
@@ -3307,7 +3297,9 @@ fn run_local_rescue_bot_command(command: Vec<String>) -> Result<RescueBotCommand
 fn run_local_primary_doctor_with_fallback(profile: &str) -> Result<OpenclawCommandOutput, String> {
     let json_command = build_profile_command(profile, &["doctor", "--json"]);
     let output = run_openclaw_dynamic(&json_command)?;
-    if output.exit_code != 0 && is_doctor_json_option_unsupported(&output) {
+    if output.exit_code != 0
+        && clawpal_core::doctor::doctor_json_option_unsupported(&output.stderr, &output.stdout)
+    {
         let plain_command = build_profile_command(profile, &["doctor"]);
         return run_openclaw_dynamic(&plain_command);
     }
@@ -5554,23 +5546,29 @@ mod rescue_bot_tests {
     }
 
     #[test]
-    fn test_is_doctor_json_option_unsupported_matches_unknown_option() {
+    fn test_doctor_json_option_unsupported_matches_unknown_option() {
         let output = OpenclawCommandOutput {
             stdout: String::new(),
             stderr: "error: unknown option '--json'".into(),
             exit_code: 1,
         };
-        assert!(is_doctor_json_option_unsupported(&output));
+        assert!(clawpal_core::doctor::doctor_json_option_unsupported(
+            &output.stderr,
+            &output.stdout
+        ));
     }
 
     #[test]
-    fn test_is_doctor_json_option_unsupported_ignores_other_failures() {
+    fn test_doctor_json_option_unsupported_ignores_other_failures() {
         let output = OpenclawCommandOutput {
             stdout: String::new(),
             stderr: "doctor command failed to connect".into(),
             exit_code: 1,
         };
-        assert!(!is_doctor_json_option_unsupported(&output));
+        assert!(!clawpal_core::doctor::doctor_json_option_unsupported(
+            &output.stderr,
+            &output.stdout
+        ));
     }
 
     #[test]
@@ -7770,7 +7768,9 @@ async fn run_remote_primary_doctor_with_fallback(
 ) -> Result<OpenclawCommandOutput, String> {
     let json_command = build_profile_command(profile, &["doctor", "--json"]);
     let output = run_remote_openclaw_dynamic(pool, host_id, json_command).await?;
-    if output.exit_code != 0 && is_doctor_json_option_unsupported(&output) {
+    if output.exit_code != 0
+        && clawpal_core::doctor::doctor_json_option_unsupported(&output.stderr, &output.stdout)
+    {
         let plain_command = build_profile_command(profile, &["doctor"]);
         return run_remote_openclaw_dynamic(pool, host_id, plain_command).await;
     }
