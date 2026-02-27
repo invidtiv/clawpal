@@ -6002,4 +6002,3 @@ pub fn read_gateway_error_log(lines: Option<usize>) -> Result<String, String> {
 // ---------------------------------------------------------------------------
 // Remote watchdog management
 // ---------------------------------------------------------------------------
-

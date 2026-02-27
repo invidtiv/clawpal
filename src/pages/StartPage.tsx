@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { PlusIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -92,6 +92,8 @@ export function StartPage({
   // SSH manual check state: tracks which hosts have been checked / are checking
   const [sshChecked, setSshChecked] = useState<Record<string, boolean>>({});
   const [sshChecking, setSshChecking] = useState<Record<string, boolean>>({});
+  const healthPollInFlightRef = useRef(false);
+  const dockerHealthCursorRef = useRef(0);
 
   // Install dialog
   const [installDialogOpen, setInstallDialogOpen] = useState(false);
@@ -116,71 +118,80 @@ export function StartPage({
   useEffect(() => {
     let cancelled = false;
     const poll = async () => {
-      const updates: Record<string, { healthy: boolean | null; agentCount: number }> = {};
-
-      // Poll local instance
+      if (healthPollInFlightRef.current) return;
+      healthPollInFlightRef.current = true;
       try {
-        const status = await api.getInstanceStatus();
-        updates.local = { healthy: status.healthy, agentCount: status.activeAgents };
-      } catch {
-        updates.local = { healthy: null, agentCount: 0 };
-      }
+        const updates: Record<string, { healthy: boolean | null; agentCount: number }> = {};
 
-      const dockerTargetsById = new Map<string, {
-        id: string;
-        openclawHome?: string;
-        clawpalDataDir?: string;
-      }>();
-      for (const r of registeredInstances.filter((item) => item.instanceType === "docker")) {
-        dockerTargetsById.set(r.id, {
-          id: r.id,
-          openclawHome: r.openclawHome || undefined,
-          clawpalDataDir: r.clawpalDataDir || undefined,
-        });
-      }
-      for (const d of dockerInstances) {
-        const existing = dockerTargetsById.get(d.id);
-        const fallback = deriveDockerPaths(d.id);
-        dockerTargetsById.set(d.id, {
-          id: d.id,
-          openclawHome: existing?.openclawHome || d.openclawHome || fallback.openclawHome,
-          clawpalDataDir: existing?.clawpalDataDir || d.clawpalDataDir || fallback.clawpalDataDir,
-        });
-      }
-      for (const [id, target] of dockerTargetsById.entries()) {
-        if (!target.openclawHome) {
-          const fallback = deriveDockerPaths(id);
-          dockerTargetsById.set(id, {
-            ...target,
-            openclawHome: fallback.openclawHome,
-            clawpalDataDir: target.clawpalDataDir || fallback.clawpalDataDir,
+        // Poll local instance
+        try {
+          const status = await api.getInstanceStatus();
+          updates.local = { healthy: status.healthy, agentCount: status.activeAgents };
+        } catch {
+          updates.local = { healthy: null, agentCount: 0 };
+        }
+
+        const dockerTargetsById = new Map<string, {
+          id: string;
+          openclawHome?: string;
+          clawpalDataDir?: string;
+        }>();
+        for (const r of registeredInstances.filter((item) => item.instanceType === "docker")) {
+          dockerTargetsById.set(r.id, {
+            id: r.id,
+            openclawHome: r.openclawHome || undefined,
+            clawpalDataDir: r.clawpalDataDir || undefined,
           });
         }
-      }
-      const dockerTargets = Array.from(dockerTargetsById.values());
-
-      // Poll each Docker instance using its own openclawHome
-      for (const d of dockerTargets) {
-        if (cancelled) break;
-        if (d.openclawHome) {
-          try {
-            await api.setActiveOpenclawHome(d.openclawHome);
-            if (d.clawpalDataDir) await api.setActiveClawpalDataDir(d.clawpalDataDir);
-            const status = await api.getInstanceStatus();
-            updates[d.id] = { healthy: status.healthy, agentCount: status.activeAgents };
-          } catch {
-            updates[d.id] = { healthy: null, agentCount: 0 };
-          } finally {
-            await api.setActiveOpenclawHome(null);
-            await api.setActiveClawpalDataDir(null);
-          }
-        } else {
-          updates[d.id] = { healthy: null, agentCount: 0 };
+        for (const d of dockerInstances) {
+          const existing = dockerTargetsById.get(d.id);
+          const fallback = deriveDockerPaths(d.id);
+          dockerTargetsById.set(d.id, {
+            id: d.id,
+            openclawHome: existing?.openclawHome || d.openclawHome || fallback.openclawHome,
+            clawpalDataDir: existing?.clawpalDataDir || d.clawpalDataDir || fallback.clawpalDataDir,
+          });
         }
-      }
+        for (const [id, target] of dockerTargetsById.entries()) {
+          if (!target.openclawHome) {
+            const fallback = deriveDockerPaths(id);
+            dockerTargetsById.set(id, {
+              ...target,
+              openclawHome: fallback.openclawHome,
+              clawpalDataDir: target.clawpalDataDir || fallback.clawpalDataDir,
+            });
+          }
+        }
+        const dockerTargets = Array.from(dockerTargetsById.values());
 
-      if (!cancelled) {
-        setHealthMap((prev) => ({ ...prev, ...updates }));
+        // Poll one Docker instance per cycle (round-robin) to avoid UI jank from
+        // heavy serial checks when many instances are registered.
+        if (dockerTargets.length > 0) {
+          const idx = dockerHealthCursorRef.current % dockerTargets.length;
+          dockerHealthCursorRef.current = (idx + 1) % dockerTargets.length;
+          const d = dockerTargets[idx];
+          if (d.openclawHome) {
+            try {
+              await api.setActiveOpenclawHome(d.openclawHome);
+              if (d.clawpalDataDir) await api.setActiveClawpalDataDir(d.clawpalDataDir);
+              const status = await api.getInstanceStatus();
+              updates[d.id] = { healthy: status.healthy, agentCount: status.activeAgents };
+            } catch {
+              updates[d.id] = { healthy: null, agentCount: 0 };
+            } finally {
+              await api.setActiveOpenclawHome(null);
+              await api.setActiveClawpalDataDir(null);
+            }
+          } else {
+            updates[d.id] = { healthy: null, agentCount: 0 };
+          }
+        }
+
+        if (!cancelled) {
+          setHealthMap((prev) => ({ ...prev, ...updates }));
+        }
+      } finally {
+        healthPollInFlightRef.current = false;
       }
     };
     const initial = setTimeout(() => {
@@ -189,6 +200,7 @@ export function StartPage({
     const timer = setInterval(poll, 30_000);
     return () => {
       cancelled = true;
+      healthPollInFlightRef.current = false;
       clearTimeout(initial);
       clearInterval(timer);
     };
