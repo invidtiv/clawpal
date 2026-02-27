@@ -7220,30 +7220,10 @@ pub fn migrate_legacy_instances(
 // Task 3: Remote instance config CRUD
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SshConfigHostSuggestion {
-    pub host_alias: String,
-    pub host_name: Option<String>,
-    pub user: Option<String>,
-    pub port: Option<u16>,
-    pub identity_file: Option<String>,
-}
+pub type SshConfigHostSuggestion = clawpal_core::ssh::config::SshConfigHostSuggestion;
 
 fn ssh_config_path() -> Option<PathBuf> {
     dirs::home_dir().map(|home| home.join(".ssh").join("config"))
-}
-
-fn map_ssh_config_suggestion(
-    value: clawpal_core::ssh::config::SshConfigHostSuggestion,
-) -> SshConfigHostSuggestion {
-    SshConfigHostSuggestion {
-        host_alias: value.host_alias,
-        host_name: value.host_name,
-        user: value.user,
-        port: value.port,
-        identity_file: value.identity_file,
-    }
 }
 
 fn read_hosts_from_registry() -> Result<Vec<SshHostConfig>, String> {
@@ -7265,10 +7245,7 @@ pub fn list_ssh_config_hosts() -> Result<Vec<SshConfigHostSuggestion>, String> {
     }
     let data =
         fs::read_to_string(&path).map_err(|e| format!("Failed to read {}: {e}", path.display()))?;
-    Ok(clawpal_core::ssh::config::parse_ssh_config_hosts(&data)
-        .into_iter()
-        .map(map_ssh_config_suggestion)
-        .collect())
+    Ok(clawpal_core::ssh::config::parse_ssh_config_hosts(&data))
 }
 
 #[tauri::command]
