@@ -8867,7 +8867,7 @@ async fn resolve_remote_profile_base_url(
             ))
         }
     };
-    let cfg: Value = serde_json::from_str(&raw)
+    let cfg = clawpal_core::doctor::parse_json_document(&raw, "remote config for base URL resolution")
         .map_err(|e| format!("Failed to parse remote config for base URL resolution: {e}"))?;
     Ok(resolve_model_provider_base_url(&cfg, &profile.provider))
 }
@@ -8966,8 +8966,8 @@ pub async fn remote_extract_model_profiles_from_config(
     let raw = pool
         .sftp_read(&host_id, "~/.openclaw/openclaw.json")
         .await?;
-    let cfg: Value =
-        serde_json::from_str(&raw).map_err(|e| format!("Failed to parse remote config: {e}"))?;
+    let cfg = clawpal_core::doctor::parse_json_document(&raw, "remote config")
+        .map_err(|e| format!("Failed to parse remote config: {e}"))?;
 
     let profiles_raw = pool
         .sftp_read(&host_id, "~/.clawpal/model-profiles.json")
