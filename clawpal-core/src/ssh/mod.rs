@@ -13,9 +13,18 @@ use tokio::time::{timeout, Duration};
 
 use crate::instance::SshHostConfig;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct SshSession {
     config: SshHostConfig,
+    backend: Backend,
+}
+
+#[derive(Clone)]
+enum Backend {
+    Russh {
+        handle: Arc<client::Handle<SshHandler>>,
+    },
+    Legacy,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -85,15 +94,22 @@ impl SshSession {
                 "password auth is not supported in russh mode".to_string(),
             ));
         }
+        let backend = match connect_and_auth(config).await {
+            Ok((handle, _)) => Backend::Russh {
+                handle: Arc::new(handle),
+            },
+            Err(_) => Backend::Legacy,
+        };
         Ok(Self {
             config: config.clone(),
+            backend,
         })
     }
 
     pub async fn exec(&self, cmd: &str) -> Result<ExecResult> {
-        let (handle, _) = match connect_and_auth(&self.config).await {
-            Ok(v) => v,
-            Err(_) => return self.exec_legacy(cmd).await,
+        let handle = match &self.backend {
+            Backend::Russh { handle } => handle.clone(),
+            Backend::Legacy => return self.exec_legacy(cmd).await,
         };
         let mut channel = handle
             .channel_open_session()
@@ -126,12 +142,6 @@ impl SshSession {
         })
         .await;
 
-        let _ = timeout(
-            Duration::from_secs(RUSSH_DISCONNECT_TIMEOUT_SECS),
-            handle.disconnect(russh::Disconnect::ByApplication, "", "en"),
-        )
-        .await;
-
         let (stdout, stderr, exit_code) = wait_result.map_err(|_| {
             SshError::CommandFailed(format!("russh exec timed out after {RUSSH_EXEC_TIMEOUT_SECS}s"))
         })?;
@@ -144,9 +154,9 @@ impl SshSession {
     }
 
     pub async fn sftp_read(&self, path: &str) -> Result<Vec<u8>> {
-        let (handle, _) = match connect_and_auth(&self.config).await {
-            Ok(v) => v,
-            Err(_) => return self.sftp_read_legacy(path).await,
+        let handle = match &self.backend {
+            Backend::Russh { handle } => handle.clone(),
+            Backend::Legacy => return self.sftp_read_legacy(path).await,
         };
         let channel = handle
             .channel_open_session()
@@ -170,12 +180,6 @@ impl SshSession {
             Ok::<Vec<u8>, SshError>(buf)
         })
         .await;
-
-        let _ = timeout(
-            Duration::from_secs(RUSSH_DISCONNECT_TIMEOUT_SECS),
-            handle.disconnect(russh::Disconnect::ByApplication, "", "en"),
-        )
-        .await;
         match read_result {
             Ok(v) => v,
             Err(_) => Err(SshError::Sftp(format!(
@@ -185,9 +189,9 @@ impl SshSession {
     }
 
     pub async fn sftp_write(&self, path: &str, content: &[u8]) -> Result<()> {
-        let (handle, _) = match connect_and_auth(&self.config).await {
-            Ok(v) => v,
-            Err(_) => return self.sftp_write_legacy(path, content).await,
+        let handle = match &self.backend {
+            Backend::Russh { handle } => handle.clone(),
+            Backend::Legacy => return self.sftp_write_legacy(path, content).await,
         };
         let channel = handle
             .channel_open_session()
@@ -253,12 +257,6 @@ impl SshSession {
             file.flush().await.map_err(|e| SshError::Sftp(e.to_string()))?;
             Ok::<(), SshError>(())
         })
-        .await;
-
-        let _ = timeout(
-            Duration::from_secs(RUSSH_DISCONNECT_TIMEOUT_SECS),
-            handle.disconnect(russh::Disconnect::ByApplication, "", "en"),
-        )
         .await;
         match write_result {
             Ok(v) => v,
@@ -380,6 +378,16 @@ impl SshSession {
         .await
         .map_err(|_| SshError::Connect("legacy ssh timed out".to_string()))?
         .map_err(|e| SshError::Connect(e.to_string()))
+    }
+
+    pub async fn close(&self) {
+        if let Backend::Russh { handle } = &self.backend {
+            let _ = timeout(
+                Duration::from_secs(RUSSH_DISCONNECT_TIMEOUT_SECS),
+                handle.disconnect(russh::Disconnect::ByApplication, "", "en"),
+            )
+            .await;
+        }
     }
 }
 
@@ -552,7 +560,10 @@ mod tests {
             key_path: None,
             password: None,
         };
-        let session = SshSession { config: cfg };
+        let session = SshSession {
+            config: cfg,
+            backend: Backend::Legacy,
+        };
         let args = session.legacy_common_ssh_args();
         let joined = args.join(" ");
         assert!(joined.contains("ConnectTimeout="));

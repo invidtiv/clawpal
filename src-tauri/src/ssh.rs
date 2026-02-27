@@ -22,10 +22,11 @@ pub struct SftpEntry {
     pub size: u64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 struct ConnectedHost {
     config: SshHostConfig,
     home_dir: String,
+    session: std::sync::Arc<clawpal_core::ssh::SshSession>,
     op_limiter: std::sync::Arc<Semaphore>,
     runtime: std::sync::Arc<Mutex<HostRuntimeState>>,
 }
@@ -60,9 +61,11 @@ impl SshConnectionPool {
         config: &SshHostConfig,
         _passphrase: Option<&str>,
     ) -> Result<(), String> {
-        let session = clawpal_core::ssh::SshSession::connect(config)
+        let session = std::sync::Arc::new(
+            clawpal_core::ssh::SshSession::connect(config)
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| e.to_string())?,
+        );
         let home = session
             .exec("echo $HOME")
             .await
@@ -76,6 +79,7 @@ impl SshConnectionPool {
             ConnectedHost {
                 config: config.clone(),
                 home_dir: home,
+                session,
                 op_limiter: std::sync::Arc::new(Semaphore::new(SSH_OP_MAX_CONCURRENCY_PER_HOST)),
                 runtime: std::sync::Arc::new(Mutex::new(HostRuntimeState {
                     consecutive_timeouts: 0,
@@ -87,7 +91,9 @@ impl SshConnectionPool {
     }
 
     pub async fn disconnect(&self, id: &str) -> Result<(), String> {
-        self.connections.lock().await.remove(id);
+        if let Some(host) = self.connections.lock().await.remove(id) {
+            host.session.close().await;
+        }
         Ok(())
     }
 
@@ -136,10 +142,7 @@ impl SshConnectionPool {
             .acquire_owned()
             .await
             .map_err(|e| format!("ssh limiter acquire failed: {e}"))?;
-        let session = clawpal_core::ssh::SshSession::connect(&conn.config)
-            .await
-            .map_err(|e| e.to_string())?;
-        let result = session.exec(command).await;
+        let result = conn.session.exec(command).await;
         let result = match result {
             Ok(v) => v,
             Err(e) => {
@@ -183,10 +186,7 @@ esac",
             .acquire_owned()
             .await
             .map_err(|e| format!("ssh limiter acquire failed: {e}"))?;
-        let session = clawpal_core::ssh::SshSession::connect(&conn.config)
-            .await
-            .map_err(|e| e.to_string())?;
-        let bytes = session.sftp_read(&resolved).await;
+        let bytes = conn.session.sftp_read(&resolved).await;
         let bytes = match bytes {
             Ok(v) => v,
             Err(e) => {
@@ -211,10 +211,7 @@ esac",
             .acquire_owned()
             .await
             .map_err(|e| format!("ssh limiter acquire failed: {e}"))?;
-        let session = clawpal_core::ssh::SshSession::connect(&conn.config)
-            .await
-            .map_err(|e| e.to_string())?;
-        let write_res = session.sftp_write(&resolved, content.as_bytes()).await;
+        let write_res = conn.session.sftp_write(&resolved, content.as_bytes()).await;
         match write_res {
             Ok(()) => {
                 self.clear_timeout_cooldown(&conn).await;
