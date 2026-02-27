@@ -107,6 +107,7 @@ export function Home({
   const retriesRef = useRef(0);
   const remoteErrorShownRef = useRef(false);
   const remoteUnhealthyStreakRef = useRef(0);
+  const duplicateInstallGuidanceSigRef = useRef<string>("");
 
   const statusInFlightRef = useRef(false);
 
@@ -125,7 +126,34 @@ export function Home({
     remoteErrorShownRef.current = false;
     remoteUnhealthyStreakRef.current = 0;
     statusInFlightRef.current = false;
+    duplicateInstallGuidanceSigRef.current = "";
   }, [ua.instanceToken]);
+
+  useEffect(() => {
+    const entries = statusExtra?.duplicateInstalls || [];
+    if (entries.length === 0) return;
+    const signature = `${ua.instanceId}:${entries.join("|")}`;
+    if (duplicateInstallGuidanceSigRef.current === signature) return;
+    duplicateInstallGuidanceSigRef.current = signature;
+    const transport = ua.isRemote ? "remote_ssh" : (ua.isDocker ? "docker_local" : "local");
+    const rawError = `Duplicate openclaw installs detected: ${entries.join(" ; ")}`;
+    window.dispatchEvent(new CustomEvent("clawpal:agent-guidance", {
+      detail: {
+        message: t("home.duplicateInstalls"),
+        summary: t("home.duplicateInstalls"),
+        actions: [
+          t("home.fixInDoctor"),
+          "Run `which -a openclaw` and keep only one valid binary in PATH",
+        ],
+        source: "status-extra",
+        operation: "status.extra.duplicate_installs",
+        instanceId: ua.instanceId,
+        transport,
+        rawError,
+        createdAt: Date.now(),
+      },
+    }));
+  }, [statusExtra?.duplicateInstalls, t, ua.instanceId, ua.isDocker, ua.isRemote]);
 
   const fetchStatus = useCallback(() => {
     if (ua.isRemote && !ua.isConnected) return; // Wait for SSH connection
@@ -380,26 +408,6 @@ export function Home({
               </>
             )}
           </div>
-          {statusExtra?.duplicateInstalls && statusExtra.duplicateInstalls.length > 0 && (
-            <>
-              <span />
-              <div className="col-span-1 rounded-lg border border-orange-400 dark:border-amber-700 bg-orange-50 dark:bg-amber-950/30 px-3 py-2 text-xs">
-                <p className="font-semibold text-orange-800 dark:text-amber-300 mb-1">{t('home.duplicateInstalls')}</p>
-                <ul className="space-y-0.5 font-mono text-orange-700 dark:text-amber-400">
-                  {statusExtra.duplicateInstalls.map((entry, i) => <li key={i}>{entry}</li>)}
-                </ul>
-                {onNavigate && (
-                  <button
-                    className="mt-1.5 text-orange-800 dark:text-amber-300 underline hover:no-underline"
-                    onClick={() => onNavigate("doctor")}
-                  >
-                    {t('home.fixInDoctor')}
-                  </button>
-                )}
-              </div>
-            </>
-          )}
-
           <span className="text-sm text-muted-foreground font-medium">{t('home.defaultModel')}</span>
           <div className="max-w-xs">
             {status ? (

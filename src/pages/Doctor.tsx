@@ -63,6 +63,23 @@ interface PrimaryRecoveryState {
   repairError: string | null;
 }
 
+interface DoctorLaunchGuidance {
+  message: string;
+  summary: string;
+  actions: string[];
+  operation: string;
+  instanceId: string;
+  transport: string;
+  rawError: string;
+  createdAt: number;
+}
+
+interface DoctorProps {
+  active?: boolean;
+  launchGuidance?: DoctorLaunchGuidance | null;
+  onLaunchGuidanceConsumed?: (instanceId: string) => void;
+}
+
 const createInitialRescueUiState = (): RescueUiState => ({
   activating: false,
   deactivating: false,
@@ -85,7 +102,31 @@ const createInitialPrimaryRecoveryState = (): PrimaryRecoveryState => ({
   repairError: null,
 });
 
-export function Doctor() {
+function buildLaunchGuidanceContext(guidance: DoctorLaunchGuidance): string {
+  const lines: string[] = [
+    "[Escalated App Error Context]",
+    `instance: ${guidance.instanceId}`,
+    `transport: ${guidance.transport}`,
+    `operation: ${guidance.operation}`,
+    `error: ${guidance.rawError}`,
+  ];
+  const summary = (guidance.summary || guidance.message || "").trim();
+  if (summary) lines.push(`assistant_summary: ${summary}`);
+  if (guidance.actions.length > 0) {
+    lines.push("assistant_suggested_actions:");
+    for (const action of guidance.actions) {
+      lines.push(`- ${action}`);
+    }
+  }
+  lines.push("Please prioritize diagnosing and fixing this exact failure path first.");
+  return lines.join("\n");
+}
+
+export function Doctor({
+  active = false,
+  launchGuidance = null,
+  onLaunchGuidanceConsumed,
+}: DoctorProps) {
   const { t } = useTranslation();
   const ua = useApi();
   const { instanceId, isDocker, isRemote, isConnected } = useInstance();
@@ -111,6 +152,7 @@ export function Doctor() {
   const logsContentRef = useRef<HTMLPreElement>(null);
   const [rescueState, setRescueState] = useState<RescueUiState>(createInitialRescueUiState);
   const [primaryState, setPrimaryState] = useState<PrimaryRecoveryState>(createInitialPrimaryRecoveryState);
+  const lastAutoLaunchKeyRef = useRef<string | null>(null);
 
   const {
     activating: rescueActivating,
@@ -153,7 +195,7 @@ export function Doctor() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [doctor.setTarget, instanceId, isRemote]);
 
-  const handleStartDiagnosis = async () => {
+  const handleStartDiagnosis = async (extraContext?: string) => {
     setStartError(null);
     setDiagnosing(true);
     try {
@@ -173,9 +215,12 @@ export function Doctor() {
       }
 
       await doctor.connect();
-      const context = isRemote
+      const baseContext = isRemote
         ? await ua.collectDoctorContextRemote(instanceId)
         : await ua.collectDoctorContext();
+      const context = extraContext
+        ? `${baseContext}\n\n${extraContext}`
+        : baseContext;
       const diagnosisTransport: "local" | "docker_local" | "remote_ssh" = isRemote
         ? "remote_ssh"
         : isDocker
@@ -518,6 +563,16 @@ export function Doctor() {
   }, [instanceId, isRemote, isConnected]);
 
   useEffect(() => {
+    if (!active || !launchGuidance) return;
+    const launchKey = `${launchGuidance.instanceId}:${launchGuidance.operation}:${launchGuidance.createdAt}`;
+    if (lastAutoLaunchKeyRef.current === launchKey) return;
+    lastAutoLaunchKeyRef.current = launchKey;
+    onLaunchGuidanceConsumed?.(launchGuidance.instanceId);
+    void handleStartDiagnosis(buildLaunchGuidanceContext(launchGuidance));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [active, launchGuidance, onLaunchGuidanceConsumed]);
+
+  useEffect(() => {
     if (logsOpen) fetchLog(logsSource, logsTab);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [logsOpen, logsSource, logsTab]);
@@ -853,7 +908,7 @@ export function Doctor() {
               {doctor.error && (
                 <div className="mb-3 text-sm text-destructive">{doctor.error}</div>
               )}
-              <Button onClick={handleStartDiagnosis} disabled={diagnosing}>
+              <Button onClick={() => { void handleStartDiagnosis(); }} disabled={diagnosing}>
                 {diagnosing ? t("doctor.connecting") : t("doctor.startDiagnosis")}
               </Button>
             </>
