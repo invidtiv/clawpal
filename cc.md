@@ -10,36 +10,44 @@ Last run: 2026-02-27
 
 | Action | Status | Result |
 |--------|--------|--------|
-| Action 1: Phase 5 SSH 收口 | PASS | `src-tauri/src/ssh.rs` 中 `SshHostConfig` 已是 core type alias；`SshExecResult` 仍为本地 UI 结果结构且用于连接池执行结果，不是 host registry 类型重复。`cargo update -p clawpal-core` 无变更，`Cargo.lock` 无 `openssh*` 残留。SSH host CRUD 走 `clawpal_core::ssh::registry::{list,upsert,delete}_ssh_host`，底层使用 `InstanceRegistry`。 |
-| Action 2: Phase 6/7/8 核验 | PASS | `cargo test --test cli_json_contract` 4/4 通过；`cargo test -p clawpal-core install`（含 dry-run 相关）通过；`cargo test -p clawpal-core connect` 覆盖 docker/ssh 连接成功与失败路径通过；`cargo test -p clawpal-core profile` 13/13 通过，`test_profile` 非占位行为。错误文案包含 `remote ssh host not found`、`ssh connect failed`、`remote connectivity probe failed` 等可诊断信息。 |
-| Action 3: Phase 9 Agent 工具链确认 | PASS | `grep -RIn \"system.run\\|system_run\" src-tauri/src/ --include=\"*.rs\"` 无结果（可执行路径为 0）；`cargo test -p clawpal supported_commands` 通过（doctor/install prompt allowlist parity tests 通过）。 |
-| Action 4: Phase 10 GUI 确认 | PASS | `LEGACY_DOCKER_INSTANCES_KEY` 仅在迁移读取并在迁移成功后 `removeItem`；StartPage/Tab 展示已收口为 `listRegisteredInstances()`（`registeredInstances`）单一来源；`InstallHub` 为 deterministic-first（`docker/local` 直走 deterministic pipeline，`ssh/digitalocean` 先 `installDecideTarget`，仅在无法确定时进入 agent chat）。 |
-| Action 5: 质量检查 | PASS (with noted env constraint) | `cargo build --workspace` 通过；`cargo test --workspace --all-targets` 除 `remote_api` 外通过。`remote_api` 失败原因为当前环境无法访问 `192.168.65.2:22`（`Operation not permitted`），按说明忽略。`install_history_preamble_contains_execution_guardrails` 断言漂移已修复并复测通过。`npx tsc --noEmit` 通过。`git status` 已检查，保留用户已有未提交改动（`src-tauri/src/runtime/zeroclaw/*`, `src/lib/use-api.ts`, `.claude/`, `.tmp/`, `scripts/review-loop.sh`）。 |
+| Action 1: Batch E2 Sessions | PASS | 新增 `clawpal-core/src/sessions.rs`，迁移 `remote_analyze_sessions` / `remote_delete_sessions_by_ids` / `remote_list_session_files` / `remote_preview_session` 的纯解析与过滤逻辑到 core（`parse_session_analysis`、`filter_sessions_by_ids`、`parse_session_file_list`、`parse_session_preview`）；Tauri 端改为调用 core。新增 4 个 core 单测并通过。 |
+| Action 2: Batch E3 Cron | PENDING | - |
+| Action 3: Batch E4 Watchdog | PENDING | - |
+| Action 4: Batch E5 Backup/Upgrade | PENDING | - |
+| Action 5: Batch E6 Discord/Discovery | PENDING | - |
+| Action 6: 质量验证 | PENDING | - |
+| Action 7: commands.rs 拆文件 | PENDING | - |
+
+---
+
+## Context
+
+三层架构重构（Phase 1-10）已完成，见 `cc-architecture-refactor-v1.md`。
+
+本轮目标：将 `commands.rs` 中剩余 `remote_*` 函数按领域迁移到 `clawpal-core`。
+
+当前 `commands.rs`：9,367 行，41 个 `remote_*` 函数。其中约 20 个已部分调用 core，约 21 个纯 inline SFTP+JSON。
+
+迁移原则：只迁移有实际 JSON 解析/操作逻辑的函数。纯薄包装（Logs 4 个、Gateway 1 个、Agent Setup 1 个）保留在 Tauri 层，不值得抽。
 
 ---
 
 ## Outstanding Issues
 
-### P1: Remote commands bypass core (long-term migration)
+### P1: `commands.rs` remote domain migration
 
-55 个 `remote_*` 函数仍在 `commands.rs`。其中：
-- Profile 领域：已迁移到 core（`*_storage_json()` 纯函数），2 个边缘函数 `remote_resolve_api_keys` / `remote_extract_model_profiles_from_config` 仍有内联 Storage struct
-- Config 领域：大部分 JSON 操作已通过 `clawpal_core::doctor` 共享（73 处 core 调用），Batch E1 已完成
-- 剩余领域（sessions、cron、watchdog、discord、backup 等）：仍直接 SFTP+JSON
+按领域逐批迁移 `remote_*` 函数到 core 纯函数。模式同 Phase A/E1：
 
-按领域逐批迁移，不急。
-
----
-
-### P1: `commands.rs` 9,367 行
-
-从 9,947 → 9,367（-580 行），随着迁移继续会自然缩减。
+1. 抽取 JSON 操作为 `clawpal_core` 纯函数（String in/out 或 serde_json::Value）
+2. Tauri 端改为调用 core
+3. 加单元测试
+4. 每批独立 commit
 
 ---
 
 ### P2: Doctor/Install prompt 结构重叠
 
-~60% 内容重复。可考虑抽取 `prompts/common/tool-schema.md`。
+~60% 内容重复。可考虑抽取 `prompts/common/tool-schema.md`。不急。
 
 ---
 
@@ -47,66 +55,120 @@ Last run: 2026-02-27
 
 | Issue | Resolution | Commit |
 |-------|-----------|--------|
-| Remote profile CRUD bypass core (Phase A) | Core `*_storage_json()` pure functions | `e071d7c` |
-| Docker instances localStorage dual-track (Phase B) | Registry-only, legacy migration + cleanup | `8f32491` |
-| `extract_json_objects()` 3x duplication (Phase C) | `json_util.rs` shared module | `34d7d86` |
-| `{probe:?}` Rust Debug format (Phase C) | `serde_json::to_string()` | `34d7d86` |
-| Type duplication (ModelProfile, SshHostConfig) | Type aliases to core | `0b9b621`, `001d199` |
-| Doctor commands duplicated in CLI and Tauri | `clawpal-core::doctor` module | `bb671a5` - `3e31a46` |
-| `delete_json_path()` duplicated | Unified in core | `bb671a5` |
-| Install prompt missing command enumeration | Allowlist + parity test | `54c26a8`, `fa2dd69` |
-| Agent tool classification (read vs write) | `tool_intent.rs` | `f9bbf1b` |
-| Doctor domain defaults | `doctor_domain_default_relpath()` | `ae23203` |
-| `doctor-start.md` double identity | File removed | N/A |
-| russh SSH migration (Phase D) | Native russh + legacy fallback | `8dcd0df` |
-| Config domain migration (Phase E, Batch E1) | JSON ops → core doctor | `20f20d9` |
-| Doctor/Rescue logic migration | Issue parsing, rescue planning, etc. → core | `da8bcdc` - `19563d8` |
-| History-preamble strengthened | Tool format, allowlist, constraints re-stated | `68cd029` |
-| 2 profile edge functions (`remote_resolve_api_keys`, `remote_extract_model_profiles_from_config`) | Use `list_profiles_from_storage_json()` | `84720c5` |
-| Phase 5 SSH 收口验证 | Type alias confirmed, no openssh residue, CRUD via InstanceRegistry | `ff14eb7` (验证) |
-| Phase 6/7/8 核验 | cli_json_contract 4/4, install dry-run, profile 13/13, connect error paths | `ff14eb7` (验证) |
-| Phase 9 Agent 工具链 | No system.run paths, prompt allowlist parity tests pass | `ff14eb7` (验证) |
-| Phase 10 GUI 确认 | Legacy key one-shot migration, listRegisteredInstances sole source, InstallHub deterministic-first | `ff14eb7` (验证) |
-
----
-
-## Known Deferrals (not action items)
-
-- **SSH deterministic install**: SSH/DigitalOcean targets still go through agent chat. Deferred.
-- **Native LLM tool calling**: JSON-in-text format. Medium-term migration.
-
----
-
-## Phase D Code Review Results (2026-02-27)
-
-**Verdict**: ✅ APPROVED with minor recommendations
-
-| Priority | Item | Details |
-|----------|------|---------|
-| P2 | Host key verification | `check_server_key()` accepts all keys. Implement `~/.ssh/known_hosts` check later |
-| P2 | Error detail loss in fallback | `Err(_) => exec_legacy()` drops russh error. Add `tracing::debug!` |
-| P3 | Test coverage | Add: auth failure without key, ssh_config parse path |
-| P3 | Connection reuse | Per-call model is fine for now |
 
 ---
 
 ## Next Actions (for Codex)
 
-_所有验证 Action 已完成。无新任务。_
+迁移模式同 Phase A/E1：抽 JSON 解析/操作逻辑为 `clawpal_core` 纯函数（`&str` / `serde_json::Value` in/out），Tauri 端改为调 core，加单元测试，每批独立 commit。
 
-如有新一轮工作，Claude 会在此写入。
+**不要动 SFTP/SSH 连接层**——只抽纯数据逻辑。Tauri 端仍负责 `pool.sftp_read()` / `pool.exec()` 调用，拿到原始字符串后传给 core 解析。
+
+### Action 1: Batch E2 — Sessions 领域
+
+目标文件：`clawpal-core/src/sessions.rs`（新建）
+
+迁移以下 5 个函数中的 JSON/JSONL 解析逻辑：
+
+1. **`remote_analyze_sessions`**（line ~7913，~160 行）：抽取 shell 输出 → session 统计的 JSON 解析逻辑到 core `parse_session_analysis(raw: &str) -> Result<SessionAnalysis>`
+2. **`remote_delete_sessions_by_ids`**（line ~8066）：抽取 sessions JSON 操作（读取 → 按 ID 过滤 → 序列化）到 core `filter_sessions_by_ids(json: &str, ids: &[&str]) -> Result<String>`
+3. **`remote_list_session_files`**（line ~8113）：抽取 shell 输出解析到 core `parse_session_file_list(raw: &str) -> Result<Vec<SessionFileInfo>>`
+4. **`remote_preview_session`**（line ~8199）：抽取 JSONL 解析到 core `parse_session_preview(jsonl: &str) -> Result<SessionPreview>`
+5. **`remote_clear_all_sessions`**（line ~8173）：太薄（只返回 count），跳过不迁移
+
+每个 core 函数加至少 1 个单元测试（用 inline JSON fixture）。Commit message: `refactor: move session parsing logic to core`
+
+### Action 2: Batch E3 — Cron 领域
+
+目标文件：`clawpal-core/src/cron.rs`（新建）
+
+1. **`remote_list_cron_jobs`**（line ~8891）：抽取 JSON 解析到 core `parse_cron_jobs(json: &str) -> Result<Vec<CronJob>>`
+2. **`remote_get_cron_runs`**（line ~8903）：抽取 JSONL 解析到 core `parse_cron_runs(jsonl: &str) -> Result<Vec<CronRun>>`
+3. **`remote_trigger_cron_job`** / **`remote_delete_cron_job`**：太薄（纯 exec），跳过
+
+Commit message: `refactor: move cron parsing logic to core`
+
+### Action 3: Batch E4 — Watchdog 领域
+
+目标文件：`clawpal-core/src/watchdog.rs`（新建）
+
+1. **`remote_get_watchdog_status`**（line ~9236，~50 行）：抽取状态判断逻辑到 core `parse_watchdog_status(config_json: &str, ps_output: &str) -> WatchdogStatus`
+2. **`remote_deploy_watchdog`**：主要是 SFTP 写，逻辑薄，跳过
+3. **`remote_start/stop/uninstall_watchdog`**：纯 exec，跳过
+
+Commit message: `refactor: move watchdog status parsing to core`
+
+### Action 4: Batch E5 — Backup/Restore + Upgrade
+
+目标文件：`clawpal-core/src/backup.rs`（新建）
+
+1. **`remote_list_backups`**（line ~6329，~80 行）：抽取 `du` 输出解析到 core `parse_backup_list(du_output: &str) -> Vec<BackupEntry>`
+2. **`remote_backup_before_upgrade`**（line ~6280）：抽取输出解析到 core `parse_backup_result(output: &str) -> BackupResult`
+3. **`remote_run_openclaw_upgrade`**（line ~8719）：抽取版本解析到 core `parse_upgrade_result(output: &str) -> UpgradeResult`
+4. **`remote_restore_from_backup`**：纯 exec，跳过
+
+Commit message: `refactor: move backup and upgrade parsing to core`
+
+### Action 5: Batch E6 — Discord/Discovery
+
+目标文件：`clawpal-core/src/discovery.rs`（新建）
+
+1. **`remote_list_discord_guild_channels`**（line ~7589，~320 行）：这是最大的单函数。抽取 channel/guild/binding 的 JSON 解析和合并逻辑到 core。拆为：
+   - `parse_guild_channels(raw: &str) -> Result<Vec<GuildChannel>>`
+   - `merge_channel_bindings(channels: &[GuildChannel], bindings: &str) -> Vec<ChannelWithBinding>`
+2. **`remote_list_bindings`**（line ~7118）：抽取 JSON 数组解析到 core
+3. **`remote_list_channels_minimal`**：已部分迁移，补齐即可
+
+Commit message: `refactor: move discord discovery parsing to core`
+
+### Action 6: 质量验证
+
+1. `cargo build --workspace` 通过
+2. `cargo test --workspace --all-targets` 通过（remote_api 忽略）
+3. `npx tsc --noEmit` 通过
+4. 统计 `commands.rs` 新行数，报告缩减量
+
+### Action 7: `commands.rs` 拆分为领域模块
+
+**在 Action 1-6 全部完成后执行。** 纯机械重组，不改任何逻辑。
+
+将 `src-tauri/src/commands.rs` 拆为目录结构：
+
+```
+src-tauri/src/commands/
+  mod.rs              // re-export 所有子模块的 pub 函数
+  config.rs           // remote_read_raw_config, remote_write_raw_config, remote_apply_config_patch, remote_list_history, remote_preview_rollback, remote_rollback
+  sessions.rs         // remote_analyze_sessions, remote_delete_sessions_by_ids, remote_list_session_files, remote_preview_session, remote_clear_all_sessions
+  doctor.rs           // remote_run_doctor, remote_fix_issues, remote_get_system_status, remote_get_status_extra
+  profiles.rs         // remote_list_model_profiles, remote_upsert_model_profile, remote_delete_model_profile, remote_resolve_api_keys, remote_test_model_profile, remote_extract_model_profiles_from_config
+  watchdog.rs         // remote_get_watchdog_status, remote_deploy_watchdog, remote_start/stop/uninstall_watchdog
+  cron.rs             // remote_list_cron_jobs, remote_get_cron_runs, remote_trigger_cron_job, remote_delete_cron_job
+  backup.rs           // remote_backup_before_upgrade, remote_list_backups, remote_restore_from_backup, remote_run_openclaw_upgrade, remote_check_openclaw_update
+  discovery.rs        // remote_list_discord_guild_channels, remote_list_bindings, remote_list_channels_minimal, remote_list_agents_overview
+  logs.rs             // remote_read_app_log, remote_read_error_log, remote_read_gateway_log, remote_read_gateway_error_log
+  rescue.rs           // remote_manage_rescue_bot, remote_diagnose_primary_via_rescue, remote_repair_primary_via_rescue
+  gateway.rs          // remote_restart_gateway
+  agent.rs            // remote_setup_agent_identity, remote_chat_via_openclaw
+```
+
+步骤：
+1. 将 `commands.rs` 改为 `commands/mod.rs`
+2. 按上述分组将函数剪切到对应子文件
+3. 共享的 helper 函数（`remote_write_config_with_snapshot`, `remote_read_openclaw_config_text_and_json`, `remote_resolve_openclaw_config_path` 等）留在 `mod.rs` 或放入 `commands/helpers.rs`
+4. 每个子文件 `use super::*` 引入共享依赖
+5. `mod.rs` 中 `pub use` re-export 所有 `#[tauri::command]` 函数，确保 `main.rs` 的 `invoke_handler` 不需要改动
+6. `cargo build --workspace` + `cargo test --workspace --all-targets` 通过
+7. `npx tsc --noEmit` 通过
+
+Commit message: `refactor: split commands.rs into domain modules`
+
+**关键约束：不改任何函数签名或逻辑，只移动代码位置。**
+
+每个 Action 完成后在 Codex Feedback 区域更新状态。
 
 ---
 
 ## Execution History
 
-| Phase | Status | Commits | Review Notes |
+| Batch | Status | Commits | Review Notes |
 |-------|--------|---------|-------------|
-| Phase A: Remote profile → core | **Done** | `e071d7c` | String in/out, 5 new tests |
-| Phase B: Docker localStorage → registry | **Done** | `8f32491` | Clean migration |
-| Phase C: Runtime hygiene | **Done** | `34d7d86` | json_util.rs, probe serialization |
-| Phase D: russh migration | **Done** | `8dcd0df` | Native SSH + fallback. P2 recommendations pending |
-| Phase E: Config domain migration | **Done** | `20f20d9` | Batch E1 complete |
-| Doctor/Rescue migration | **Done** | `da8bcdc`-`19563d8` | 12 commits, 27 new core tests |
-| History-preamble | **Done** | `68cd029` | Both doctor and install strengthened |
-| Verification Actions 1-5 | **Done** | `ff14eb7` | All PASS except 1 test drift (P2 tracked) |

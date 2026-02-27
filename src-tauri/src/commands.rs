@@ -7958,108 +7958,37 @@ echo "]"
         return Ok(Vec::new());
     }
 
-    // Parse the JSON output
-    let raw_sessions: Vec<Value> = serde_json::from_str(result.stdout.trim()).map_err(|e| {
-        format!(
-            "Failed to parse remote session data: {e}\nOutput: {}",
-            &result.stdout[..result.stdout.len().min(500)]
-        )
-    })?;
-
-    // Group by agent and classify
-    let mut agent_map: std::collections::BTreeMap<String, Vec<SessionAnalysis>> =
-        std::collections::BTreeMap::new();
-
-    for val in &raw_sessions {
-        let agent = val
-            .get("agent")
-            .and_then(Value::as_str)
-            .unwrap_or("unknown")
-            .to_string();
-        let session_id = val
-            .get("sessionId")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string();
-        let size_bytes = val.get("sizeBytes").and_then(Value::as_u64).unwrap_or(0);
-        let message_count = val.get("messageCount").and_then(Value::as_u64).unwrap_or(0) as usize;
-        let user_message_count = val
-            .get("userMessageCount")
-            .and_then(Value::as_u64)
-            .unwrap_or(0) as usize;
-        let assistant_message_count = val
-            .get("assistantMessageCount")
-            .and_then(Value::as_u64)
-            .unwrap_or(0) as usize;
-        let age_days = val.get("ageDays").and_then(Value::as_f64).unwrap_or(0.0);
-        let kind = val
-            .get("kind")
-            .and_then(Value::as_str)
-            .unwrap_or("sessions")
-            .to_string();
-
-        let category = if size_bytes < 500 || message_count == 0 {
-            "empty"
-        } else if user_message_count <= 1 && age_days > 7.0 {
-            "low_value"
-        } else {
-            "valuable"
-        };
-
-        agent_map
-            .entry(agent.clone())
-            .or_default()
-            .push(SessionAnalysis {
-                agent: agent.clone(),
-                session_id,
-                file_path: String::new(),
-                size_bytes,
-                message_count,
-                user_message_count,
-                assistant_message_count,
-                last_activity: None,
-                age_days,
-                total_tokens: 0,
-                model: None,
-                category: category.to_string(),
-                kind,
-            });
-    }
-
-    let mut results: Vec<AgentSessionAnalysis> = Vec::new();
-    for (agent, mut sessions) in agent_map {
-        sessions.sort_by(|a, b| {
-            let cat_order = |c: &str| match c {
-                "empty" => 0,
-                "low_value" => 1,
-                _ => 2,
-            };
-            cat_order(&a.category).cmp(&cat_order(&b.category)).then(
-                b.age_days
-                    .partial_cmp(&a.age_days)
-                    .unwrap_or(std::cmp::Ordering::Equal),
-            )
-        });
-        let total_files = sessions.len();
-        let total_size_bytes = sessions.iter().map(|s| s.size_bytes).sum();
-        let empty_count = sessions.iter().filter(|s| s.category == "empty").count();
-        let low_value_count = sessions
-            .iter()
-            .filter(|s| s.category == "low_value")
-            .count();
-        let valuable_count = sessions.iter().filter(|s| s.category == "valuable").count();
-
-        results.push(AgentSessionAnalysis {
-            agent,
-            total_files,
-            total_size_bytes,
-            empty_count,
-            low_value_count,
-            valuable_count,
-            sessions,
-        });
-    }
-    Ok(results)
+    let core = clawpal_core::sessions::parse_session_analysis(result.stdout.trim())?;
+    Ok(core
+        .into_iter()
+        .map(|agent| AgentSessionAnalysis {
+            agent: agent.agent,
+            total_files: agent.total_files,
+            total_size_bytes: agent.total_size_bytes,
+            empty_count: agent.empty_count,
+            low_value_count: agent.low_value_count,
+            valuable_count: agent.valuable_count,
+            sessions: agent
+                .sessions
+                .into_iter()
+                .map(|session| SessionAnalysis {
+                    agent: session.agent,
+                    session_id: session.session_id,
+                    file_path: session.file_path,
+                    size_bytes: session.size_bytes,
+                    message_count: session.message_count,
+                    user_message_count: session.user_message_count,
+                    assistant_message_count: session.assistant_message_count,
+                    last_activity: session.last_activity,
+                    age_days: session.age_days,
+                    total_tokens: session.total_tokens,
+                    model: session.model,
+                    category: session.category,
+                    kind: session.kind,
+                })
+                .collect(),
+        })
+        .collect())
 }
 
 #[tauri::command]
@@ -8093,16 +8022,9 @@ pub async fn remote_delete_sessions_by_ids(
     // Clean up sessions.json
     let sessions_json_path = format!("~/.openclaw/agents/{}/sessions/sessions.json", agent_id);
     if let Ok(content) = pool.sftp_read(&host_id, &sessions_json_path).await {
-        if let Ok(mut data) = serde_json::from_str::<serde_json::Map<String, Value>>(&content) {
-            let id_set: HashSet<&str> = session_ids.iter().map(String::as_str).collect();
-            data.retain(|_key, val| {
-                let sid = val.get("sessionId").and_then(Value::as_str).unwrap_or("");
-                !id_set.contains(sid)
-            });
-            let updated = serde_json::to_string(&data).unwrap_or_default();
-            let _ = pool
-                .sftp_write(&host_id, &sessions_json_path, &updated)
-                .await;
+        let ids: Vec<&str> = session_ids.iter().map(String::as_str).collect();
+        if let Ok(updated) = clawpal_core::sessions::filter_sessions_by_ids(&content, &ids) {
+            let _ = pool.sftp_write(&host_id, &sessions_json_path, &updated).await;
         }
     }
 
@@ -8138,35 +8060,17 @@ done
 echo "]"
 "#;
     let result = pool.exec(&host_id, script).await?;
-    let raw: Vec<Value> = serde_json::from_str(result.stdout.trim()).unwrap_or_default();
-
-    let mut out = Vec::new();
-    for val in &raw {
-        let agent = val
-            .get("agent")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string();
-        let kind = val
-            .get("kind")
-            .and_then(Value::as_str)
-            .unwrap_or("sessions")
-            .to_string();
-        let path = val
-            .get("path")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string();
-        let size_bytes = val.get("sizeBytes").and_then(Value::as_u64).unwrap_or(0);
-        out.push(SessionFile {
-            relative_path: path.clone(),
-            path,
-            agent,
-            kind,
-            size_bytes,
-        });
-    }
-    Ok(out)
+    let core = clawpal_core::sessions::parse_session_file_list(result.stdout.trim())?;
+    Ok(core
+        .into_iter()
+        .map(|entry| SessionFile {
+            path: entry.path,
+            relative_path: entry.relative_path,
+            agent: entry.agent,
+            kind: entry.kind,
+            size_bytes: entry.size_bytes,
+        })
+        .collect())
 }
 
 #[tauri::command]
@@ -8231,42 +8135,11 @@ pub async fn remote_preview_session(
         return Ok(Vec::new());
     }
 
-    let mut messages: Vec<Value> = Vec::new();
-    for line in content.lines() {
-        if line.trim().is_empty() {
-            continue;
-        }
-        let obj: Value = match serde_json::from_str(line) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-        if obj.get("type").and_then(Value::as_str) == Some("message") {
-            let role = obj
-                .pointer("/message/role")
-                .and_then(Value::as_str)
-                .unwrap_or("unknown");
-            let content_val = obj
-                .pointer("/message/content")
-                .map(|c| {
-                    if let Some(arr) = c.as_array() {
-                        arr.iter()
-                            .filter_map(|item| item.get("text").and_then(Value::as_str))
-                            .collect::<Vec<_>>()
-                            .join("\n")
-                    } else if let Some(s) = c.as_str() {
-                        s.to_string()
-                    } else {
-                        String::new()
-                    }
-                })
-                .unwrap_or_default();
-            messages.push(serde_json::json!({
-                "role": role,
-                "content": content_val,
-            }));
-        }
-    }
-    Ok(messages)
+    let parsed = clawpal_core::sessions::parse_session_preview(&content)?;
+    Ok(parsed
+        .into_iter()
+        .map(|m| serde_json::json!({ "role": m.role, "content": m.content }))
+        .collect())
 }
 
 #[tauri::command]

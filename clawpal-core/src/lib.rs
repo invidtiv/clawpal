@@ -6,6 +6,7 @@ pub mod install;
 pub mod instance;
 pub mod openclaw;
 pub mod profile;
+pub mod sessions;
 pub mod ssh;
 
 #[cfg(test)]
