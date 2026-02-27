@@ -1,4 +1,4 @@
-import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Suspense, lazy, startTransition, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { check } from "@tauri-apps/plugin-updater";
 import { getVersion } from "@tauri-apps/api/app";
@@ -38,6 +38,17 @@ const Cron = lazy(() => import("./pages/Cron").then((m) => ({ default: m.Cron })
 const Orchestrator = lazy(() => import("./pages/Orchestrator").then((m) => ({ default: m.Orchestrator })));
 const Chat = lazy(() => import("./components/Chat").then((m) => ({ default: m.Chat })));
 const PendingChangesBar = lazy(() => import("./components/PendingChangesBar").then((m) => ({ default: m.PendingChangesBar })));
+const preloadRouteModules = () =>
+  Promise.allSettled([
+    import("./pages/Home"),
+    import("./pages/Channels"),
+    import("./pages/Recipes"),
+    import("./pages/Cron"),
+    import("./pages/Doctor"),
+    import("./pages/History"),
+    import("./components/Chat"),
+    import("./components/PendingChangesBar"),
+  ]);
 
 const PING_URL = "https://api.clawpal.zhixian.io/ping";
 const LEGACY_DOCKER_INSTANCES_KEY = "clawpal_docker_instances";
@@ -195,6 +206,9 @@ export function App() {
   const [sshHosts, setSshHosts] = useState<SshHost[]>([]);
   const [registeredInstances, setRegisteredInstances] = useState<RegisteredInstance[]>([]);
   const [connectionStatus, setConnectionStatus] = useState<Record<string, "connected" | "disconnected" | "error">>({});
+  const navigateRoute = useCallback((next: Route) => {
+    startTransition(() => setRoute(next));
+  }, []);
 
   const refreshHosts = useCallback(() => {
     api.listSshHosts().then(setSshHosts).catch((e) => console.error("Failed to load SSH hosts:", e));
@@ -265,6 +279,13 @@ export function App() {
     const timer = setInterval(refreshRegisteredInstances, 30_000);
     return () => clearInterval(timer);
   }, [refreshHosts, refreshRegisteredInstances]);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      void preloadRouteModules();
+    }, 1200);
+    return () => window.clearTimeout(timer);
+  }, []);
 
   const [appUpdateAvailable, setAppUpdateAvailable] = useState(false);
   const [hasEscalatedCron, setHasEscalatedCron] = useState(false);
@@ -487,8 +508,8 @@ export function App() {
     setActiveInstance(id);
     setInStart(false);
     // Entering instance mode from Start should prefer a fast route.
-    setRoute("home");
-  }, []);
+    navigateRoute("home");
+  }, [navigateRoute]);
 
   const closeTab = useCallback((id: string) => {
     setOpenTabIds((prev) => {
@@ -514,7 +535,7 @@ export function App() {
     setInStart(false);
     // Always land on Home when switching instance to avoid route-specific
     // heavy reloads (e.g., Channels) on the critical interaction path.
-    setRoute("home");
+    navigateRoute("home");
     const transport = resolveInstanceTransport(id);
     if (transport !== "remote_ssh") return;
     // Check if backend still has a live connection before reconnecting.
@@ -547,7 +568,7 @@ export function App() {
             showToast(friendly, "error");
           });
       });
-  }, [activeInstance, resolveInstanceTransport, scheduleEnsureAccessForInstance, connectWithPassphraseFallback, showToast, t]);
+  }, [activeInstance, resolveInstanceTransport, scheduleEnsureAccessForInstance, connectWithPassphraseFallback, showToast, t, navigateRoute]);
 
   const [configVersion, setConfigVersion] = useState(0);
   const [instanceToken, setInstanceToken] = useState(0);
@@ -801,14 +822,14 @@ export function App() {
         active: startSection === "profiles",
         icon: <KeyRoundIcon className="size-4" />,
         label: t("start.nav.profiles"),
-        onClick: () => { setRoute("home"); setStartSection("profiles"); },
+        onClick: () => { navigateRoute("home"); setStartSection("profiles"); },
       },
       {
         key: "start-settings",
         active: startSection === "settings",
         icon: <SettingsIcon className="size-4" />,
         label: t("start.nav.settings"),
-        onClick: () => { setRoute("home"); setStartSection("settings"); },
+        onClick: () => { navigateRoute("home"); setStartSection("settings"); },
       },
     ]
     : [
@@ -817,21 +838,21 @@ export function App() {
         active: route === "home",
         icon: <HomeIcon className="size-4" />,
         label: t("nav.home"),
-        onClick: () => setRoute("home"),
+        onClick: () => navigateRoute("home"),
       },
       {
         key: "channels",
         active: route === "channels",
         icon: <HashIcon className="size-4" />,
         label: t("nav.channels"),
-        onClick: () => setRoute("channels"),
+        onClick: () => navigateRoute("channels"),
       },
       {
         key: "recipes",
         active: route === "recipes",
         icon: <BookOpenIcon className="size-4" />,
         label: t("nav.recipes"),
-        onClick: () => setRoute("recipes"),
+        onClick: () => navigateRoute("recipes"),
       },
       {
         key: "cron",
@@ -839,21 +860,21 @@ export function App() {
         icon: <ClockIcon className="size-4" />,
         label: t("nav.cron"),
         badge: hasEscalatedCron ? <span className="ml-auto w-2 h-2 rounded-full bg-red-500 animate-pulse" /> : undefined,
-        onClick: () => setRoute("cron"),
+        onClick: () => navigateRoute("cron"),
       },
       {
         key: "doctor",
         active: route === "doctor",
         icon: <StethoscopeIcon className="size-4" />,
         label: t("nav.doctor"),
-        onClick: () => setRoute("doctor"),
+        onClick: () => navigateRoute("doctor"),
       },
       {
         key: "history",
         active: route === "history",
         icon: <HistoryIcon className="size-4" />,
         label: t("nav.history"),
-        onClick: () => setRoute("history"),
+        onClick: () => navigateRoute("history"),
       },
     ];
 
@@ -979,7 +1000,7 @@ export function App() {
               onEditSsh={() => {}}
               onInstallReady={handleInstallReady}
               showToast={showToast}
-              onNavigate={(r) => setRoute(r as Route)}
+              onNavigate={(r) => navigateRoute(r as Route)}
             />
           )}
           {inStart && startSection === "profiles" && (
@@ -1007,7 +1028,7 @@ export function App() {
               key={`home-${configVersion}`}
               instanceLabel={openTabs.find((t) => t.id === activeInstance)?.label || activeInstance}
               showToast={showToast}
-              onNavigate={(r) => setRoute(r as Route)}
+              onNavigate={(r) => navigateRoute(r as Route)}
             />
           )}
           {!inStart && route === "recipes" && (
@@ -1015,7 +1036,7 @@ export function App() {
               onCook={(id, source) => {
                 setRecipeId(id);
                 setRecipeSource(source);
-                setRoute("cook");
+                navigateRoute("cook");
               }}
             />
           )}
@@ -1024,7 +1045,7 @@ export function App() {
               recipeId={recipeId}
               recipeSource={recipeSource}
               onDone={() => {
-                setRoute("recipes");
+                navigateRoute("recipes");
               }}
             />
           )}
@@ -1142,7 +1163,7 @@ export function App() {
                     [agentGuidance.instanceId]: agentGuidance,
                   }));
                   setInStart(false);
-                  setRoute("doctor");
+                  navigateRoute("doctor");
                 }}
               >
                 打开 Doctor
