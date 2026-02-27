@@ -7084,18 +7084,17 @@ fn migrate_legacy_ssh_file(
     let hosts: Vec<SshHostConfig> = serde_json::from_str(&text).unwrap_or_default();
     let mut count = 0usize;
     for host in hosts {
-        let ssh_host = map_ssh_host_to_core(&host);
         let instance = clawpal_core::instance::Instance {
-            id: ssh_host.id.clone(),
+            id: host.id.clone(),
             instance_type: clawpal_core::instance::InstanceType::RemoteSsh,
-            label: if ssh_host.label.trim().is_empty() {
-                ssh_host.host.clone()
+            label: if host.label.trim().is_empty() {
+                host.host.clone()
             } else {
-                ssh_host.label.clone()
+                host.label.clone()
             },
             openclaw_home: None,
             clawpal_data_dir: None,
-            ssh_host_config: Some(ssh_host),
+            ssh_host_config: Some(host),
         };
         upsert_registry_instance(registry, instance)?;
         count += 1;
@@ -7247,35 +7246,8 @@ fn map_ssh_config_suggestion(
     }
 }
 
-fn map_ssh_host_to_core(host: &SshHostConfig) -> clawpal_core::instance::SshHostConfig {
-    clawpal_core::instance::SshHostConfig {
-        id: host.id.clone(),
-        label: host.label.clone(),
-        host: host.host.clone(),
-        port: host.port,
-        username: host.username.clone(),
-        auth_method: host.auth_method.clone(),
-        key_path: host.key_path.clone(),
-        password: host.password.clone(),
-    }
-}
-
-fn map_ssh_host_from_core(host: &clawpal_core::instance::SshHostConfig) -> SshHostConfig {
-    SshHostConfig {
-        id: host.id.clone(),
-        label: host.label.clone(),
-        host: host.host.clone(),
-        port: host.port,
-        username: host.username.clone(),
-        auth_method: host.auth_method.clone(),
-        key_path: host.key_path.clone(),
-        password: host.password.clone(),
-    }
-}
-
 fn read_hosts_from_registry() -> Result<Vec<SshHostConfig>, String> {
-    let hosts = clawpal_core::ssh::registry::list_ssh_hosts()?;
-    Ok(hosts.iter().map(map_ssh_host_from_core).collect())
+    clawpal_core::ssh::registry::list_ssh_hosts()
 }
 
 #[tauri::command]
@@ -7301,8 +7273,7 @@ pub fn list_ssh_config_hosts() -> Result<Vec<SshConfigHostSuggestion>, String> {
 
 #[tauri::command]
 pub fn upsert_ssh_host(host: SshHostConfig) -> Result<SshHostConfig, String> {
-    let _ = clawpal_core::ssh::registry::upsert_ssh_host(map_ssh_host_to_core(&host))?;
-    Ok(host)
+    clawpal_core::ssh::registry::upsert_ssh_host(host)
 }
 
 #[tauri::command]
