@@ -666,12 +666,13 @@ async fn doctor_config_delete(target: DoctorTarget, dotted_path: &str) -> Result
             let config_path = std::path::PathBuf::from(openclaw_dir).join("openclaw.json");
             let raw = std::fs::read_to_string(&config_path)
                 .map_err(|e| format!("failed to read local config: {e}"))?;
-            let mut json_doc: serde_json::Value =
-                serde_json::from_str(&raw).map_err(|e| format!("invalid local config json: {e}"))?;
-            let deleted = clawpal_core::doctor::delete_json_path(&mut json_doc, dotted_path);
+            let (rendered, deleted) = clawpal_core::doctor::delete_json_path_in_str(
+                &raw,
+                dotted_path,
+                "local config",
+                "config",
+            )?;
             if deleted {
-                let rendered = serde_json::to_string_pretty(&json_doc)
-                    .map_err(|e| format!("serialize config: {e}"))?;
                 std::fs::write(&config_path, rendered)
                     .map_err(|e| format!("failed to write local config: {e}"))?;
             }
@@ -690,12 +691,14 @@ async fn doctor_config_delete(target: DoctorTarget, dotted_path: &str) -> Result
                 .sftp_read(&config_path)
                 .await
                 .map_err(|e| e.to_string())?;
-            let mut json_doc: serde_json::Value =
-                serde_json::from_slice(&raw).map_err(|e| format!("invalid remote config json: {e}"))?;
-            let deleted = clawpal_core::doctor::delete_json_path(&mut json_doc, dotted_path);
+            let raw = String::from_utf8_lossy(&raw).to_string();
+            let (rendered, deleted) = clawpal_core::doctor::delete_json_path_in_str(
+                &raw,
+                dotted_path,
+                "remote config",
+                "config",
+            )?;
             if deleted {
-                let rendered = serde_json::to_string_pretty(&json_doc)
-                    .map_err(|e| format!("serialize config: {e}"))?;
                 session
                     .sftp_write(&config_path, rendered.as_bytes())
                     .await
@@ -723,11 +726,8 @@ async fn doctor_config_read(
             let config_path = std::path::PathBuf::from(openclaw_dir).join("openclaw.json");
             let raw = std::fs::read_to_string(&config_path)
                 .map_err(|e| format!("failed to read local config: {e}"))?;
-            let json_doc: serde_json::Value =
-                serde_json::from_str(&raw).map_err(|e| format!("invalid local config json: {e}"))?;
-            let value = dotted_path
-                .and_then(|p| clawpal_core::doctor::json_path_get(&json_doc, p).cloned())
-                .unwrap_or(json_doc.clone());
+            let value =
+                clawpal_core::doctor::select_json_value_from_str(&raw, dotted_path, "local config")?;
             Ok(json!({
                 "target": "local",
                 "remote": false,
@@ -743,11 +743,9 @@ async fn doctor_config_read(
                 .sftp_read(&config_path)
                 .await
                 .map_err(|e| e.to_string())?;
-            let json_doc: serde_json::Value =
-                serde_json::from_slice(&raw).map_err(|e| format!("invalid remote config json: {e}"))?;
-            let value = dotted_path
-                .and_then(|p| clawpal_core::doctor::json_path_get(&json_doc, p).cloned())
-                .unwrap_or(json_doc.clone());
+            let raw = String::from_utf8_lossy(&raw).to_string();
+            let value =
+                clawpal_core::doctor::select_json_value_from_str(&raw, dotted_path, "remote config")?;
             Ok(json!({
                 "target": id,
                 "remote": true,
@@ -776,11 +774,13 @@ async fn doctor_config_upsert(
             let config_path = std::path::PathBuf::from(openclaw_dir).join("openclaw.json");
             let raw = std::fs::read_to_string(&config_path)
                 .map_err(|e| format!("failed to read local config: {e}"))?;
-            let mut json_doc: serde_json::Value =
-                serde_json::from_str(&raw).map_err(|e| format!("invalid local config json: {e}"))?;
-            clawpal_core::doctor::upsert_json_path(&mut json_doc, dotted_path, parsed)?;
-            let rendered = serde_json::to_string_pretty(&json_doc)
-                .map_err(|e| format!("serialize config: {e}"))?;
+            let rendered = clawpal_core::doctor::upsert_json_path_in_str(
+                &raw,
+                dotted_path,
+                parsed,
+                "local config",
+                "config",
+            )?;
             std::fs::write(&config_path, rendered)
                 .map_err(|e| format!("failed to write local config: {e}"))?;
             Ok(json!({
@@ -798,11 +798,14 @@ async fn doctor_config_upsert(
                 .sftp_read(&config_path)
                 .await
                 .map_err(|e| e.to_string())?;
-            let mut json_doc: serde_json::Value =
-                serde_json::from_slice(&raw).map_err(|e| format!("invalid remote config json: {e}"))?;
-            clawpal_core::doctor::upsert_json_path(&mut json_doc, dotted_path, parsed)?;
-            let rendered = serde_json::to_string_pretty(&json_doc)
-                .map_err(|e| format!("serialize config: {e}"))?;
+            let raw = String::from_utf8_lossy(&raw).to_string();
+            let rendered = clawpal_core::doctor::upsert_json_path_in_str(
+                &raw,
+                dotted_path,
+                parsed,
+                "remote config",
+                "config",
+            )?;
             session
                 .sftp_write(&config_path, rendered.as_bytes())
                 .await
@@ -838,11 +841,11 @@ async fn doctor_sessions_read(
             );
             let raw = std::fs::read_to_string(&sessions_path)
                 .map_err(|e| format!("failed to read local sessions: {e}"))?;
-            let json_doc: serde_json::Value = serde_json::from_str(&raw)
-                .map_err(|e| format!("invalid local sessions json: {e}"))?;
-            let value = dotted_path
-                .and_then(|p| clawpal_core::doctor::json_path_get(&json_doc, p).cloned())
-                .unwrap_or(json_doc.clone());
+            let value = clawpal_core::doctor::select_json_value_from_str(
+                &raw,
+                dotted_path,
+                "local sessions",
+            )?;
             Ok(json!({
                 "target": "local",
                 "remote": false,
@@ -858,11 +861,12 @@ async fn doctor_sessions_read(
                 .sftp_read(&sessions_path)
                 .await
                 .map_err(|e| e.to_string())?;
-            let json_doc: serde_json::Value = serde_json::from_slice(&raw)
-                .map_err(|e| format!("invalid remote sessions json: {e}"))?;
-            let value = dotted_path
-                .and_then(|p| clawpal_core::doctor::json_path_get(&json_doc, p).cloned())
-                .unwrap_or(json_doc.clone());
+            let raw = String::from_utf8_lossy(&raw).to_string();
+            let value = clawpal_core::doctor::select_json_value_from_str(
+                &raw,
+                dotted_path,
+                "remote sessions",
+            )?;
             Ok(json!({
                 "target": id,
                 "remote": true,
@@ -891,11 +895,13 @@ async fn doctor_sessions_upsert(
             );
             let raw = std::fs::read_to_string(&sessions_path)
                 .map_err(|e| format!("failed to read local sessions: {e}"))?;
-            let mut json_doc: serde_json::Value = serde_json::from_str(&raw)
-                .map_err(|e| format!("invalid local sessions json: {e}"))?;
-            clawpal_core::doctor::upsert_json_path(&mut json_doc, dotted_path, parsed)?;
-            let rendered = serde_json::to_string_pretty(&json_doc)
-                .map_err(|e| format!("serialize sessions: {e}"))?;
+            let rendered = clawpal_core::doctor::upsert_json_path_in_str(
+                &raw,
+                dotted_path,
+                parsed,
+                "local sessions",
+                "sessions",
+            )?;
             std::fs::write(&sessions_path, rendered)
                 .map_err(|e| format!("failed to write local sessions: {e}"))?;
             Ok(json!({
@@ -913,11 +919,14 @@ async fn doctor_sessions_upsert(
                 .sftp_read(&sessions_path)
                 .await
                 .map_err(|e| e.to_string())?;
-            let mut json_doc: serde_json::Value = serde_json::from_slice(&raw)
-                .map_err(|e| format!("invalid remote sessions json: {e}"))?;
-            clawpal_core::doctor::upsert_json_path(&mut json_doc, dotted_path, parsed)?;
-            let rendered = serde_json::to_string_pretty(&json_doc)
-                .map_err(|e| format!("serialize sessions: {e}"))?;
+            let raw = String::from_utf8_lossy(&raw).to_string();
+            let rendered = clawpal_core::doctor::upsert_json_path_in_str(
+                &raw,
+                dotted_path,
+                parsed,
+                "remote sessions",
+                "sessions",
+            )?;
             session
                 .sftp_write(&sessions_path, rendered.as_bytes())
                 .await
@@ -947,12 +956,13 @@ async fn doctor_sessions_delete(
             );
             let raw = std::fs::read_to_string(&sessions_path)
                 .map_err(|e| format!("failed to read local sessions: {e}"))?;
-            let mut json_doc: serde_json::Value = serde_json::from_str(&raw)
-                .map_err(|e| format!("invalid local sessions json: {e}"))?;
-            let deleted = clawpal_core::doctor::delete_json_path(&mut json_doc, dotted_path);
+            let (rendered, deleted) = clawpal_core::doctor::delete_json_path_in_str(
+                &raw,
+                dotted_path,
+                "local sessions",
+                "sessions",
+            )?;
             if deleted {
-                let rendered = serde_json::to_string_pretty(&json_doc)
-                    .map_err(|e| format!("serialize sessions: {e}"))?;
                 std::fs::write(&sessions_path, rendered)
                     .map_err(|e| format!("failed to write local sessions: {e}"))?;
             }
@@ -971,12 +981,14 @@ async fn doctor_sessions_delete(
                 .sftp_read(&sessions_path)
                 .await
                 .map_err(|e| e.to_string())?;
-            let mut json_doc: serde_json::Value = serde_json::from_slice(&raw)
-                .map_err(|e| format!("invalid remote sessions json: {e}"))?;
-            let deleted = clawpal_core::doctor::delete_json_path(&mut json_doc, dotted_path);
+            let raw = String::from_utf8_lossy(&raw).to_string();
+            let (rendered, deleted) = clawpal_core::doctor::delete_json_path_in_str(
+                &raw,
+                dotted_path,
+                "remote sessions",
+                "sessions",
+            )?;
             if deleted {
-                let rendered = serde_json::to_string_pretty(&json_doc)
-                    .map_err(|e| format!("serialize sessions: {e}"))?;
                 session
                     .sftp_write(&sessions_path, rendered.as_bytes())
                     .await

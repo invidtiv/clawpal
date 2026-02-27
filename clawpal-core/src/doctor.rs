@@ -90,6 +90,45 @@ pub fn validate_doctor_relative_path(path: &str) -> Result<(), String> {
     Ok(())
 }
 
+pub fn select_json_value_from_str(
+    raw: &str,
+    dotted_path: Option<&str>,
+    invalid_context: &str,
+) -> Result<Value, String> {
+    let json: Value =
+        serde_json::from_str(raw).map_err(|e| format!("invalid {invalid_context} json: {e}"))?;
+    Ok(dotted_path
+        .and_then(|p| json_path_get(&json, p).cloned())
+        .unwrap_or(json))
+}
+
+pub fn delete_json_path_in_str(
+    raw: &str,
+    dotted_path: &str,
+    invalid_context: &str,
+    serialize_context: &str,
+) -> Result<(String, bool), String> {
+    let mut json: Value =
+        serde_json::from_str(raw).map_err(|e| format!("invalid {invalid_context} json: {e}"))?;
+    let deleted = delete_json_path(&mut json, dotted_path);
+    let rendered =
+        serde_json::to_string_pretty(&json).map_err(|e| format!("serialize {serialize_context}: {e}"))?;
+    Ok((rendered, deleted))
+}
+
+pub fn upsert_json_path_in_str(
+    raw: &str,
+    dotted_path: &str,
+    next_value: Value,
+    invalid_context: &str,
+    serialize_context: &str,
+) -> Result<String, String> {
+    let mut json: Value =
+        serde_json::from_str(raw).map_err(|e| format!("invalid {invalid_context} json: {e}"))?;
+    upsert_json_path(&mut json, dotted_path, next_value)?;
+    serde_json::to_string_pretty(&json).map_err(|e| format!("serialize {serialize_context}: {e}"))
+}
+
 pub fn local_openclaw_root_from_env() -> PathBuf {
     std::env::var("OPENCLAW_HOME")
         .map(PathBuf::from)
@@ -256,5 +295,44 @@ mod tests {
         assert!(remote_openclaw_root_probe_script().contains("OPENCLAW_STATE_DIR"));
         assert!(remote_openclaw_config_path_probe_script().contains("openclaw.json"));
         assert!(remote_sessions_discovery_script().contains("sessions.json"));
+    }
+
+    #[test]
+    fn select_json_value_from_str_reads_nested_value() {
+        let value = select_json_value_from_str(
+            r#"{"commands":{"ownerDisplay":"raw"}}"#,
+            Some("commands.ownerDisplay"),
+            "config",
+        )
+        .expect("select");
+        assert_eq!(value.as_str().unwrap_or_default(), "raw");
+    }
+
+    #[test]
+    fn delete_json_path_in_str_renders_updated_doc() {
+        let (rendered, deleted) = delete_json_path_in_str(
+            r#"{"commands":{"ownerDisplay":"raw","other":1}}"#,
+            "commands.ownerDisplay",
+            "config",
+            "config",
+        )
+        .expect("delete");
+        assert!(deleted);
+        let parsed: Value = serde_json::from_str(&rendered).expect("parse rendered");
+        assert!(parsed["commands"].get("ownerDisplay").is_none());
+    }
+
+    #[test]
+    fn upsert_json_path_in_str_renders_updated_doc() {
+        let rendered = upsert_json_path_in_str(
+            r#"{"commands":{"other":1}}"#,
+            "commands.ownerDisplay",
+            json!("raw"),
+            "config",
+            "config",
+        )
+        .expect("upsert");
+        let parsed: Value = serde_json::from_str(&rendered).expect("parse rendered");
+        assert_eq!(parsed["commands"]["ownerDisplay"], "raw");
     }
 }
