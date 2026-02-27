@@ -78,9 +78,7 @@ fn rules_fallback(
             ],
         };
     }
-    if lower.contains("openclaw")
-        && (lower.contains("command not found") || lower.contains("not found"))
-    {
+    if looks_like_openclaw_binary_missing(error_text) {
         let mut summary = "目标实例缺少 openclaw 命令，或登录 shell 的 PATH 未包含该命令。".to_string();
         let mut actions = Vec::new();
         if let Some(result) = probe {
@@ -162,6 +160,16 @@ async fn probe_remote_openclaw(pool: &SshConnectionPool, instance_id: &str) -> O
     })
 }
 
+fn looks_like_openclaw_binary_missing(error_text: &str) -> bool {
+    let lower = error_text.to_lowercase();
+    (lower.contains("openclaw command not found")
+        || lower.contains("command not found: openclaw")
+        || lower.contains("openclaw: command not found")
+        || (lower.contains("no such file or directory") && lower.contains("openclaw"))
+        || lower.contains("failed to run openclaw"))
+        && !lower.contains("profile")
+}
+
 fn compose_message(summary: &str, actions: &[String]) -> String {
     if actions.is_empty() {
         return summary.to_string();
@@ -184,8 +192,7 @@ pub async fn explain_operation_error(
 ) -> Result<ErrorGuidance, String> {
     let lower_error = error.to_lowercase();
     let should_probe_openclaw = transport == "remote_ssh"
-        && lower_error.contains("openclaw")
-        && (lower_error.contains("command not found") || lower_error.contains("not found"));
+        && looks_like_openclaw_binary_missing(&lower_error);
     let probe = if should_probe_openclaw {
         probe_remote_openclaw(&pool, &instance_id).await
     } else {
