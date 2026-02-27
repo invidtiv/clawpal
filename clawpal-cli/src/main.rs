@@ -827,31 +827,6 @@ async fn doctor_config_upsert(
     }
 }
 
-fn resolve_local_sessions_path() -> std::path::PathBuf {
-    let openclaw_dir = std::env::var("OPENCLAW_HOME").unwrap_or_else(|_| {
-        format!(
-            "{}/.openclaw",
-            dirs::home_dir()
-                .map(|p| p.display().to_string())
-                .unwrap_or_default()
-        )
-    });
-    let agents_dir = std::path::PathBuf::from(&openclaw_dir).join("agents");
-    if let Ok(agent_entries) = std::fs::read_dir(&agents_dir) {
-        for agent_entry in agent_entries.flatten() {
-            let candidate = agent_entry.path().join("sessions").join("sessions.json");
-            if candidate.exists() {
-                return candidate;
-            }
-        }
-    }
-    std::path::PathBuf::from(openclaw_dir)
-        .join("agents")
-        .join("test")
-        .join("sessions")
-        .join("sessions.json")
-}
-
 async fn resolve_remote_sessions_path(session: &SshSession) -> Result<String, String> {
     let out = session
         .exec("sh -lc 'root=\"${OPENCLAW_STATE_DIR:-${OPENCLAW_HOME:-$HOME/.openclaw}}\"; first=\"$(find \"$root/agents\" -type f -path \"*/sessions/sessions.json\" 2>/dev/null | head -n 1)\"; if [ -n \"$first\" ]; then printf \"%s\" \"$first\"; else printf \"%s\" \"$root/agents/test/sessions/sessions.json\"; fi'")
@@ -866,7 +841,9 @@ async fn doctor_sessions_read(
 ) -> Result<serde_json::Value, String> {
     match target {
         DoctorTarget::Local => {
-            let sessions_path = resolve_local_sessions_path();
+            let sessions_path = clawpal_core::doctor::resolve_local_sessions_path(
+                &clawpal_core::doctor::local_openclaw_root_from_env(),
+            );
             let raw = std::fs::read_to_string(&sessions_path)
                 .map_err(|e| format!("failed to read local sessions: {e}"))?;
             let json_doc: serde_json::Value = serde_json::from_str(&raw)
@@ -917,7 +894,9 @@ async fn doctor_sessions_upsert(
         .map_err(|e| format!("doctor sessions-upsert requires valid JSON value: {e}"))?;
     match target {
         DoctorTarget::Local => {
-            let sessions_path = resolve_local_sessions_path();
+            let sessions_path = clawpal_core::doctor::resolve_local_sessions_path(
+                &clawpal_core::doctor::local_openclaw_root_from_env(),
+            );
             let raw = std::fs::read_to_string(&sessions_path)
                 .map_err(|e| format!("failed to read local sessions: {e}"))?;
             let mut json_doc: serde_json::Value = serde_json::from_str(&raw)
@@ -971,7 +950,9 @@ async fn doctor_sessions_delete(
     }
     match target {
         DoctorTarget::Local => {
-            let sessions_path = resolve_local_sessions_path();
+            let sessions_path = clawpal_core::doctor::resolve_local_sessions_path(
+                &clawpal_core::doctor::local_openclaw_root_from_env(),
+            );
             let raw = std::fs::read_to_string(&sessions_path)
                 .map_err(|e| format!("failed to read local sessions: {e}"))?;
             let mut json_doc: serde_json::Value = serde_json::from_str(&raw)
@@ -1020,33 +1001,6 @@ async fn doctor_sessions_delete(
     }
 }
 
-fn doctor_domain_local_root(domain: &str) -> Result<std::path::PathBuf, String> {
-    let openclaw_dir = std::env::var("OPENCLAW_HOME").unwrap_or_else(|_| {
-        format!(
-            "{}/.openclaw",
-            dirs::home_dir()
-                .map(|p| p.display().to_string())
-                .unwrap_or_default()
-        )
-    });
-    let root = std::path::PathBuf::from(openclaw_dir);
-    match domain {
-        "config" => Ok(root),
-        "sessions" => Ok(root.join("agents")),
-        "logs" => Ok(root.join("logs")),
-        "state" => Ok(root),
-        _ => Err(format!("unsupported doctor file domain: {domain}")),
-    }
-}
-
-fn doctor_domain_default_relpath(domain: &str) -> Option<&'static str> {
-    match domain {
-        "config" => Some("openclaw.json"),
-        "logs" => Some("gateway.err.log"),
-        _ => None,
-    }
-}
-
 fn relpath_from_local_abs(root: &std::path::Path, abs: &std::path::Path) -> Option<String> {
     abs.strip_prefix(root)
         .ok()
@@ -1081,12 +1035,13 @@ async fn doctor_file_read(
 ) -> Result<serde_json::Value, String> {
     match target {
         DoctorTarget::Local => {
-            let root = doctor_domain_local_root(domain)?;
+            let openclaw_root = clawpal_core::doctor::local_openclaw_root_from_env();
+            let root = clawpal_core::doctor::doctor_domain_local_root(&openclaw_root, domain)?;
             let rel = match path {
                 Some(p) => p.to_string(),
                 None => match domain {
                     "sessions" => {
-                        let abs = resolve_local_sessions_path();
+                        let abs = clawpal_core::doctor::resolve_local_sessions_path(&openclaw_root);
                         relpath_from_local_abs(&root, &abs).ok_or_else(|| {
                             format!(
                                 "failed to resolve sessions path under domain root: {}",
@@ -1094,7 +1049,7 @@ async fn doctor_file_read(
                             )
                         })?
                     }
-                    _ => doctor_domain_default_relpath(domain)
+                    _ => clawpal_core::doctor::doctor_domain_default_relpath(domain)
                         .ok_or_else(|| "doctor file read requires --path for this domain".to_string())?
                         .to_string(),
                 },
@@ -1125,7 +1080,7 @@ async fn doctor_file_read(
                             format!("failed to resolve sessions path under domain root: {root}")
                         })?
                     }
-                    _ => doctor_domain_default_relpath(domain)
+                    _ => clawpal_core::doctor::doctor_domain_default_relpath(domain)
                         .ok_or_else(|| "doctor file read requires --path for this domain".to_string())?
                         .to_string(),
                 },
@@ -1155,12 +1110,13 @@ async fn doctor_file_write(
 ) -> Result<serde_json::Value, String> {
     match target {
         DoctorTarget::Local => {
-            let root = doctor_domain_local_root(domain)?;
+            let openclaw_root = clawpal_core::doctor::local_openclaw_root_from_env();
+            let root = clawpal_core::doctor::doctor_domain_local_root(&openclaw_root, domain)?;
             let rel = match path {
                 Some(p) => p.to_string(),
                 None => match domain {
                     "sessions" => {
-                        let abs = resolve_local_sessions_path();
+                        let abs = clawpal_core::doctor::resolve_local_sessions_path(&openclaw_root);
                         relpath_from_local_abs(&root, &abs).ok_or_else(|| {
                             format!(
                                 "failed to resolve sessions path under domain root: {}",
@@ -1168,7 +1124,7 @@ async fn doctor_file_write(
                             )
                         })?
                     }
-                    _ => doctor_domain_default_relpath(domain)
+                    _ => clawpal_core::doctor::doctor_domain_default_relpath(domain)
                         .ok_or_else(|| "doctor file write requires --path for this domain".to_string())?
                         .to_string(),
                 },
@@ -1224,7 +1180,7 @@ async fn doctor_file_write(
                             format!("failed to resolve sessions path under domain root: {root}")
                         })?
                     }
-                    _ => doctor_domain_default_relpath(domain)
+                    _ => clawpal_core::doctor::doctor_domain_default_relpath(domain)
                         .ok_or_else(|| "doctor file write requires --path for this domain".to_string())?
                         .to_string(),
                 },

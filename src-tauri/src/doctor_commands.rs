@@ -524,20 +524,13 @@ fn sh_single_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
-fn doctor_domain_local_root(domain: &str) -> Result<std::path::PathBuf, String> {
+fn local_openclaw_root() -> Result<std::path::PathBuf, String> {
     let paths = resolve_paths();
-    let openclaw_root = paths
+    paths
         .config_path
         .parent()
         .map(|p| p.to_path_buf())
-        .ok_or_else(|| "failed to resolve local openclaw root".to_string())?;
-    match domain {
-        "config" => Ok(openclaw_root),
-        "sessions" => Ok(openclaw_root.join("agents")),
-        "logs" => Ok(openclaw_root.join("logs")),
-        "state" => Ok(openclaw_root),
-        _ => Err(format!("unsupported doctor file domain: {domain}")),
-    }
+        .ok_or_else(|| "failed to resolve local openclaw root".to_string())
 }
 
 async fn doctor_domain_remote_root(
@@ -560,14 +553,6 @@ async fn doctor_domain_remote_root(
         "logs" => Ok(format!("{base}/logs")),
         "state" => Ok(base),
         _ => Err(format!("unsupported doctor file domain: {domain}")),
-    }
-}
-
-fn doctor_domain_default_relpath(domain: &str) -> Option<&'static str> {
-    match domain {
-        "config" => Some("openclaw.json"),
-        "logs" => Some("gateway.err.log"),
-        _ => None,
     }
 }
 
@@ -600,7 +585,7 @@ async fn doctor_file_read(
                         format!("failed to resolve sessions path under domain root: {root}")
                     })?
                 }
-                _ => doctor_domain_default_relpath(domain)
+                _ => clawpal_core::doctor::doctor_domain_default_relpath(domain)
                     .ok_or_else(|| "doctor file read requires --path for this domain".to_string())?
                     .to_string(),
             },
@@ -619,12 +604,13 @@ async fn doctor_file_read(
             "content": content,
         }));
     }
-    let root = doctor_domain_local_root(domain)?;
+    let openclaw_root = local_openclaw_root()?;
+    let root = clawpal_core::doctor::doctor_domain_local_root(&openclaw_root, domain)?;
     let rel = match path {
         Some(p) => p.to_string(),
         None => match domain {
             "sessions" => {
-                let abs = resolve_local_sessions_path();
+                let abs = clawpal_core::doctor::resolve_local_sessions_path(&openclaw_root);
                 relpath_from_local_abs(&root, &abs).ok_or_else(|| {
                     format!(
                         "failed to resolve sessions path under domain root: {}",
@@ -632,7 +618,7 @@ async fn doctor_file_read(
                     )
                 })?
             }
-            _ => doctor_domain_default_relpath(domain)
+            _ => clawpal_core::doctor::doctor_domain_default_relpath(domain)
                 .ok_or_else(|| "doctor file read requires --path for this domain".to_string())?
                 .to_string(),
         },
@@ -672,7 +658,7 @@ async fn doctor_file_write(
                         format!("failed to resolve sessions path under domain root: {root}")
                     })?
                 }
-                _ => doctor_domain_default_relpath(domain)
+                _ => clawpal_core::doctor::doctor_domain_default_relpath(domain)
                     .ok_or_else(|| "doctor file write requires --path for this domain".to_string())?
                     .to_string(),
             },
@@ -720,12 +706,13 @@ async fn doctor_file_write(
             "backup": backup,
         }));
     }
-    let root = doctor_domain_local_root(domain)?;
+    let openclaw_root = local_openclaw_root()?;
+    let root = clawpal_core::doctor::doctor_domain_local_root(&openclaw_root, domain)?;
     let rel = match path {
         Some(p) => p.to_string(),
         None => match domain {
             "sessions" => {
-                let abs = resolve_local_sessions_path();
+                let abs = clawpal_core::doctor::resolve_local_sessions_path(&openclaw_root);
                 relpath_from_local_abs(&root, &abs).ok_or_else(|| {
                     format!(
                         "failed to resolve sessions path under domain root: {}",
@@ -733,7 +720,7 @@ async fn doctor_file_write(
                     )
                 })?
             }
-            _ => doctor_domain_default_relpath(domain)
+            _ => clawpal_core::doctor::doctor_domain_default_relpath(domain)
                 .ok_or_else(|| "doctor file write requires --path for this domain".to_string())?
                 .to_string(),
         },
@@ -931,29 +918,6 @@ async fn doctor_config_upsert(
     }))
 }
 
-fn resolve_local_sessions_path() -> std::path::PathBuf {
-    let paths = resolve_paths();
-    let openclaw_root = paths
-        .config_path
-        .parent()
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| std::path::PathBuf::from("."));
-    let agents_dir = openclaw_root.join("agents");
-    if let Ok(agent_entries) = std::fs::read_dir(&agents_dir) {
-        for agent_entry in agent_entries.flatten() {
-            let candidate = agent_entry.path().join("sessions").join("sessions.json");
-            if candidate.exists() {
-                return candidate;
-            }
-        }
-    }
-    openclaw_root
-        .join("agents")
-        .join("test")
-        .join("sessions")
-        .join("sessions.json")
-}
-
 async fn resolve_remote_sessions_path(pool: &SshConnectionPool, target: &str) -> Result<String, String> {
     let out = pool
         .exec_login(
@@ -988,7 +952,8 @@ async fn doctor_sessions_read(
         }));
     }
 
-    let sessions_path = resolve_local_sessions_path();
+    let sessions_path =
+        clawpal_core::doctor::resolve_local_sessions_path(&local_openclaw_root()?);
     let raw = std::fs::read_to_string(&sessions_path)
         .map_err(|e| format!("failed to read local sessions: {e}"))?;
     let json: Value =
@@ -1034,7 +999,8 @@ async fn doctor_sessions_upsert(
         }));
     }
 
-    let sessions_path = resolve_local_sessions_path();
+    let sessions_path =
+        clawpal_core::doctor::resolve_local_sessions_path(&local_openclaw_root()?);
     let raw = std::fs::read_to_string(&sessions_path)
         .map_err(|e| format!("failed to read local sessions: {e}"))?;
     let mut json: Value =
@@ -1081,7 +1047,8 @@ async fn doctor_sessions_delete(
         }));
     }
 
-    let sessions_path = resolve_local_sessions_path();
+    let sessions_path =
+        clawpal_core::doctor::resolve_local_sessions_path(&local_openclaw_root()?);
     let raw = std::fs::read_to_string(&sessions_path)
         .map_err(|e| format!("failed to read local sessions: {e}"))?;
     let mut json: Value =

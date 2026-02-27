@@ -1,4 +1,5 @@
 use serde_json::Value;
+use std::path::{Path, PathBuf};
 
 pub fn delete_json_path(value: &mut Value, dotted_path: &str) -> bool {
     let parts: Vec<&str> = dotted_path
@@ -89,6 +90,51 @@ pub fn validate_doctor_relative_path(path: &str) -> Result<(), String> {
     Ok(())
 }
 
+pub fn local_openclaw_root_from_env() -> PathBuf {
+    std::env::var("OPENCLAW_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            dirs::home_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join(".openclaw")
+        })
+}
+
+pub fn resolve_local_sessions_path(openclaw_root: &Path) -> PathBuf {
+    let agents_dir = openclaw_root.join("agents");
+    if let Ok(agent_entries) = std::fs::read_dir(&agents_dir) {
+        for agent_entry in agent_entries.flatten() {
+            let candidate = agent_entry.path().join("sessions").join("sessions.json");
+            if candidate.exists() {
+                return candidate;
+            }
+        }
+    }
+    openclaw_root
+        .join("agents")
+        .join("test")
+        .join("sessions")
+        .join("sessions.json")
+}
+
+pub fn doctor_domain_local_root(openclaw_root: &Path, domain: &str) -> Result<PathBuf, String> {
+    match domain {
+        "config" => Ok(openclaw_root.to_path_buf()),
+        "sessions" => Ok(openclaw_root.join("agents")),
+        "logs" => Ok(openclaw_root.join("logs")),
+        "state" => Ok(openclaw_root.to_path_buf()),
+        _ => Err(format!("unsupported doctor file domain: {domain}")),
+    }
+}
+
+pub fn doctor_domain_default_relpath(domain: &str) -> Option<&'static str> {
+    match domain {
+        "config" => Some("openclaw.json"),
+        "logs" => Some("gateway.err.log"),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -137,5 +183,19 @@ mod tests {
     fn validate_doctor_relative_path_rejects_parent_dir() {
         let err = validate_doctor_relative_path("../secret").expect_err("must fail");
         assert!(err.contains("forbidden traversal"));
+    }
+
+    #[test]
+    fn resolve_local_sessions_path_uses_default_when_empty() {
+        let root = std::env::temp_dir().join("clawpal-doctor-test-root-empty");
+        let path = resolve_local_sessions_path(&root);
+        assert!(path.ends_with("agents/test/sessions/sessions.json"));
+    }
+
+    #[test]
+    fn doctor_domain_local_root_maps_sessions_domain() {
+        let root = PathBuf::from("/tmp/openclaw");
+        let sessions = doctor_domain_local_root(&root, "sessions").expect("sessions root");
+        assert_eq!(sessions, PathBuf::from("/tmp/openclaw/agents"));
     }
 }
