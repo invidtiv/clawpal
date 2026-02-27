@@ -520,97 +520,8 @@ fn describe_invoke(command: &str, args: &Value) -> String {
     }
 }
 
-fn delete_json_path(value: &mut Value, dotted_path: &str) -> bool {
-    let parts: Vec<&str> = dotted_path
-        .split('.')
-        .map(str::trim)
-        .filter(|p| !p.is_empty())
-        .collect();
-    if parts.is_empty() {
-        return false;
-    }
-    let mut cursor = value;
-    for part in &parts[..parts.len() - 1] {
-        if let Some(next) = cursor.get_mut(*part) {
-            cursor = next;
-        } else {
-            return false;
-        }
-    }
-    if let Some(obj) = cursor.as_object_mut() {
-        return obj.remove(parts[parts.len() - 1]).is_some();
-    }
-    false
-}
-
-fn upsert_json_path(value: &mut Value, dotted_path: &str, next_value: Value) -> Result<(), String> {
-    let parts: Vec<&str> = dotted_path
-        .split('.')
-        .map(str::trim)
-        .filter(|p| !p.is_empty())
-        .collect();
-    if parts.is_empty() {
-        return Err("doctor config-upsert requires non-empty <json.path>".to_string());
-    }
-    let mut cursor = value;
-    for part in &parts[..parts.len() - 1] {
-        if cursor.get(*part).is_none() {
-            if let Some(obj) = cursor.as_object_mut() {
-                obj.insert((*part).to_string(), json!({}));
-            } else {
-                return Err(format!("path segment '{part}' is not an object"));
-            }
-        }
-        cursor = cursor
-            .get_mut(*part)
-            .ok_or_else(|| format!("path segment '{part}' is missing"))?;
-        if !cursor.is_object() {
-            return Err(format!("path segment '{part}' is not an object"));
-        }
-    }
-    let leaf = parts[parts.len() - 1];
-    let obj = cursor
-        .as_object_mut()
-        .ok_or_else(|| "target parent is not an object".to_string())?;
-    obj.insert(leaf.to_string(), next_value);
-    Ok(())
-}
-
-fn json_path_get<'a>(value: &'a Value, dotted_path: &str) -> Option<&'a Value> {
-    let parts: Vec<&str> = dotted_path
-        .split('.')
-        .map(str::trim)
-        .filter(|p| !p.is_empty())
-        .collect();
-    if parts.is_empty() {
-        return Some(value);
-    }
-    let mut cursor = value;
-    for part in parts {
-        cursor = cursor.get(part)?;
-    }
-    Some(cursor)
-}
-
 fn sh_single_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
-}
-
-fn validate_doctor_relative_path(path: &str) -> Result<(), String> {
-    let trimmed = path.trim();
-    if trimmed.is_empty() {
-        return Err("doctor file path cannot be empty".to_string());
-    }
-    if trimmed.starts_with('/') || trimmed.starts_with('~') {
-        return Err("doctor file path must be relative to domain root".to_string());
-    }
-    if trimmed
-        .split('/')
-        .any(|seg| seg == ".." || seg.contains('\0') || seg.is_empty() && trimmed.contains("//"))
-    {
-        return Err("doctor file path contains forbidden traversal segment".to_string());
-    }
-    Ok(())
 }
 
 fn doctor_domain_local_root(domain: &str) -> Result<std::path::PathBuf, String> {
@@ -694,7 +605,7 @@ async fn doctor_file_read(
                     .to_string(),
             },
         };
-        validate_doctor_relative_path(&rel)?;
+        clawpal_core::doctor::validate_doctor_relative_path(&rel)?;
         let full_path = format!("{}/{}", root.trim_end_matches('/'), rel);
         validate_not_sensitive(&full_path)?;
         let content = pool.sftp_read(target, &full_path).await?;
@@ -726,7 +637,7 @@ async fn doctor_file_read(
                 .to_string(),
         },
     };
-    validate_doctor_relative_path(&rel)?;
+    clawpal_core::doctor::validate_doctor_relative_path(&rel)?;
     let full_path = root.join(&rel);
     validate_not_sensitive(&full_path.to_string_lossy())?;
     let content =
@@ -766,7 +677,7 @@ async fn doctor_file_write(
                     .to_string(),
             },
         };
-        validate_doctor_relative_path(&rel)?;
+        clawpal_core::doctor::validate_doctor_relative_path(&rel)?;
         let full_path = format!("{}/{}", root.trim_end_matches('/'), rel);
         validate_not_sensitive(&full_path)?;
         let dirname_cmd = format!(
@@ -827,7 +738,7 @@ async fn doctor_file_write(
                 .to_string(),
         },
     };
-    validate_doctor_relative_path(&rel)?;
+    clawpal_core::doctor::validate_doctor_relative_path(&rel)?;
     let full_path = root.join(&rel);
     validate_not_sensitive(&full_path.to_string_lossy())?;
     if let Some(parent) = full_path.parent() {
@@ -885,7 +796,7 @@ async fn doctor_config_delete(
         let raw = pool.sftp_read(target, &config_path).await?;
         let mut json: Value =
             serde_json::from_str(&raw).map_err(|e| format!("invalid remote config json: {e}"))?;
-        let deleted = delete_json_path(&mut json, dotted_path);
+        let deleted = clawpal_core::doctor::delete_json_path(&mut json, dotted_path);
         if deleted {
             let next =
                 serde_json::to_string_pretty(&json).map_err(|e| format!("serialize config: {e}"))?;
@@ -906,7 +817,7 @@ async fn doctor_config_delete(
         .map_err(|e| format!("failed to read local config: {e}"))?;
     let mut json: Value =
         serde_json::from_str(&raw).map_err(|e| format!("invalid local config json: {e}"))?;
-    let deleted = delete_json_path(&mut json, dotted_path);
+    let deleted = clawpal_core::doctor::delete_json_path(&mut json, dotted_path);
     if deleted {
         let next = serde_json::to_string_pretty(&json).map_err(|e| format!("serialize config: {e}"))?;
         std::fs::write(&config_path, next).map_err(|e| format!("failed to write local config: {e}"))?;
@@ -937,7 +848,7 @@ async fn doctor_config_read(
         let json: Value =
             serde_json::from_str(&raw).map_err(|e| format!("invalid remote config json: {e}"))?;
         let selected = dotted_path
-            .and_then(|p| json_path_get(&json, p).cloned())
+            .and_then(|p| clawpal_core::doctor::json_path_get(&json, p).cloned())
             .unwrap_or(json.clone());
         return Ok(json!({
             "target": target,
@@ -955,7 +866,7 @@ async fn doctor_config_read(
     let json: Value =
         serde_json::from_str(&raw).map_err(|e| format!("invalid local config json: {e}"))?;
     let selected = dotted_path
-        .and_then(|p| json_path_get(&json, p).cloned())
+        .and_then(|p| clawpal_core::doctor::json_path_get(&json, p).cloned())
         .unwrap_or(json.clone());
     Ok(json!({
         "target": target,
@@ -988,7 +899,7 @@ async fn doctor_config_upsert(
         let raw = pool.sftp_read(target, &config_path).await?;
         let mut json: Value =
             serde_json::from_str(&raw).map_err(|e| format!("invalid remote config json: {e}"))?;
-        upsert_json_path(&mut json, dotted_path, next_value)?;
+        clawpal_core::doctor::upsert_json_path(&mut json, dotted_path, next_value)?;
         let rendered =
             serde_json::to_string_pretty(&json).map_err(|e| format!("serialize config: {e}"))?;
         pool.sftp_write(target, &config_path, &rendered).await?;
@@ -1007,7 +918,7 @@ async fn doctor_config_upsert(
         .map_err(|e| format!("failed to read local config: {e}"))?;
     let mut json: Value =
         serde_json::from_str(&raw).map_err(|e| format!("invalid local config json: {e}"))?;
-    upsert_json_path(&mut json, dotted_path, next_value)?;
+    clawpal_core::doctor::upsert_json_path(&mut json, dotted_path, next_value)?;
     let rendered =
         serde_json::to_string_pretty(&json).map_err(|e| format!("serialize config: {e}"))?;
     std::fs::write(&config_path, rendered).map_err(|e| format!("failed to write local config: {e}"))?;
@@ -1066,7 +977,7 @@ async fn doctor_sessions_read(
         let json: Value =
             serde_json::from_str(&raw).map_err(|e| format!("invalid remote sessions json: {e}"))?;
         let selected = dotted_path
-            .and_then(|p| json_path_get(&json, p).cloned())
+            .and_then(|p| clawpal_core::doctor::json_path_get(&json, p).cloned())
             .unwrap_or(json.clone());
         return Ok(json!({
             "target": target,
@@ -1083,7 +994,7 @@ async fn doctor_sessions_read(
     let json: Value =
         serde_json::from_str(&raw).map_err(|e| format!("invalid local sessions json: {e}"))?;
     let selected = dotted_path
-        .and_then(|p| json_path_get(&json, p).cloned())
+        .and_then(|p| clawpal_core::doctor::json_path_get(&json, p).cloned())
         .unwrap_or(json.clone());
     Ok(json!({
         "target": target,
@@ -1110,7 +1021,7 @@ async fn doctor_sessions_upsert(
         let raw = pool.sftp_read(target, &sessions_path).await?;
         let mut json: Value =
             serde_json::from_str(&raw).map_err(|e| format!("invalid remote sessions json: {e}"))?;
-        upsert_json_path(&mut json, dotted_path, next_value)?;
+        clawpal_core::doctor::upsert_json_path(&mut json, dotted_path, next_value)?;
         let rendered =
             serde_json::to_string_pretty(&json).map_err(|e| format!("serialize sessions: {e}"))?;
         pool.sftp_write(target, &sessions_path, &rendered).await?;
@@ -1128,7 +1039,7 @@ async fn doctor_sessions_upsert(
         .map_err(|e| format!("failed to read local sessions: {e}"))?;
     let mut json: Value =
         serde_json::from_str(&raw).map_err(|e| format!("invalid local sessions json: {e}"))?;
-    upsert_json_path(&mut json, dotted_path, next_value)?;
+    clawpal_core::doctor::upsert_json_path(&mut json, dotted_path, next_value)?;
     let rendered =
         serde_json::to_string_pretty(&json).map_err(|e| format!("serialize sessions: {e}"))?;
     std::fs::write(&sessions_path, rendered)
@@ -1155,7 +1066,7 @@ async fn doctor_sessions_delete(
         let raw = pool.sftp_read(target, &sessions_path).await?;
         let mut json: Value =
             serde_json::from_str(&raw).map_err(|e| format!("invalid remote sessions json: {e}"))?;
-        let deleted = delete_json_path(&mut json, dotted_path);
+        let deleted = clawpal_core::doctor::delete_json_path(&mut json, dotted_path);
         if deleted {
             let rendered =
                 serde_json::to_string_pretty(&json).map_err(|e| format!("serialize sessions: {e}"))?;
@@ -1175,7 +1086,7 @@ async fn doctor_sessions_delete(
         .map_err(|e| format!("failed to read local sessions: {e}"))?;
     let mut json: Value =
         serde_json::from_str(&raw).map_err(|e| format!("invalid local sessions json: {e}"))?;
-    let deleted = delete_json_path(&mut json, dotted_path);
+    let deleted = clawpal_core::doctor::delete_json_path(&mut json, dotted_path);
     if deleted {
         let rendered =
             serde_json::to_string_pretty(&json).map_err(|e| format!("serialize sessions: {e}"))?;
@@ -1830,7 +1741,10 @@ mod tests {
                 "other": 1
             }
         });
-        assert!(delete_json_path(&mut doc, "commands.ownerDisplay"));
+        assert!(clawpal_core::doctor::delete_json_path(
+            &mut doc,
+            "commands.ownerDisplay"
+        ));
         assert!(doc["commands"].get("ownerDisplay").is_none());
         assert_eq!(doc["commands"]["other"], 1);
     }
@@ -1842,7 +1756,8 @@ mod tests {
                 "other": 1
             }
         });
-        upsert_json_path(&mut doc, "commands.ownerDisplay", json!("raw")).expect("upsert");
+        clawpal_core::doctor::upsert_json_path(&mut doc, "commands.ownerDisplay", json!("raw"))
+            .expect("upsert");
         assert_eq!(doc["commands"]["ownerDisplay"], "raw");
         assert_eq!(doc["commands"]["other"], 1);
     }

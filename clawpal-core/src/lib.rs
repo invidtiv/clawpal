@@ -1,4 +1,5 @@
 pub mod connect;
+pub mod doctor;
 pub mod health;
 pub mod install;
 pub mod instance;
