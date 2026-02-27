@@ -268,6 +268,32 @@ pub fn gateway_output_detail(exit_code: i32, stdout: &str, stderr: &str) -> Opti
     }
 }
 
+pub fn trim_for_detail(raw: &str) -> String {
+    let compact = raw
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .find(|line| !line.is_empty())
+        .unwrap_or("no output");
+    let mut detail = compact.to_string();
+    const MAX_LEN: usize = 220;
+    if detail.chars().count() > MAX_LEN {
+        detail = detail.chars().take(MAX_LEN).collect::<String>();
+        detail.push('…');
+    }
+    detail
+}
+
+pub fn command_output_detail(stderr: &str, stdout: &str) -> String {
+    if !stderr.trim().is_empty() {
+        return trim_for_detail(stderr);
+    }
+    if !stdout.trim().is_empty() {
+        return trim_for_detail(stdout);
+    }
+    "no output".into()
+}
+
 pub fn apply_issue_fixes(config: &mut Value, ids: &[String]) -> Result<Vec<String>, String> {
     let mut applied = Vec::new();
     for id in ids {
@@ -731,6 +757,12 @@ mod tests {
             gateway_output_detail(0, stdout, "").as_deref(),
             Some("running=true, healthy=true, port=18789")
         );
+    }
+
+    #[test]
+    fn command_output_detail_prefers_stderr_and_trims() {
+        let detail = command_output_detail("  first error line\nsecond\n", "ok");
+        assert_eq!(detail, "first error line");
     }
 
     #[test]

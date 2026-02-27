@@ -2281,29 +2281,8 @@ fn build_profile_command(profile: &str, args: &[&str]) -> Vec<String> {
     command
 }
 
-fn trim_for_detail(raw: &str) -> String {
-    let compact = raw
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .unwrap_or("no output");
-    let mut detail = compact.to_string();
-    const MAX_LEN: usize = 220;
-    if detail.chars().count() > MAX_LEN {
-        detail = detail.chars().take(MAX_LEN).collect::<String>();
-        detail.push('…');
-    }
-    detail
-}
-
 fn command_detail(output: &OpenclawCommandOutput) -> String {
-    if !output.stderr.trim().is_empty() {
-        return trim_for_detail(&output.stderr);
-    }
-    if !output.stdout.trim().is_empty() {
-        return trim_for_detail(&output.stdout);
-    }
-    "no output".into()
+    clawpal_core::doctor::command_output_detail(&output.stderr, &output.stdout)
 }
 
 fn parse_doctor_issues(report: &Value, source: &str) -> Vec<RescuePrimaryIssue> {
