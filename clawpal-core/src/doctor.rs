@@ -183,6 +183,42 @@ pub fn parse_json_document(raw: &str, invalid_context: &str) -> Result<Value, St
     serde_json::from_str(raw).map_err(|e| format!("invalid {invalid_context} json: {e}"))
 }
 
+pub fn extract_json_from_output(raw: &str) -> Option<&str> {
+    let end_object = raw.rfind('}');
+    let end_array = raw.rfind(']');
+    let (end, opener, closer) = match (end_object, end_array) {
+        (Some(object_end), Some(array_end)) if object_end > array_end => (object_end, b'{', b'}'),
+        (Some(_), Some(array_end)) => (array_end, b'[', b']'),
+        (Some(object_end), None) => (object_end, b'{', b'}'),
+        (None, Some(array_end)) => (array_end, b'[', b']'),
+        (None, None) => return None,
+    };
+
+    let bytes = raw.as_bytes();
+    let mut depth: i32 = 0;
+    for i in (0..=end).rev() {
+        let ch = bytes[i];
+        if ch == closer {
+            depth += 1;
+        } else if ch == opener {
+            depth -= 1;
+            if depth == 0 {
+                return Some(&raw[i..=end]);
+            }
+        }
+    }
+    None
+}
+
+pub fn parse_json_loose(raw: &str) -> Option<Value> {
+    if raw.trim().is_empty() {
+        return None;
+    }
+    serde_json::from_str(raw)
+        .ok()
+        .or_else(|| extract_json_from_output(raw).and_then(|json| serde_json::from_str(json).ok()))
+}
+
 pub fn parse_json5_document(raw: &str, invalid_context: &str) -> Result<Value, String> {
     json5::from_str(raw).map_err(|e| format!("invalid {invalid_context} json5: {e}"))
 }
@@ -198,6 +234,33 @@ pub fn parse_json_value_arg(raw: &str, operation_name: &str) -> Result<Value, St
 
 pub fn render_json_document(value: &Value, serialize_context: &str) -> Result<String, String> {
     serde_json::to_string_pretty(value).map_err(|e| format!("serialize {serialize_context}: {e}"))
+}
+
+pub fn strip_doctor_banner(text: &str) -> String {
+    let mut lines: Vec<&str> = Vec::new();
+    let mut in_banner = false;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.contains("Doctor warnings") && trimmed.contains('╮') {
+            in_banner = true;
+            continue;
+        }
+        if in_banner {
+            if trimmed.contains('╯') {
+                in_banner = false;
+            }
+            continue;
+        }
+        if !trimmed.is_empty() {
+            lines.push(line);
+        }
+    }
+    let result = lines.join("\n").trim().to_string();
+    if result.is_empty() {
+        "Command failed".into()
+    } else {
+        result
+    }
 }
 
 pub fn delete_json_path_in_str(
@@ -570,6 +633,29 @@ mod tests {
     fn parse_json_document_returns_contextual_error() {
         let err = parse_json_document("{oops", "config").expect_err("must fail");
         assert!(err.contains("invalid config json"));
+    }
+
+    #[test]
+    fn extract_json_from_output_uses_trailing_balanced_payload() {
+        let raw =
+            "[plugins] warmup cache\n[warn] using fallback transport\n{\"ok\":false,\"issues\":[{\"id\":\"x\"}]}";
+        let json = extract_json_from_output(raw).expect("extract");
+        assert_eq!(json, "{\"ok\":false,\"issues\":[{\"id\":\"x\"}]}");
+    }
+
+    #[test]
+    fn parse_json_loose_handles_leading_bracketed_logs() {
+        let raw =
+            "[plugins] warmup cache\n[warn] using fallback transport\n{\"running\":false,\"healthy\":false}";
+        let parsed = parse_json_loose(raw).expect("expected trailing JSON payload");
+        assert_eq!(parsed.get("running").and_then(Value::as_bool), Some(false));
+        assert_eq!(parsed.get("healthy").and_then(Value::as_bool), Some(false));
+    }
+
+    #[test]
+    fn strip_doctor_banner_removes_warning_box_lines() {
+        let input = "╭─ Doctor warnings ─╮\n│ noisy │\n╰────────╯\nreal error";
+        assert_eq!(strip_doctor_banner(input), "real error");
     }
 
     #[test]

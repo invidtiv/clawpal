@@ -2306,15 +2306,6 @@ fn command_detail(output: &OpenclawCommandOutput) -> String {
     "no output".into()
 }
 
-fn parse_json_loose(raw: &str) -> Option<Value> {
-    if raw.trim().is_empty() {
-        return None;
-    }
-    serde_json::from_str(raw)
-        .ok()
-        .or_else(|| extract_json_from_output(raw).and_then(|json| serde_json::from_str(json).ok()))
-}
-
 fn normalize_issue_severity(raw: &str) -> String {
     let value = raw.trim().to_ascii_lowercase();
     if value.contains("error") {
@@ -2428,7 +2419,7 @@ fn gateway_output_ok(output: &OpenclawCommandOutput) -> bool {
     if output.exit_code != 0 {
         return false;
     }
-    let status = parse_json_loose(&output.stdout).or_else(|| parse_json_loose(&output.stderr));
+    let status = clawpal_core::doctor::parse_json_loose(&output.stdout).or_else(|| clawpal_core::doctor::parse_json_loose(&output.stderr));
     let Some(status) = status else {
         return true;
     };
@@ -2445,8 +2436,8 @@ fn gateway_output_ok(output: &OpenclawCommandOutput) -> bool {
 }
 
 fn gateway_output_detail(output: &OpenclawCommandOutput) -> String {
-    parse_json_loose(&output.stdout)
-        .or_else(|| parse_json_loose(&output.stderr))
+    clawpal_core::doctor::parse_json_loose(&output.stdout)
+        .or_else(|| clawpal_core::doctor::parse_json_loose(&output.stderr))
         .and_then(|status| summarize_gateway_status(&status))
         .unwrap_or_else(|| command_detail(output))
 }
@@ -2509,8 +2500,8 @@ fn build_rescue_primary_diagnosis(
         }
     }
 
-    let doctor_report = parse_json_loose(&primary_doctor_output.stdout)
-        .or_else(|| parse_json_loose(&primary_doctor_output.stderr));
+    let doctor_report = clawpal_core::doctor::parse_json_loose(&primary_doctor_output.stdout)
+        .or_else(|| clawpal_core::doctor::parse_json_loose(&primary_doctor_output.stderr));
     let doctor_issues = doctor_report
         .as_ref()
         .map(|report| parse_doctor_issues(report, "primary"))
@@ -3651,34 +3642,6 @@ pub async fn record_install_experience(
     })
 }
 
-/// Strip leading non-JSON lines from CLI output (plugin logs, ANSI codes, etc.)
-fn extract_json_from_output(raw: &str) -> Option<&str> {
-    let end_object = raw.rfind('}');
-    let end_array = raw.rfind(']');
-    let (end, opener, closer) = match (end_object, end_array) {
-        (Some(object_end), Some(array_end)) if object_end > array_end => (object_end, b'{', b'}'),
-        (Some(_), Some(array_end)) => (array_end, b'[', b']'),
-        (Some(object_end), None) => (object_end, b'{', b'}'),
-        (None, Some(array_end)) => (array_end, b'[', b']'),
-        (None, None) => return None,
-    };
-
-    let bytes = raw.as_bytes();
-    let mut depth: i32 = 0;
-    for i in (0..=end).rev() {
-        let ch = bytes[i];
-        if ch == closer {
-            depth += 1;
-        } else if ch == opener {
-            depth -= 1;
-            if depth == 0 {
-                return Some(&raw[i..=end]);
-            }
-        }
-    }
-    None
-}
-
 /// Extract the last JSON array from CLI output that may contain ANSI codes and plugin logs.
 /// Scans from the end to find the last `]`, then finds its matching `[`.
 fn extract_last_json_array(raw: &str) -> Option<&str> {
@@ -4038,7 +4001,7 @@ fn parse_openclaw_update_json(
     raw: &str,
     installed_version: &str,
 ) -> Option<(Option<String>, String, String, bool)> {
-    let json_str = extract_json_from_output(raw)?;
+    let json_str = clawpal_core::doctor::extract_json_from_output(raw)?;
     let payload: Value = serde_json::from_str(json_str).ok()?;
     let channel = payload
         .pointer("/channel/value")
@@ -5171,7 +5134,7 @@ fn select_catalog_from_cache(
 /// Handles various output formats: flat arrays, {models: [...]}, {items: [...]}, {data: [...]}.
 /// Strips prefix junk (plugin log lines) before the JSON.
 fn parse_model_catalog_from_cli_output(raw: &str) -> Option<Vec<ModelCatalogProvider>> {
-    let json_str = extract_json_from_output(raw)?;
+    let json_str = clawpal_core::doctor::extract_json_from_output(raw)?;
     let response: Value = serde_json::from_str(json_str).ok()?;
     let models: Vec<Value> = response
         .as_array()
@@ -5596,14 +5559,14 @@ mod rescue_bot_tests {
     #[test]
     fn test_extract_json_from_output_uses_trailing_balanced_payload() {
         let raw = "[plugins] warmup cache\n[warn] using fallback transport\n{\"ok\":false,\"issues\":[{\"id\":\"x\"}]}";
-        let json = extract_json_from_output(raw).unwrap();
+        let json = clawpal_core::doctor::extract_json_from_output(raw).unwrap();
         assert_eq!(json, "{\"ok\":false,\"issues\":[{\"id\":\"x\"}]}");
     }
 
     #[test]
     fn test_parse_json_loose_handles_leading_bracketed_logs() {
         let raw = "[plugins] warmup cache\n[warn] using fallback transport\n{\"running\":false,\"healthy\":false}";
-        let parsed = parse_json_loose(raw).expect("expected trailing JSON payload");
+        let parsed = clawpal_core::doctor::parse_json_loose(raw).expect("expected trailing JSON payload");
         assert_eq!(parsed.get("running").and_then(Value::as_bool), Some(false));
         assert_eq!(parsed.get("healthy").and_then(Value::as_bool), Some(false));
     }
@@ -5970,7 +5933,7 @@ fn enrich_channel_display_names(
             }
             continue;
         }
-        let json_str = extract_json_from_output(&output.stdout).unwrap_or("[]");
+        let json_str = clawpal_core::doctor::extract_json_from_output(&output.stdout).unwrap_or("[]");
         let parsed: Vec<Value> = serde_json::from_str(json_str).unwrap_or_default();
         let mut name_map = HashMap::new();
         for item in parsed {
@@ -6425,7 +6388,7 @@ pub async fn chat_via_openclaw(
 
         let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
         let output = run_openclaw_raw(&arg_refs)?;
-        let json_str = extract_json_from_output(&output.stdout)
+        let json_str = clawpal_core::doctor::extract_json_from_output(&output.stdout)
             .ok_or_else(|| format!("No JSON in openclaw output: {}", output.stdout))?;
         serde_json::from_str(json_str).map_err(|e| format!("Parse openclaw response failed: {}", e))
     })
@@ -6458,7 +6421,7 @@ pub async fn remote_chat_via_openclaw(
             result.exit_code, result.stderr
         ));
     }
-    let json_str = extract_json_from_output(&result.stdout)
+    let json_str = clawpal_core::doctor::extract_json_from_output(&result.stdout)
         .ok_or_else(|| format!("No JSON in remote openclaw output: {}", result.stdout))?;
     serde_json::from_str(json_str).map_err(|e| format!("Failed to parse remote chat response: {e}"))
 }
@@ -9147,35 +9110,6 @@ pub async fn remote_run_openclaw_upgrade(
 // Cron jobs
 // ---------------------------------------------------------------------------
 
-/// Strip Doctor warning banners from CLI output to show only meaningful errors.
-/// Doctor banners look like: ╭─ ... ─╮ ... ╰─ ... ─╯
-fn strip_doctor_banner(text: &str) -> String {
-    let mut lines: Vec<&str> = Vec::new();
-    let mut in_banner = false;
-    for line in text.lines() {
-        let trimmed = line.trim();
-        if trimmed.contains("Doctor warnings") && trimmed.contains('╮') {
-            in_banner = true;
-            continue;
-        }
-        if in_banner {
-            if trimmed.contains('╯') {
-                in_banner = false;
-            }
-            continue;
-        }
-        if !trimmed.is_empty() {
-            lines.push(line);
-        }
-    }
-    let result = lines.join("\n").trim().to_string();
-    if result.is_empty() {
-        "Command failed".into()
-    } else {
-        result
-    }
-}
-
 fn parse_cron_jobs(text: &str) -> Value {
     let parsed: Value = serde_json::from_str(text).unwrap_or(Value::Array(vec![]));
     // Handle { "version": N, "jobs": [...] } wrapper
@@ -9269,7 +9203,7 @@ pub async fn trigger_cron_job(job_id: String) -> Result<String, String> {
             Ok(stdout)
         } else {
             // Extract meaningful error lines, skip Doctor warning banners
-            let error_msg = strip_doctor_banner(&format!("{stdout}\n{stderr}"));
+            let error_msg = clawpal_core::doctor::strip_doctor_banner(&format!("{stdout}\n{stderr}"));
             Err(error_msg)
         }
     })
