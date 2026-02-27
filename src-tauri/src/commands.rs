@@ -2133,8 +2133,7 @@ pub fn preview_rollback(snapshot_id: String) -> Result<PreviewResult, String> {
 
     let current = read_openclaw_config(&paths)?;
     let target_text = read_snapshot(&target.config_path)?;
-    let target_json: Value =
-        json5::from_str(&target_text).unwrap_or(Value::Object(Default::default()));
+    let target_json = clawpal_core::doctor::parse_json5_document_or_default(&target_text);
     let before_text = serde_json::to_string_pretty(&current).unwrap_or_else(|_| "{}".into());
     let after_text = serde_json::to_string_pretty(&target_json).unwrap_or_else(|_| "{}".into());
     Ok(PreviewResult {
@@ -2228,8 +2227,7 @@ pub async fn remote_fix_issues(
     let raw = pool
         .sftp_read(&host_id, "~/.openclaw/openclaw.json")
         .await?;
-    let mut cfg: Value =
-        json5::from_str(&raw).unwrap_or_else(|_| Value::Object(Default::default()));
+    let mut cfg = clawpal_core::doctor::parse_json5_document_or_default(&raw);
     let mut applied = Vec::new();
 
     for id in &ids {
@@ -7658,7 +7656,7 @@ pub async fn remote_manage_rescue_bot(
         .sftp_read(&host_id, "~/.openclaw/openclaw.json")
         .await
         .ok()
-        .and_then(|raw| json5::from_str::<Value>(&raw).ok())
+        .map(|raw| clawpal_core::doctor::parse_json5_document_or_default(&raw))
         .map(|cfg| {
             clawpal_core::doctor::json_path_get(&cfg, "gateway.port")
                 .and_then(Value::as_u64)

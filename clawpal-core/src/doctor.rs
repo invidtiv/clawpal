@@ -112,6 +112,14 @@ pub fn parse_json_document(raw: &str, invalid_context: &str) -> Result<Value, St
     serde_json::from_str(raw).map_err(|e| format!("invalid {invalid_context} json: {e}"))
 }
 
+pub fn parse_json5_document(raw: &str, invalid_context: &str) -> Result<Value, String> {
+    json5::from_str(raw).map_err(|e| format!("invalid {invalid_context} json5: {e}"))
+}
+
+pub fn parse_json5_document_or_default(raw: &str) -> Value {
+    parse_json5_document(raw, "config").unwrap_or_else(|_| Value::Object(Default::default()))
+}
+
 pub fn parse_json_value_arg(raw: &str, operation_name: &str) -> Result<Value, String> {
     serde_json::from_str(raw)
         .map_err(|e| format!("{operation_name} requires valid JSON value: {e}"))
@@ -465,6 +473,12 @@ mod tests {
     fn parse_json_document_returns_contextual_error() {
         let err = parse_json_document("{oops", "config").expect_err("must fail");
         assert!(err.contains("invalid config json"));
+    }
+
+    #[test]
+    fn parse_json5_document_accepts_trailing_commas() {
+        let value = parse_json5_document("{a:1,}", "config").expect("json5 parse");
+        assert_eq!(value.get("a").and_then(Value::as_i64), Some(1));
     }
 
     #[test]
