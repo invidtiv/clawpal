@@ -6309,13 +6309,7 @@ pub async fn remote_backup_before_upgrade(
         ));
     }
 
-    let size_bytes: u64 = result
-        .stdout
-        .trim()
-        .lines()
-        .last()
-        .and_then(|l| l.trim().parse().ok())
-        .unwrap_or(0);
+    let size_bytes = clawpal_core::backup::parse_backup_result(&result.stdout).size_bytes;
 
     Ok(BackupInfo {
         name,
@@ -6371,15 +6365,11 @@ pub async fn remote_list_backups(
     let du_cmd = du_parts.join("; ");
     let du_result = pool.exec_login(&host_id, &du_cmd).await?;
 
-    let mut size_map = std::collections::HashMap::new();
-    for line in du_result.stdout.lines() {
-        let parts: Vec<&str> = line.splitn(2, '\t').collect();
-        if parts.len() == 2 {
-            let size_kb: u64 = parts[0].trim().parse().unwrap_or(0);
-            let path = parts[1].trim().trim_end_matches('/');
-            size_map.insert(path.to_string(), size_kb * 1024);
-        }
-    }
+    let size_entries = clawpal_core::backup::parse_backup_list(&du_result.stdout);
+    let size_map: std::collections::HashMap<String, u64> = size_entries
+        .into_iter()
+        .map(|e| (e.path, e.size_bytes))
+        .collect();
 
     let mut backups: Vec<BackupInfo> = dirs
         .iter()
@@ -8625,6 +8615,7 @@ pub async fn remote_run_openclaw_upgrade(
         .await
         .map(|r| r.stdout.trim().to_string())
         .unwrap_or_default();
+    let _upgrade_info = clawpal_core::backup::parse_upgrade_result(&combined);
     if !version_before.is_empty() && !version_after.is_empty() && version_before == version_after {
         return Err(format!("{combined}\n\nWarning: version unchanged after upgrade ({version_before}). Check PATH or npm prefix."));
     }

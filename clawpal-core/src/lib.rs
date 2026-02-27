@@ -1,6 +1,7 @@
 pub mod config;
 pub mod connect;
 pub mod cron;
+pub mod backup;
 pub mod doctor;
 pub mod health;
 pub mod install;

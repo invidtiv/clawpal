@@ -587,6 +587,7 @@ dependencies = [
  "chrono",
  "dirs 5.0.1",
  "json5",
+ "regex",
  "russh",
  "russh-keys",
  "russh-sftp",
