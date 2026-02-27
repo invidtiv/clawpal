@@ -7123,7 +7123,7 @@ pub async fn remote_list_bindings(
         }
     }
     let json = crate::cli_runner::parse_json_output(&output)?;
-    Ok(json.as_array().cloned().unwrap_or_default())
+    clawpal_core::discovery::parse_bindings(&json.to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -7640,120 +7640,24 @@ pub async fn remote_list_discord_guild_channels(
                 })
         });
 
-    let mut entries: Vec<DiscordGuildChannel> = Vec::new();
-    let mut channel_ids: Vec<String> = Vec::new();
-    let mut unresolved_guild_ids: Vec<String> = Vec::new();
-
-    // Helper: collect guilds from a guilds object
-    let collect_guilds = |guilds: &serde_json::Map<String, Value>,
-                          entries: &mut Vec<DiscordGuildChannel>,
-                          channel_ids: &mut Vec<String>,
-                          unresolved_guild_ids: &mut Vec<String>| {
-        for (guild_id, guild_val) in guilds {
-            let guild_name = guild_val
-                .get("slug")
-                .or_else(|| guild_val.get("name"))
-                .and_then(Value::as_str)
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .unwrap_or_else(|| guild_id.clone());
-
-            if guild_name == *guild_id && !unresolved_guild_ids.contains(guild_id) {
-                unresolved_guild_ids.push(guild_id.clone());
-            }
-
-            if let Some(channels) = guild_val.get("channels").and_then(Value::as_object) {
-                for (channel_id, _) in channels {
-                    // Skip glob/wildcard patterns (e.g. "*") — not real channel IDs
-                    if channel_id.contains('*') || channel_id.contains('?') {
-                        continue;
-                    }
-                    if entries
-                        .iter()
-                        .any(|e| e.guild_id == *guild_id && e.channel_id == *channel_id)
-                    {
-                        continue;
-                    }
-                    channel_ids.push(channel_id.clone());
-                    entries.push(DiscordGuildChannel {
-                        guild_id: guild_id.clone(),
-                        guild_name: guild_name.clone(),
-                        channel_id: channel_id.clone(),
-                        channel_name: channel_id.clone(),
-                    });
-                }
-            }
-        }
-    };
-
-    // Collect from channels.discord.guilds (top-level structured config)
-    if let Some(guilds) = discord_cfg
-        .and_then(|d| d.get("guilds"))
-        .and_then(Value::as_object)
-    {
-        collect_guilds(
-            guilds,
-            &mut entries,
-            &mut channel_ids,
-            &mut unresolved_guild_ids,
-        );
-    }
-
-    // Collect from channels.discord.accounts.<accountId>.guilds (multi-account config)
-    if let Some(accounts) = discord_cfg
-        .and_then(|d| d.get("accounts"))
-        .and_then(Value::as_object)
-    {
-        for (_account_id, account_val) in accounts {
-            if let Some(guilds) = account_val.get("guilds").and_then(Value::as_object) {
-                collect_guilds(
-                    guilds,
-                    &mut entries,
-                    &mut channel_ids,
-                    &mut unresolved_guild_ids,
-                );
-            }
-        }
-    }
-
-    // Also collect from bindings array (users may only have bindings, no guilds map)
-    if let Some(bindings) = cfg.get("bindings").and_then(Value::as_array) {
-        for b in bindings {
-            let m = match b.get("match") {
-                Some(m) => m,
-                None => continue,
-            };
-            if m.get("channel").and_then(Value::as_str) != Some("discord") {
-                continue;
-            }
-            let guild_id = match m.get("guildId") {
-                Some(Value::String(s)) => s.clone(),
-                Some(Value::Number(n)) => n.to_string(),
-                _ => continue,
-            };
-            let channel_id = match m.pointer("/peer/id") {
-                Some(Value::String(s)) => s.clone(),
-                Some(Value::Number(n)) => n.to_string(),
-                _ => continue,
-            };
-            if entries
-                .iter()
-                .any(|e| e.guild_id == guild_id && e.channel_id == channel_id)
-            {
-                continue;
-            }
-            if !unresolved_guild_ids.contains(&guild_id) {
-                unresolved_guild_ids.push(guild_id.clone());
-            }
-            channel_ids.push(channel_id.clone());
-            entries.push(DiscordGuildChannel {
-                guild_id: guild_id.clone(),
-                guild_name: guild_id.clone(),
-                channel_id: channel_id.clone(),
-                channel_name: channel_id.clone(),
-            });
-        }
-    }
+    let core_channels = clawpal_core::discovery::parse_guild_channels(&cfg.to_string())?;
+    let mut entries: Vec<DiscordGuildChannel> = core_channels
+        .iter()
+        .map(|c| DiscordGuildChannel {
+            guild_id: c.guild_id.clone(),
+            guild_name: c.guild_name.clone(),
+            channel_id: c.channel_id.clone(),
+            channel_name: c.channel_name.clone(),
+        })
+        .collect();
+    let mut channel_ids: Vec<String> = entries.iter().map(|e| e.channel_id.clone()).collect();
+    let mut unresolved_guild_ids: Vec<String> = entries
+        .iter()
+        .filter(|e| e.guild_name == e.guild_id)
+        .map(|e| e.guild_id.clone())
+        .collect();
+    unresolved_guild_ids.sort();
+    unresolved_guild_ids.dedup();
 
     // Fallback A: if we have token + guild ids, fetch channels from Discord REST directly.
     // This avoids hard-failing when CLI rejects config due non-critical schema drift.

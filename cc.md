@@ -14,7 +14,7 @@ Last run: 2026-02-27
 | Action 2: Batch E3 Cron | PASS | 新增 `clawpal-core/src/cron.rs`，迁移 `parse_cron_jobs` / `parse_cron_runs`；`commands.rs` 本地与远端 cron 读取路径改为调用 core 解析。新增 2 个 core 单测并通过。 |
 | Action 3: Batch E4 Watchdog | PASS | 新增 `clawpal-core/src/watchdog.rs`，迁移 watchdog 状态合并判断到 `parse_watchdog_status`；`remote_get_watchdog_status` 改为调用 core 解析后补充 `deployed`。新增 1 个 core 单测并通过。 |
 | Action 4: Batch E5 Backup/Upgrade | PASS | 新增 `clawpal-core/src/backup.rs`，迁移 `parse_backup_list` / `parse_backup_result` / `parse_upgrade_result`；`remote_backup_before_upgrade` 与 `remote_list_backups` 改为调用 core 解析，`remote_run_openclaw_upgrade` 接入升级输出解析。新增 3 个 core 单测并通过。 |
-| Action 5: Batch E6 Discord/Discovery | PENDING | - |
+| Action 5: Batch E6 Discord/Discovery | PASS | 新增 `clawpal-core/src/discovery.rs`，迁移 Discord guild/channel 与 bindings 解析（`parse_guild_channels`、`parse_bindings`）及绑定合并函数（`merge_channel_bindings`）。`remote_list_discord_guild_channels` 与 `remote_list_bindings` 已改为优先调用 core 解析，保留原 SSH/REST fallback。新增 3 个 core 单测并通过。 |
 | Action 6: 质量验证 | PENDING | - |
 | Action 7: commands.rs 拆文件 | PENDING | - |
 
@@ -58,6 +58,7 @@ Last run: 2026-02-27
 | Sessions domain inline parsing | 4 pure functions in `clawpal_core::sessions` | `de8fce4` |
 | Cron domain inline parsing | 2 pure functions in `clawpal_core::cron` | `d47e550` |
 | Watchdog domain inline parsing | `parse_watchdog_status` + `WatchdogStatus` struct in core | `bd697d9` |
+| Backup/Upgrade domain parsing | 3 pure functions + 3 typed structs in `clawpal_core::backup` | `7554bd6` |
 
 ---
 
@@ -178,3 +179,4 @@ Commit message: `refactor: split commands.rs into domain modules`
 | Batch E2: Sessions | **Done** | `de8fce4` | 4 pure functions, 4 tests, -237 lines from commands.rs |
 | Batch E3: Cron | **Done** | `d47e550` | 2 pure functions, 2 tests, -51 lines from commands.rs |
 | Batch E4: Watchdog | **Done** | `bd697d9` | 1 pure function + typed struct, 1 test, -21 lines from commands.rs |
+| Batch E5: Backup/Upgrade | **Done** | `7554bd6` | 3 pure functions + 3 structs, 3 tests, -17 lines from commands.rs |
