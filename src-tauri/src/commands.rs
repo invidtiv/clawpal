@@ -1498,8 +1498,7 @@ pub async fn remote_setup_agent_identity(
     let cfg: Value =
         serde_json::from_str(&raw).map_err(|e| format!("Failed to parse config: {e}"))?;
 
-    let agents_list = cfg
-        .pointer("/agents/list")
+    let agents_list = clawpal_core::doctor::json_path_get(&cfg, "agents.list")
         .and_then(Value::as_array)
         .ok_or("agents.list not found")?;
 
@@ -1508,9 +1507,8 @@ pub async fn remote_setup_agent_identity(
         .find(|a| a.get("id").and_then(Value::as_str) == Some(&agent_id))
         .ok_or_else(|| format!("Agent '{}' not found", agent_id))?;
 
-    let default_workspace = cfg
-        .pointer("/agents/defaults/workspace")
-        .or_else(|| cfg.pointer("/agents/default/workspace"))
+    let default_workspace = clawpal_core::doctor::json_path_get(&cfg, "agents.defaults.workspace")
+        .or_else(|| clawpal_core::doctor::json_path_get(&cfg, "agents.default.workspace"))
         .and_then(Value::as_str)
         .unwrap_or("~/.openclaw/agents");
 
@@ -7668,7 +7666,12 @@ pub async fn remote_manage_rescue_bot(
         .await
         .ok()
         .and_then(|raw| json5::from_str::<Value>(&raw).ok())
-        .map(|cfg| resolve_gateway_port_from_config(&cfg))
+        .map(|cfg| {
+            clawpal_core::doctor::json_path_get(&cfg, "gateway.port")
+                .and_then(Value::as_u64)
+                .and_then(|value| u16::try_from(value).ok())
+                .unwrap_or_else(|| resolve_gateway_port_from_config(&cfg))
+        })
         .unwrap_or(18789);
     let (already_configured, existing_port) =
         resolve_remote_rescue_profile_state(&pool, &host_id, &profile).await?;
