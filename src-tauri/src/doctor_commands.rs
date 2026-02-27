@@ -782,8 +782,7 @@ async fn doctor_config_delete(
         }));
     }
 
-    let paths = resolve_paths();
-    let config_path = paths.config_path;
+    let config_path = clawpal_core::doctor::local_openclaw_config_path(&local_openclaw_root()?);
     let raw = std::fs::read_to_string(&config_path)
         .map_err(|e| format!("failed to read local config: {e}"))?;
     let (rendered, deleted) = clawpal_core::doctor::delete_json_path_in_str(
@@ -824,8 +823,7 @@ async fn doctor_config_read(
         }));
     }
 
-    let paths = resolve_paths();
-    let config_path = paths.config_path;
+    let config_path = clawpal_core::doctor::local_openclaw_config_path(&local_openclaw_root()?);
     let raw = std::fs::read_to_string(&config_path)
         .map_err(|e| format!("failed to read local config: {e}"))?;
     let selected = clawpal_core::doctor::select_json_value_from_str(&raw, dotted_path, "local config")?;
@@ -869,8 +867,7 @@ async fn doctor_config_upsert(
         }));
     }
 
-    let paths = resolve_paths();
-    let config_path = paths.config_path;
+    let config_path = clawpal_core::doctor::local_openclaw_config_path(&local_openclaw_root()?);
     let raw = std::fs::read_to_string(&config_path)
         .map_err(|e| format!("failed to read local config: {e}"))?;
     let rendered = clawpal_core::doctor::upsert_json_path_in_str(

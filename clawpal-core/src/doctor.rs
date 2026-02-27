@@ -144,8 +144,12 @@ pub fn local_openclaw_root_from_env() -> PathBuf {
         })
 }
 
+pub fn local_openclaw_config_path(openclaw_root: &Path) -> PathBuf {
+    openclaw_root.join("openclaw.json")
+}
+
 pub fn local_openclaw_config_path_from_env() -> PathBuf {
-    local_openclaw_root_from_env().join("openclaw.json")
+    local_openclaw_config_path(&local_openclaw_root_from_env())
 }
 
 pub fn resolve_local_sessions_path(openclaw_root: &Path) -> PathBuf {
@@ -284,6 +288,12 @@ mod tests {
     fn local_openclaw_config_path_from_env_ends_with_openclaw_json() {
         let path = local_openclaw_config_path_from_env();
         assert!(path.ends_with("openclaw.json"));
+    }
+
+    #[test]
+    fn local_openclaw_config_path_joins_root_and_filename() {
+        let path = local_openclaw_config_path(Path::new("/tmp/openclaw"));
+        assert_eq!(path, PathBuf::from("/tmp/openclaw/openclaw.json"));
     }
 
     #[test]
