@@ -1,18 +1,46 @@
+use std::collections::HashSet;
+
 use crate::instance::{Instance, InstanceRegistry, InstanceType, SshHostConfig};
 
 pub fn list_ssh_hosts() -> Result<Vec<SshHostConfig>, String> {
     let registry = InstanceRegistry::load().map_err(|e| e.to_string())?;
+    let mut seen = HashSet::new();
     Ok(registry
         .list()
         .into_iter()
         .filter(|instance| matches!(instance.instance_type, InstanceType::RemoteSsh))
         .filter_map(|instance| instance.ssh_host_config)
+        .filter(|host| {
+            let key = format!(
+                "{}@{}:{}",
+                host.username,
+                host.host.to_ascii_lowercase(),
+                host.port
+            );
+            seen.insert(key)
+        })
         .collect())
 }
 
 pub fn upsert_ssh_host(host: SshHostConfig) -> Result<SshHostConfig, String> {
     let mut registry = InstanceRegistry::load().map_err(|e| e.to_string())?;
     let id = host.id.clone();
+    let duplicate_ids = registry
+        .list()
+        .into_iter()
+        .filter(|instance| instance.id != id)
+        .filter(|instance| matches!(instance.instance_type, InstanceType::RemoteSsh))
+        .filter_map(|instance| instance.ssh_host_config.map(|cfg| (instance.id, cfg)))
+        .filter(|(_, cfg)| {
+            cfg.username == host.username
+                && cfg.port == host.port
+                && cfg.host.eq_ignore_ascii_case(&host.host)
+        })
+        .map(|(instance_id, _)| instance_id)
+        .collect::<Vec<_>>();
+    for duplicate_id in duplicate_ids {
+        let _ = registry.remove(&duplicate_id);
+    }
     let existing = registry.get(&id).cloned();
     if existing.is_some() {
         let _ = registry.remove(&id);
@@ -105,5 +133,30 @@ mod tests {
         upsert_ssh_host(host).expect("upsert");
         let removed = delete_ssh_host("ssh:test-delete").expect("delete");
         assert!(removed);
+    }
+
+    #[test]
+    fn upsert_ssh_host_replaces_duplicate_endpoint_records() {
+        let _guard = crate::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = temp_data_dir();
+        std::env::set_var("CLAWPAL_DATA_DIR", &dir);
+
+        let mut first = sample_host("ssh:test-dup-1");
+        first.label = "vm1".to_string();
+        first.host = "vm1".to_string();
+        first.username = "ubuntu".to_string();
+        upsert_ssh_host(first).expect("upsert first");
+
+        let mut second = sample_host("ssh:test-dup-2");
+        second.label = "vm1".to_string();
+        second.host = "VM1".to_string();
+        second.username = "ubuntu".to_string();
+        upsert_ssh_host(second).expect("upsert second");
+
+        let hosts = list_ssh_hosts().expect("list");
+        assert_eq!(hosts.len(), 1);
+        assert_eq!(hosts[0].id, "ssh:test-dup-2");
     }
 }
