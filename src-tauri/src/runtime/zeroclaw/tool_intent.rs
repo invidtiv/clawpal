@@ -62,9 +62,12 @@ pub fn classify_invoke_type(tool: &str, args: &str) -> &'static str {
         if write_prefixes.iter().any(|p| is_prefix(p)) {
             return "write";
         }
+        return "read";
     }
 
-    "read"
+    // Unknown tool defaults to write for safety: it always requires explicit
+    // user confirmation instead of auto-running as read.
+    "write"
 }
 
 #[derive(Debug, Deserialize)]
@@ -87,7 +90,7 @@ fn extract_fenced_json(raw: &str) -> Option<String> {
 
 fn validate_payload(payload: ToolIntentPayload) -> Option<ToolIntent> {
     let tool = payload.tool.trim().to_string();
-    if tool != "clawpal" && tool != "openclaw" {
+    if tool.is_empty() {
         return None;
     }
     let args = payload.args.trim().to_string();
@@ -140,9 +143,10 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unsupported_tool() {
-        let raw = "{\"tool\":\"shell\",\"args\":\"echo 1\"}";
-        assert!(parse_tool_intent(raw).is_none());
+    fn accepts_custom_tool() {
+        let raw = "{\"tool\":\"bash\",\"args\":\"-lc \\\"echo 1\\\"\"}";
+        let intent = parse_tool_intent(raw).expect("intent");
+        assert_eq!(intent.tool, "bash");
     }
 
     #[test]
@@ -169,5 +173,10 @@ mod tests {
             "read"
         );
         assert_eq!(classify_invoke_type("openclaw", "gateway status"), "read");
+    }
+
+    #[test]
+    fn classify_invoke_type_marks_unknown_tool_as_write() {
+        assert_eq!(classify_invoke_type("bash", "-lc \"cat /tmp/x\""), "write");
     }
 }

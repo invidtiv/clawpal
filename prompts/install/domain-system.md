@@ -34,6 +34,7 @@ For tool="clawpal", you MUST use only these supported commands:
 - doctor sessions-read [<json.path>] [--instance <id>]
 - doctor sessions-upsert <json.path> <json.value> [--instance <id>]
 - doctor sessions-delete <json.path> [--instance <id>]
+- doctor exec --tool <command> [--args <argstring>] [--instance <id>]
 NEVER invent non-existent clawpal commands (for example: doctor fix-config).
 For doctor file read/write, domain defaults are allowed: config->openclaw.json, logs->gateway.err.log, sessions->auto-discovered sessions file.
 Do NOT claim you cannot access the host or lack permissions.
