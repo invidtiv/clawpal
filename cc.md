@@ -11,7 +11,7 @@ Last run: 2026-02-27
 | Action | Status | Result |
 |--------|--------|--------|
 | Action 1: Phase 5 SSH 收口 | PASS | `src-tauri/src/ssh.rs` 中 `SshHostConfig` 已是 core type alias；`SshExecResult` 仍为本地 UI 结果结构且用于连接池执行结果，不是 host registry 类型重复。`cargo update -p clawpal-core` 无变更，`Cargo.lock` 无 `openssh*` 残留。SSH host CRUD 走 `clawpal_core::ssh::registry::{list,upsert,delete}_ssh_host`，底层使用 `InstanceRegistry`。 |
-| Action 2: Phase 6/7/8 核验 | PENDING | - |
+| Action 2: Phase 6/7/8 核验 | PASS | `cargo test --test cli_json_contract` 4/4 通过；`cargo test -p clawpal-core install`（含 dry-run 相关）通过；`cargo test -p clawpal-core connect` 覆盖 docker/ssh 连接成功与失败路径通过；`cargo test -p clawpal-core profile` 13/13 通过，`test_profile` 非占位行为。错误文案包含 `remote ssh host not found`、`ssh connect failed`、`remote connectivity probe failed` 等可诊断信息。 |
 | Action 3: Phase 9 Agent 工具链确认 | PENDING | - |
 | Action 4: Phase 10 GUI 确认 | PENDING | - |
 | Action 5: 质量检查 | PENDING | - |
