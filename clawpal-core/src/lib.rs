@@ -9,6 +9,7 @@ pub mod openclaw;
 pub mod profile;
 pub mod sessions;
 pub mod ssh;
+pub mod watchdog;
 
 #[cfg(test)]
 pub mod test_support {

@@ -9065,16 +9065,13 @@ pub async fn remote_get_watchdog_status(
 ) -> Result<Value, String> {
     let status_raw = pool
         .sftp_read(&host_id, "~/.clawpal/watchdog/status.json")
-        .await;
-    let mut status = match status_raw {
-        Ok(text) => serde_json::from_str::<Value>(&text).unwrap_or(Value::Null),
-        Err(_) => Value::Null,
-    };
+        .await
+        .unwrap_or_default();
 
     let pid_raw = pool
         .sftp_read(&host_id, "~/.clawpal/watchdog/watchdog.pid")
         .await;
-    let alive = match pid_raw {
+    let alive_output = match pid_raw {
         Ok(pid_str) => {
             let cmd = format!(
                 "kill -0 {} 2>/dev/null && echo alive || echo dead",
@@ -9082,10 +9079,10 @@ pub async fn remote_get_watchdog_status(
             );
             pool.exec(&host_id, &cmd)
                 .await
-                .map(|r| r.stdout.trim() == "alive")
-                .unwrap_or(false)
+                .map(|r| r.stdout)
+                .unwrap_or_else(|_| "dead".to_string())
         }
-        Err(_) => false,
+        Err(_) => "dead".to_string(),
     };
 
     let deployed = pool
@@ -9093,17 +9090,9 @@ pub async fn remote_get_watchdog_status(
         .await
         .is_ok();
 
-    if let Value::Object(ref mut map) = status {
-        map.insert("alive".into(), Value::Bool(alive));
-        map.insert("deployed".into(), Value::Bool(deployed));
-    } else {
-        let mut map = serde_json::Map::new();
-        map.insert("alive".into(), Value::Bool(alive));
-        map.insert("deployed".into(), Value::Bool(deployed));
-        status = Value::Object(map);
-    }
-
-    Ok(status)
+    let mut status = clawpal_core::watchdog::parse_watchdog_status(&status_raw, &alive_output).extra;
+    status.insert("deployed".into(), Value::Bool(deployed));
+    Ok(Value::Object(status))
 }
 
 #[tauri::command]
