@@ -207,6 +207,67 @@ pub fn classify_doctor_issue_status(issues: &[DoctorIssue]) -> String {
     "degraded".into()
 }
 
+pub fn summarize_gateway_status(status: &Value) -> Option<String> {
+    let running = status
+        .get("running")
+        .and_then(Value::as_bool)
+        .or_else(|| status.pointer("/gateway/running").and_then(Value::as_bool));
+    let healthy = status
+        .get("healthy")
+        .and_then(Value::as_bool)
+        .or_else(|| status.pointer("/health/ok").and_then(Value::as_bool))
+        .or_else(|| status.pointer("/health/healthy").and_then(Value::as_bool));
+    let port = status
+        .get("port")
+        .and_then(Value::as_u64)
+        .or_else(|| status.pointer("/gateway/port").and_then(Value::as_u64));
+
+    let mut parts = Vec::new();
+    if let Some(value) = running {
+        parts.push(format!("running={value}"));
+    }
+    if let Some(value) = healthy {
+        parts.push(format!("healthy={value}"));
+    }
+    if let Some(value) = port {
+        parts.push(format!("port={value}"));
+    }
+    if parts.is_empty() {
+        return None;
+    }
+    Some(parts.join(", "))
+}
+
+pub fn gateway_output_ok(exit_code: i32, stdout: &str, stderr: &str) -> bool {
+    if exit_code != 0 {
+        return false;
+    }
+    let status = parse_json_loose(stdout).or_else(|| parse_json_loose(stderr));
+    let Some(status) = status else {
+        return true;
+    };
+    let running = status
+        .get("running")
+        .and_then(Value::as_bool)
+        .or_else(|| status.pointer("/gateway/running").and_then(Value::as_bool));
+    let healthy = status
+        .get("healthy")
+        .and_then(Value::as_bool)
+        .or_else(|| status.pointer("/health/ok").and_then(Value::as_bool))
+        .or_else(|| status.pointer("/health/healthy").and_then(Value::as_bool));
+    !matches!(running, Some(false)) && !matches!(healthy, Some(false))
+}
+
+pub fn gateway_output_detail(exit_code: i32, stdout: &str, stderr: &str) -> Option<String> {
+    if exit_code == 0 {
+        parse_json_loose(stdout)
+            .or_else(|| parse_json_loose(stderr))
+            .and_then(|status| summarize_gateway_status(&status))
+    } else {
+        None
+    }
+}
+
 pub fn apply_issue_fixes(config: &mut Value, ids: &[String]) -> Result<Vec<String>, String> {
     let mut applied = Vec::new();
     for id in ids {
@@ -660,6 +721,16 @@ mod tests {
         dedupe_doctor_issues(&mut issues);
         assert_eq!(issues.len(), 2);
         assert_eq!(classify_doctor_issue_status(&issues), "broken");
+    }
+
+    #[test]
+    fn gateway_output_ok_and_detail_parse_json_payload() {
+        let stdout = r#"{"running":true,"healthy":true,"port":18789}"#;
+        assert!(gateway_output_ok(0, stdout, ""));
+        assert_eq!(
+            gateway_output_detail(0, stdout, "").as_deref(),
+            Some("running=true, healthy=true, port=18789")
+        );
     }
 
     #[test]

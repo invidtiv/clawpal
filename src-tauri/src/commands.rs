@@ -2321,61 +2321,12 @@ fn parse_doctor_issues(report: &Value, source: &str) -> Vec<RescuePrimaryIssue> 
         .collect()
 }
 
-fn summarize_gateway_status(status: &Value) -> Option<String> {
-    let running = status
-        .get("running")
-        .and_then(Value::as_bool)
-        .or_else(|| status.pointer("/gateway/running").and_then(Value::as_bool));
-    let healthy = status
-        .get("healthy")
-        .and_then(Value::as_bool)
-        .or_else(|| status.pointer("/health/ok").and_then(Value::as_bool))
-        .or_else(|| status.pointer("/health/healthy").and_then(Value::as_bool));
-    let port = status
-        .get("port")
-        .and_then(Value::as_u64)
-        .or_else(|| status.pointer("/gateway/port").and_then(Value::as_u64));
-
-    let mut parts = Vec::new();
-    if let Some(value) = running {
-        parts.push(format!("running={value}"));
-    }
-    if let Some(value) = healthy {
-        parts.push(format!("healthy={value}"));
-    }
-    if let Some(value) = port {
-        parts.push(format!("port={value}"));
-    }
-    if parts.is_empty() {
-        return None;
-    }
-    Some(parts.join(", "))
-}
-
 fn gateway_output_ok(output: &OpenclawCommandOutput) -> bool {
-    if output.exit_code != 0 {
-        return false;
-    }
-    let status = clawpal_core::doctor::parse_json_loose(&output.stdout).or_else(|| clawpal_core::doctor::parse_json_loose(&output.stderr));
-    let Some(status) = status else {
-        return true;
-    };
-    let running = status
-        .get("running")
-        .and_then(Value::as_bool)
-        .or_else(|| status.pointer("/gateway/running").and_then(Value::as_bool));
-    let healthy = status
-        .get("healthy")
-        .and_then(Value::as_bool)
-        .or_else(|| status.pointer("/health/ok").and_then(Value::as_bool))
-        .or_else(|| status.pointer("/health/healthy").and_then(Value::as_bool));
-    !matches!(running, Some(false)) && !matches!(healthy, Some(false))
+    clawpal_core::doctor::gateway_output_ok(output.exit_code, &output.stdout, &output.stderr)
 }
 
 fn gateway_output_detail(output: &OpenclawCommandOutput) -> String {
-    clawpal_core::doctor::parse_json_loose(&output.stdout)
-        .or_else(|| clawpal_core::doctor::parse_json_loose(&output.stderr))
-        .and_then(|status| summarize_gateway_status(&status))
+    clawpal_core::doctor::gateway_output_detail(output.exit_code, &output.stdout, &output.stderr)
         .unwrap_or_else(|| command_detail(output))
 }
 
