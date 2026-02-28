@@ -1,5 +1,10 @@
 use super::*;
 
+fn local_global_openclaw_base_dir() -> std::path::PathBuf {
+    let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
+    home.join(".openclaw")
+}
+
 #[tauri::command]
 pub async fn remote_list_model_profiles(
     pool: State<'_, SshConnectionPool>,
@@ -9,10 +14,10 @@ pub async fn remote_list_model_profiles(
         .sftp_read(&host_id, "~/.clawpal/model-profiles.json")
         .await
         .unwrap_or_else(|_| r#"{"profiles":[]}"#.to_string());
-    Ok(clawpal_core::profile::list_profiles_from_storage_json(&content))
+    Ok(clawpal_core::profile::list_profiles_from_storage_json(
+        &content,
+    ))
 }
-
-
 
 #[tauri::command]
 pub async fn remote_upsert_model_profile(
@@ -24,16 +29,15 @@ pub async fn remote_upsert_model_profile(
         .sftp_read(&host_id, "~/.clawpal/model-profiles.json")
         .await
         .unwrap_or_else(|_| r#"{"profiles":[]}"#.to_string());
-    let (saved, next_json) = clawpal_core::profile::upsert_profile_in_storage_json(&content, profile)
-        .map_err(|e| e.to_string())?;
+    let (saved, next_json) =
+        clawpal_core::profile::upsert_profile_in_storage_json(&content, profile)
+            .map_err(|e| e.to_string())?;
 
     let _ = pool.exec(&host_id, "mkdir -p ~/.clawpal").await;
     pool.sftp_write(&host_id, "~/.clawpal/model-profiles.json", &next_json)
         .await?;
     Ok(saved)
 }
-
-
 
 #[tauri::command]
 pub async fn remote_delete_model_profile(
@@ -55,8 +59,6 @@ pub async fn remote_delete_model_profile(
         .await?;
     Ok(true)
 }
-
-
 
 #[tauri::command]
 pub async fn remote_resolve_api_keys(
@@ -97,8 +99,6 @@ pub async fn remote_resolve_api_keys(
     Ok(out)
 }
 
-
-
 #[tauri::command]
 pub async fn remote_test_model_profile(
     pool: State<'_, SshConnectionPool>,
@@ -124,7 +124,7 @@ pub async fn remote_test_model_profile(
     let api_key = resolve_remote_profile_api_key(&pool, &host_id, &profile).await?;
     if api_key.trim().is_empty() {
         return Err(
-            "No API key resolved for this remote profile. Set apiKey directly, configure auth_ref in remote auth-profiles.json, or export auth_ref on remote shell.".into(),
+            "No API key resolved for this remote profile. Set apiKey directly, configure auth_ref in remote auth store (auth-profiles.json/auth.json), or export auth_ref on remote shell.".into(),
         );
     }
 
@@ -139,14 +139,13 @@ pub async fn remote_test_model_profile(
     Ok(true)
 }
 
-
-
 #[tauri::command]
 pub async fn remote_extract_model_profiles_from_config(
     pool: State<'_, SshConnectionPool>,
     host_id: String,
 ) -> Result<ExtractModelProfilesResult, String> {
-    let (_config_path, _raw, cfg) = remote_read_openclaw_config_text_and_json(&pool, &host_id).await?;
+    let (_config_path, _raw, cfg) =
+        remote_read_openclaw_config_text_and_json(&pool, &host_id).await?;
 
     let profiles_raw = pool
         .sftp_read(&host_id, "~/.clawpal/model-profiles.json")
@@ -244,23 +243,17 @@ pub fn get_cached_model_catalog() -> Result<Vec<ModelCatalogProvider>, String> {
     Ok(Vec::new())
 }
 
-
-
 #[tauri::command]
 pub fn refresh_model_catalog() -> Result<Vec<ModelCatalogProvider>, String> {
     let paths = resolve_paths();
     load_model_catalog(&paths)
 }
 
-
-
 #[tauri::command]
 pub fn list_model_profiles() -> Result<Vec<ModelProfile>, String> {
     let openclaw = clawpal_core::openclaw::OpenclawCli::new();
     clawpal_core::profile::list_profiles(&openclaw).map_err(|e| e.to_string())
 }
-
-
 
 #[tauri::command]
 pub fn extract_model_profiles_from_config() -> Result<ExtractModelProfilesResult, String> {
@@ -339,25 +332,18 @@ pub fn extract_model_profiles_from_config() -> Result<ExtractModelProfilesResult
     })
 }
 
-
-
 #[tauri::command]
 pub fn upsert_model_profile(mut profile: ModelProfile) -> Result<ModelProfile, String> {
     let openclaw = clawpal_core::openclaw::OpenclawCli::new();
-    profile = clawpal_core::profile::upsert_profile(&openclaw, profile)
-        .map_err(|e| e.to_string())?;
+    profile = clawpal_core::profile::upsert_profile(&openclaw, profile).map_err(|e| e.to_string())?;
     Ok(profile)
 }
-
-
 
 #[tauri::command]
 pub fn delete_model_profile(profile_id: String) -> Result<bool, String> {
     let openclaw = clawpal_core::openclaw::OpenclawCli::new();
     clawpal_core::profile::delete_profile(&openclaw, &profile_id).map_err(|e| e.to_string())
 }
-
-
 
 #[tauri::command]
 pub fn resolve_provider_auth(provider: String) -> Result<ProviderAuthSuggestion, String> {
@@ -399,7 +385,7 @@ pub fn resolve_provider_auth(provider: String) -> Result<ProviderAuthSuggestion,
 
     // 3. Check existing model profiles for this provider
     let profiles = load_model_profiles(&paths);
-    let global_base = global_profile_base_dir();
+    let global_base = local_global_openclaw_base_dir();
     for p in &profiles {
         if p.provider.eq_ignore_ascii_case(provider_trimmed) {
             let key = resolve_profile_api_key(p, &global_base);
@@ -425,13 +411,11 @@ pub fn resolve_provider_auth(provider: String) -> Result<ProviderAuthSuggestion,
     })
 }
 
-
-
 #[tauri::command]
 pub fn resolve_api_keys() -> Result<Vec<ResolvedApiKey>, String> {
     let paths = resolve_paths();
     let profiles = load_model_profiles(&paths);
-    let global_base = global_profile_base_dir();
+    let global_base = local_global_openclaw_base_dir();
     let mut out = Vec::new();
     for profile in &profiles {
         let key = resolve_profile_api_key(profile, &global_base);
@@ -444,8 +428,6 @@ pub fn resolve_api_keys() -> Result<Vec<ResolvedApiKey>, String> {
     Ok(out)
 }
 
-
-
 #[tauri::command]
 pub async fn test_model_profile(profile_id: String) -> Result<bool, String> {
     let openclaw = clawpal_core::openclaw::OpenclawCli::new();
@@ -453,8 +435,6 @@ pub async fn test_model_profile(profile_id: String) -> Result<bool, String> {
         clawpal_core::profile::test_profile(&openclaw, &profile_id).map_err(|e| e.to_string())?;
     Ok(result.ok)
 }
-
-
 
 #[tauri::command]
 pub async fn remote_refresh_model_catalog(

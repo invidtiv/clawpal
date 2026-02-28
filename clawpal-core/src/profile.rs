@@ -119,7 +119,10 @@ pub fn test_profile(openclaw: &OpenclawCli, id: &str) -> Result<TestResult> {
         return Ok(TestResult {
             ok: false,
             message: if err.is_empty() {
-                format!("{} (probe failed with exit code {})", profile.name, output.exit_code)
+                format!(
+                    "{} (probe failed with exit code {})",
+                    profile.name, output.exit_code
+                )
             } else {
                 format!("{} ({err})", profile.name)
             },
@@ -143,7 +146,10 @@ pub fn list_profiles_from_storage_json(content: &str) -> Vec<ModelProfile> {
     parse_storage_lenient(content).profiles
 }
 
-pub fn find_profile_in_storage_json(content: &str, profile_id: &str) -> Result<Option<ModelProfile>> {
+pub fn find_profile_in_storage_json(
+    content: &str,
+    profile_id: &str,
+) -> Result<Option<ModelProfile>> {
     let storage = parse_storage_lenient(content);
     Ok(storage
         .profiles
@@ -312,10 +318,7 @@ fn fill_profile_auth_from_existing_or_provider_donor(
     profiles: &[ModelProfile],
 ) {
     if !profile.id.trim().is_empty() {
-        if let Some(existing) = profiles
-            .iter()
-            .find(|candidate| candidate.id == profile.id)
-        {
+        if let Some(existing) = profiles.iter().find(|candidate| candidate.id == profile.id) {
             if profile
                 .api_key
                 .as_ref()
@@ -353,14 +356,18 @@ fn fill_profile_auth_from_existing_or_provider_donor(
 
     if profile.auth_ref.trim().is_empty() {
         if let Some(donor) = profiles.iter().find(|candidate| {
-            candidate.provider.eq_ignore_ascii_case(provider) && !candidate.auth_ref.trim().is_empty()
+            candidate.provider.eq_ignore_ascii_case(provider)
+                && !candidate.auth_ref.trim().is_empty()
         }) {
             profile.auth_ref = donor.auth_ref.clone();
         }
     }
 }
 
-fn upsert_profile_in_storage(profiles: &mut Vec<ModelProfile>, mut profile: ModelProfile) -> ModelProfile {
+fn upsert_profile_in_storage(
+    profiles: &mut Vec<ModelProfile>,
+    mut profile: ModelProfile,
+) -> ModelProfile {
     if profile.id.trim().is_empty() {
         profile.id = Uuid::new_v4().to_string();
     }
@@ -488,7 +495,8 @@ mod tests {
         let cli = OpenclawCli::with_bin(create_fake_openclaw_models_script(
             "#!/bin/sh\nif [ \"$1\" = \"models\" ]; then echo '[{\"provider\":\"openai\",\"model\":\"gpt-4.1\"}]'; exit 0; fi\nexit 1\n",
         ));
-        let _ = upsert_profile(&OpenclawCli::with_bin("echo".to_string()), profile("p4")).expect("upsert");
+        let _ = upsert_profile(&OpenclawCli::with_bin("echo".to_string()), profile("p4"))
+            .expect("upsert");
         let result = test_profile(&cli, "p4").expect("test");
         assert!(result.ok);
     }
@@ -515,7 +523,8 @@ mod tests {
         let _ = upsert_profile(&OpenclawCli::with_bin("echo".to_string()), profile("p5"))
             .expect("upsert");
 
-        let dir = std::env::temp_dir().join(format!("clawpal-core-profile-fail-{}", Uuid::new_v4()));
+        let dir =
+            std::env::temp_dir().join(format!("clawpal-core-profile-fail-{}", Uuid::new_v4()));
         fs::create_dir_all(&dir).expect("create temp dir");
         let script = dir.join("fake-openclaw-fail.sh");
         fs::write(
@@ -537,7 +546,8 @@ mod tests {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         std::env::set_var("CLAWPAL_DATA_DIR", temp_data_dir());
-        let _ = upsert_profile(&OpenclawCli::with_bin("echo".to_string()), profile("p6")).expect("upsert");
+        let _ = upsert_profile(&OpenclawCli::with_bin("echo".to_string()), profile("p6"))
+            .expect("upsert");
 
         let cli = OpenclawCli::with_bin(create_fake_openclaw_models_script(
             "#!/bin/sh\nif [ \"$1\" = \"models\" ]; then echo '[{\"provider\":\"openai\",\"model\":\"gpt-3.5\"}]'; exit 0; fi\nexit 1\n",
@@ -582,8 +592,47 @@ mod tests {
     }
 
     #[test]
+    fn upsert_profile_in_storage_json_keeps_multiple_models_for_same_provider() {
+        let first = ModelProfile {
+            id: "".to_string(),
+            name: "".to_string(),
+            provider: "anthropic".to_string(),
+            model: "claude-opus-4.5".to_string(),
+            auth_ref: "anthropic:default".to_string(),
+            api_key: None,
+            base_url: None,
+            description: None,
+            enabled: true,
+        };
+        let second = ModelProfile {
+            id: "".to_string(),
+            name: "".to_string(),
+            provider: "anthropic".to_string(),
+            model: "claude-opus-4.6".to_string(),
+            auth_ref: "anthropic:default".to_string(),
+            api_key: None,
+            base_url: None,
+            description: None,
+            enabled: true,
+        };
+
+        let content = r#"{"profiles":[],"version":1}"#;
+        let (saved_first, json_after_first) =
+            upsert_profile_in_storage_json(content, first).expect("upsert first");
+        let (saved_second, json_after_second) =
+            upsert_profile_in_storage_json(&json_after_first, second).expect("upsert second");
+
+        assert_ne!(saved_first.id, saved_second.id);
+        let listed = list_profiles_from_storage_json(&json_after_second);
+        assert_eq!(listed.len(), 2);
+        assert!(listed.iter().any(|p| p.model == "claude-opus-4.5"));
+        assert!(listed.iter().any(|p| p.model == "claude-opus-4.6"));
+    }
+
+    #[test]
     fn delete_profile_from_storage_json_returns_true_when_removed() {
-        let content = serde_json::json!({ "profiles": [profile("p-del")], "version": 1 }).to_string();
+        let content =
+            serde_json::json!({ "profiles": [profile("p-del")], "version": 1 }).to_string();
         let (removed, next_json) =
             delete_profile_from_storage_json(&content, "p-del").expect("delete json");
         assert!(removed);
@@ -593,7 +642,8 @@ mod tests {
 
     #[test]
     fn find_profile_in_storage_json_returns_profile_when_present() {
-        let content = serde_json::json!({ "profiles": [profile("p-find")], "version": 1 }).to_string();
+        let content =
+            serde_json::json!({ "profiles": [profile("p-find")], "version": 1 }).to_string();
         let found = find_profile_in_storage_json(&content, "p-find")
             .expect("find profile")
             .expect("profile present");

@@ -3083,11 +3083,6 @@ fn model_profiles_path(paths: &crate::models::OpenClawPaths) -> std::path::PathB
     home.join(".clawpal").join("model-profiles.json")
 }
 
-fn global_profile_base_dir() -> std::path::PathBuf {
-    let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
-    home.join(".openclaw")
-}
-
 fn profile_to_model_value(profile: &ModelProfile) -> String {
     let provider = profile.provider.trim();
     let model = profile.model.trim();
@@ -3246,8 +3241,8 @@ fn resolve_profile_api_key(profile: &ModelProfile, base_dir: &Path) -> String {
         }
     }
 
-    // 3. Look up auth_ref in agent-level auth-profiles.json files
-    //    Keys are stored at: {base_dir}/agents/{agent}/agent/auth-profiles.json
+    // 3. Look up auth_ref in agent-level auth store files
+    //    Keys are stored at: {base_dir}/agents/{agent}/agent/{auth-profiles.json|auth.json}
     if !auth_ref.is_empty() {
         if let Some(key) = resolve_key_from_agent_auth_profiles(base_dir, auth_ref) {
             return key;
@@ -3281,10 +3276,9 @@ pub(crate) fn collect_provider_api_keys_from_paths(
     paths: &crate::models::OpenClawPaths,
 ) -> HashMap<String, String> {
     let profiles = load_model_profiles(&paths);
-    let global_base = global_profile_base_dir();
     let mut out = HashMap::<String, String>::new();
     for profile in profiles.iter().filter(|p| p.enabled) {
-        let key = resolve_profile_api_key(profile, &global_base);
+        let key = resolve_profile_api_key(profile, &paths.base_dir);
         if key.is_empty() {
             continue;
         }
@@ -3294,29 +3288,115 @@ pub(crate) fn collect_provider_api_keys_from_paths(
     out
 }
 
-/// Reads agent-level auth-profiles.json to find the actual API key/token.
+/// Reads agent-level auth store files to find the actual API key/token.
 /// Scans all agents and returns the first match.
 fn resolve_key_from_agent_auth_profiles(base_dir: &Path, auth_ref: &str) -> Option<String> {
-    let agents_dir = base_dir.join("agents");
-    if !agents_dir.exists() {
-        return None;
+    for root in local_openclaw_roots(base_dir) {
+        let agents_dir = root.join("agents");
+        if !agents_dir.exists() {
+            continue;
+        }
+        let entries = match fs::read_dir(&agents_dir) {
+            Ok(entries) => entries,
+            Err(_) => continue,
+        };
+        for entry in entries.flatten() {
+            let agent_dir = entry.path().join("agent");
+            if let Some(key) = resolve_key_from_local_auth_store_dir(&agent_dir, auth_ref) {
+                return Some(key);
+            }
+        }
     }
-    let entries = fs::read_dir(&agents_dir).ok()?;
-    for entry in entries.flatten() {
-        let auth_file = entry.path().join("agent").join("auth-profiles.json");
+    None
+}
+
+fn resolve_key_from_local_auth_store_dir(agent_dir: &Path, auth_ref: &str) -> Option<String> {
+    for file_name in ["auth-profiles.json", "auth.json"] {
+        let auth_file = agent_dir.join(file_name);
         if !auth_file.exists() {
             continue;
         }
         let text = fs::read_to_string(&auth_file).ok()?;
         let data: Value = serde_json::from_str(&text).ok()?;
-        if let Some(profiles) = data.get("profiles").and_then(Value::as_object) {
-            if let Some(auth_entry) = profiles.get(auth_ref) {
-                if let Some(key) = extract_token_from_auth_entry(auth_entry) {
-                    return Some(key);
+        if let Some(key) = resolve_key_from_auth_store_json(&data, auth_ref) {
+            return Some(key);
+        }
+    }
+    None
+}
+
+fn local_openclaw_roots(base_dir: &Path) -> Vec<PathBuf> {
+    let mut roots = Vec::<PathBuf>::new();
+    let mut seen = std::collections::BTreeSet::<PathBuf>::new();
+    let push_root = |roots: &mut Vec<PathBuf>,
+                     seen: &mut std::collections::BTreeSet<PathBuf>,
+                     root: PathBuf| {
+        if seen.insert(root.clone()) {
+            roots.push(root);
+        }
+    };
+    push_root(&mut roots, &mut seen, base_dir.to_path_buf());
+    let home = dirs::home_dir();
+    if let Some(home) = home {
+        if let Ok(entries) = fs::read_dir(&home) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if !path.is_dir() {
+                    continue;
+                }
+                let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                    continue;
+                };
+                if name.starts_with(".openclaw") {
+                    push_root(&mut roots, &mut seen, path);
                 }
             }
         }
     }
+    roots
+}
+
+fn auth_ref_lookup_keys(auth_ref: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let trimmed = auth_ref.trim();
+    if trimmed.is_empty() {
+        return out;
+    }
+    out.push(trimmed.to_string());
+    if let Some((provider, _)) = trimmed.split_once(':') {
+        if !provider.trim().is_empty() {
+            out.push(provider.trim().to_string());
+        }
+    }
+    out
+}
+
+fn resolve_key_from_auth_store_json(data: &Value, auth_ref: &str) -> Option<String> {
+    let keys = auth_ref_lookup_keys(auth_ref);
+    if keys.is_empty() {
+        return None;
+    }
+
+    if let Some(profiles) = data.get("profiles").and_then(Value::as_object) {
+        for key in &keys {
+            if let Some(auth_entry) = profiles.get(key) {
+                if let Some(token) = extract_token_from_auth_entry(auth_entry) {
+                    return Some(token);
+                }
+            }
+        }
+    }
+
+    if let Some(root_obj) = data.as_object() {
+        for key in &keys {
+            if let Some(auth_entry) = root_obj.get(key) {
+                if let Some(token) = extract_token_from_auth_entry(auth_entry) {
+                    return Some(token);
+                }
+            }
+        }
+    }
+
     None
 }
 
@@ -3484,7 +3564,7 @@ fn maybe_sync_main_auth_for_model_value(
     paths: &crate::models::OpenClawPaths,
     model_value: Option<String>,
 ) -> Result<(), String> {
-    let source_base_dir = global_profile_base_dir();
+    let source_base_dir = paths.base_dir.clone();
     maybe_sync_main_auth_for_model_value_with_source(paths, model_value, &source_base_dir)
 }
 
@@ -3540,7 +3620,7 @@ fn sync_main_auth_for_config(
     paths: &crate::models::OpenClawPaths,
     cfg: &Value,
 ) -> Result<(), String> {
-    let source_base_dir = global_profile_base_dir();
+    let source_base_dir = paths.base_dir.clone();
     let mut seen = HashSet::new();
     for model in collect_main_auth_model_candidates(cfg) {
         let normalized = model.trim().to_lowercase();
@@ -4121,7 +4201,8 @@ mod rescue_bot_tests {
     #[test]
     fn test_parse_json_loose_handles_leading_bracketed_logs() {
         let raw = "[plugins] warmup cache\n[warn] using fallback transport\n{\"running\":false,\"healthy\":false}";
-        let parsed = clawpal_core::doctor::parse_json_loose(raw).expect("expected trailing JSON payload");
+        let parsed =
+            clawpal_core::doctor::parse_json_loose(raw).expect("expected trailing JSON payload");
         assert_eq!(parsed.get("running").and_then(Value::as_bool), Some(false));
         assert_eq!(parsed.get("healthy").and_then(Value::as_bool), Some(false));
     }
@@ -4160,7 +4241,10 @@ mod rescue_bot_tests {
                 source: issue.source,
             })
             .collect();
-        assert_eq!(clawpal_core::doctor::classify_doctor_issue_status(&core), "broken");
+        assert_eq!(
+            clawpal_core::doctor::classify_doctor_issue_status(&core),
+            "broken"
+        );
     }
 
     #[test]
@@ -4362,6 +4446,60 @@ mod model_profile_upsert_tests {
     }
 
     #[test]
+    fn resolve_key_from_auth_store_json_supports_wrapped_and_legacy_formats() {
+        let wrapped = serde_json::json!({
+            "version": 1,
+            "profiles": {
+                "kimi-coding:default": {
+                    "type": "api_key",
+                    "provider": "kimi-coding",
+                    "key": "sk-wrapped"
+                }
+            }
+        });
+        assert_eq!(
+            resolve_key_from_auth_store_json(&wrapped, "kimi-coding:default"),
+            Some("sk-wrapped".to_string())
+        );
+
+        let legacy = serde_json::json!({
+            "kimi-coding": {
+                "type": "api_key",
+                "provider": "kimi-coding",
+                "key": "sk-legacy"
+            }
+        });
+        assert_eq!(
+            resolve_key_from_auth_store_json(&legacy, "kimi-coding:default"),
+            Some("sk-legacy".to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_key_from_local_auth_store_dir_reads_auth_json_when_profiles_file_missing() {
+        let tmp_root =
+            std::env::temp_dir().join(format!("clawpal-auth-store-test-{}", uuid::Uuid::new_v4()));
+        let agent_dir = tmp_root.join("agents").join("main").join("agent");
+        fs::create_dir_all(&agent_dir).expect("create agent dir");
+        let legacy_auth = serde_json::json!({
+            "openai": {
+                "type": "api_key",
+                "provider": "openai",
+                "key": "sk-openai-legacy"
+            }
+        });
+        write_text(
+            &agent_dir.join("auth.json"),
+            &serde_json::to_string_pretty(&legacy_auth).expect("serialize legacy auth"),
+        )
+        .expect("write auth.json");
+
+        let resolved = resolve_key_from_local_auth_store_dir(&agent_dir, "openai:default");
+        assert_eq!(resolved, Some("sk-openai-legacy".to_string()));
+        let _ = fs::remove_dir_all(tmp_root);
+    }
+
+    #[test]
     fn collect_main_auth_candidates_prefers_defaults_and_main_agent() {
         let cfg = serde_json::json!({
             "agents": {
@@ -4500,7 +4638,8 @@ fn enrich_channel_display_names(
             }
             continue;
         }
-        let json_str = clawpal_core::doctor::extract_json_from_output(&output.stdout).unwrap_or("[]");
+        let json_str =
+            clawpal_core::doctor::extract_json_from_output(&output.stdout).unwrap_or("[]");
         let parsed: Vec<Value> = serde_json::from_str(json_str).unwrap_or_default();
         let mut name_map = HashMap::new();
         for item in parsed {
@@ -4872,7 +5011,7 @@ fn resolve_full_api_key(profile_id: String) -> Result<String, String> {
         .iter()
         .find(|p| p.id == profile_id)
         .ok_or_else(|| "Profile not found".to_string())?;
-    let key = resolve_profile_api_key(profile, &global_profile_base_dir());
+    let key = resolve_profile_api_key(profile, &paths.base_dir);
     if key.is_empty() {
         return Err("No API key configured for this profile".to_string());
     }
@@ -5051,7 +5190,8 @@ pub fn delete_registered_instance(instance_id: String) -> Result<bool, String> {
     if id.is_empty() || id == "local" {
         return Ok(false);
     }
-    let mut registry = clawpal_core::instance::InstanceRegistry::load().map_err(|e| e.to_string())?;
+    let mut registry =
+        clawpal_core::instance::InstanceRegistry::load().map_err(|e| e.to_string())?;
     let removed = registry.remove(id).is_some();
     if removed {
         registry.save().map_err(|e| e.to_string())?;
@@ -5089,8 +5229,8 @@ pub async fn connect_ssh_instance(
         clawpal_data_dir: None,
         ssh_host_config: Some(host),
     };
-    let mut registry = clawpal_core::instance::InstanceRegistry::load()
-        .map_err(|e| e.to_string())?;
+    let mut registry =
+        clawpal_core::instance::InstanceRegistry::load().map_err(|e| e.to_string())?;
     let _ = registry.remove(&instance.id);
     registry.add(instance.clone()).map_err(|e| e.to_string())?;
     registry.save().map_err(|e| e.to_string())?;
@@ -5489,15 +5629,12 @@ async fn remote_write_config_with_snapshot(
     source: &str,
 ) -> Result<(), String> {
     // Use core function to prepare config write
-    let (new_text, snapshot_text) = clawpal_core::config::prepare_config_write(
-        current_text,
-        next,
-        source,
-    )?;
-    
+    let (new_text, snapshot_text) =
+        clawpal_core::config::prepare_config_write(current_text, next, source)?;
+
     // Create snapshot dir
     pool.exec(host_id, "mkdir -p ~/.clawpal/snapshots").await?;
-    
+
     // Generate snapshot filename
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -5505,9 +5642,10 @@ async fn remote_write_config_with_snapshot(
         .as_secs();
     let snapshot_path = clawpal_core::config::snapshot_filename(ts, source);
     let snapshot_full_path = format!("~/.clawpal/snapshots/{snapshot_path}");
-    
+
     // Write snapshot and new config via SFTP
-    pool.sftp_write(host_id, &snapshot_full_path, &snapshot_text).await?;
+    pool.sftp_write(host_id, &snapshot_full_path, &snapshot_text)
+        .await?;
     pool.sftp_write(host_id, config_path, &new_text).await?;
     Ok(())
 }
@@ -5678,27 +5816,37 @@ async fn resolve_remote_key_from_agent_auth_profiles(
     host_id: &str,
     auth_ref: &str,
 ) -> Result<Option<String>, String> {
-    let entries = pool
-        .sftp_list(host_id, "~/.openclaw/agents")
-        .await
-        .map_err(|e| format!("Failed to list remote agents directory: {e}"))?;
+    let roots = resolve_remote_openclaw_roots(pool, host_id).await?;
 
-    for agent in entries.into_iter().filter(|entry| entry.is_dir) {
-        let auth_file = format!("~/.openclaw/agents/{}/agent/auth-profiles.json", agent.name);
-        let text = match pool.sftp_read(host_id, &auth_file).await {
-            Ok(text) => text,
+    for root in roots {
+        let agents_path = format!("{}/agents", root.trim_end_matches('/'));
+        let entries = match pool.sftp_list(host_id, &agents_path).await {
+            Ok(entries) => entries,
             Err(e) if is_remote_missing_path_error(&e) => continue,
             Err(e) => {
                 return Err(format!(
-                    "Failed to read remote auth profiles at {auth_file}: {e}"
+                    "Failed to list remote agents directory at {agents_path}: {e}"
                 ))
             }
         };
-        let data: Value = serde_json::from_str(&text)
-            .map_err(|e| format!("Failed to parse remote auth profiles at {auth_file}: {e}"))?;
-        if let Some(profiles) = data.get("profiles").and_then(Value::as_object) {
-            if let Some(auth_entry) = profiles.get(auth_ref) {
-                if let Some(key) = extract_token_from_auth_entry(auth_entry) {
+
+        for agent in entries.into_iter().filter(|entry| entry.is_dir) {
+            let agent_dir = format!("{}/agents/{}/agent", root.trim_end_matches('/'), agent.name);
+            for file_name in ["auth-profiles.json", "auth.json"] {
+                let auth_file = format!("{agent_dir}/{file_name}");
+                let text = match pool.sftp_read(host_id, &auth_file).await {
+                    Ok(text) => text,
+                    Err(e) if is_remote_missing_path_error(&e) => continue,
+                    Err(e) => {
+                        return Err(format!(
+                            "Failed to read remote auth store at {auth_file}: {e}"
+                        ))
+                    }
+                };
+                let data: Value = serde_json::from_str(&text).map_err(|e| {
+                    format!("Failed to parse remote auth store at {auth_file}: {e}")
+                })?;
+                if let Some(key) = resolve_key_from_auth_store_json(&data, auth_ref) {
                     return Ok(Some(key));
                 }
             }
@@ -5706,6 +5854,45 @@ async fn resolve_remote_key_from_agent_auth_profiles(
     }
 
     Ok(None)
+}
+
+async fn resolve_remote_openclaw_roots(
+    pool: &SshConnectionPool,
+    host_id: &str,
+) -> Result<Vec<String>, String> {
+    let mut roots = Vec::<String>::new();
+    let primary = pool
+        .exec_login(
+            host_id,
+            clawpal_core::doctor::remote_openclaw_root_probe_script(),
+        )
+        .await?;
+    let primary_trimmed = primary.stdout.trim();
+    if !primary_trimmed.is_empty() {
+        roots.push(primary_trimmed.to_string());
+    }
+
+    let discover = pool
+        .exec_login(
+            host_id,
+            "for d in \"$HOME\"/.openclaw*; do [ -d \"$d\" ] && printf '%s\\n' \"$d\"; done",
+        )
+        .await?;
+    for line in discover.stdout.lines() {
+        let trimmed = line.trim();
+        if !trimmed.is_empty() {
+            roots.push(trimmed.to_string());
+        }
+    }
+    let mut deduped = Vec::<String>::new();
+    let mut seen = std::collections::BTreeSet::<String>::new();
+    for root in roots {
+        if seen.insert(root.clone()) {
+            deduped.push(root);
+        }
+    }
+    roots = deduped;
+    Ok(roots)
 }
 
 async fn resolve_remote_profile_base_url(
@@ -5737,7 +5924,11 @@ async fn resolve_remote_profile_base_url(
     };
     let cfg = match clawpal_core::config::parse_and_normalize_config(&raw) {
         Ok((parsed, _)) => parsed,
-        Err(e) => return Err(format!("Failed to parse remote config for base URL resolution: {e}")),
+        Err(e) => {
+            return Err(format!(
+                "Failed to parse remote config for base URL resolution: {e}"
+            ))
+        }
     };
     Ok(resolve_model_provider_base_url(&cfg, &profile.provider))
 }
