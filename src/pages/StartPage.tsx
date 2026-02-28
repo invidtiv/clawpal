@@ -16,7 +16,7 @@ import {
 import { InstanceCard } from "@/components/InstanceCard";
 import { InstallHub } from "@/components/InstallHub";
 import { api } from "@/lib/api";
-import type { DockerInstance, SshHost, InstallSession, RegisteredInstance } from "@/lib/types";
+import type { DockerInstance, SshHost, InstallSession, RegisteredInstance, DiscoveredInstance } from "@/lib/types";
 
 const DEFAULT_DOCKER_OPENCLAW_HOME = "~/.clawpal/docker-local";
 const DEFAULT_DOCKER_CLAWPAL_DATA_DIR = "~/.clawpal/docker-local/data";
@@ -54,6 +54,9 @@ interface StartPageProps {
   onInstallReady: (session: InstallSession) => void;
   showToast: (message: string, type?: "success" | "error") => void;
   onNavigate: (route: string) => void;
+  discoveredInstances: DiscoveredInstance[];
+  discoveringInstances: boolean;
+  onConnectDiscovered: (instance: DiscoveredInstance) => void;
 }
 
 export function StartPage({
@@ -69,6 +72,9 @@ export function StartPage({
   onInstallReady,
   showToast,
   onNavigate,
+  discoveredInstances,
+  discoveringInstances,
+  onConnectDiscovered,
 }: StartPageProps) {
   const { t } = useTranslation();
   const fallbackLabelForId = useCallback((id: string): string => {
@@ -287,6 +293,12 @@ export function StartPage({
         <p className="text-muted-foreground">{t("start.welcomeHint")}</p>
       </div>
 
+      {discoveringInstances && (
+        <div className="text-sm text-muted-foreground animate-pulse mb-2">
+          {t("start.scanning")}
+        </div>
+      )}
+
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
         {instances.map((inst) => {
           const health = healthMap[inst.id];
@@ -331,6 +343,24 @@ export function StartPage({
           );
         })}
 
+        {discoveredInstances
+          .filter((d) => !d.alreadyRegistered)
+          .map((d) => (
+            <InstanceCard
+              key={`discovered-${d.id}`}
+              id={d.id}
+              label={d.label}
+              type={d.instanceType === "docker" ? "docker" : "local"}
+              healthy={null}
+              agentCount={0}
+              opened={false}
+              onClick={() => {}}
+              discovered
+              discoveredSource={d.source}
+              onConnect={() => onConnectDiscovered(d)}
+            />
+          ))}
+
         {/* + New/Connect card */}
         <button
           className="border-2 border-dashed border-muted-foreground/30 rounded-xl p-6 flex flex-col items-center justify-center gap-2 text-muted-foreground hover:border-primary/40 hover:text-primary transition-all duration-200 cursor-pointer min-h-[140px]"
@@ -350,6 +380,7 @@ export function StartPage({
         onOpenChange={setInstallDialogOpen}
         showToast={showToast}
         onNavigate={onNavigate}
+        existingInstances={registeredInstances}
         onReady={(session: InstallSession) => {
           setInstallDialogOpen(false);
           onInstallReady(session);

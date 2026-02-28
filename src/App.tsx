@@ -26,7 +26,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { cn } from "@/lib/utils";
 import { Toaster } from "sonner";
-import type { ChannelNode, DiscordGuildChannel, DockerInstance, GuidanceAction, InstallSession, PrecheckIssue, RegisteredInstance, SshHost } from "./lib/types";
+import type { ChannelNode, DiscordGuildChannel, DiscoveredInstance, DockerInstance, GuidanceAction, InstallSession, PrecheckIssue, RegisteredInstance, SshHost } from "./lib/types";
 import { GuidanceCard } from "./components/GuidanceCard";
 import type { AgentGuidanceItem } from "./components/GuidanceCard";
 
@@ -198,6 +198,8 @@ export function App() {
   const [activeInstance, setActiveInstance] = useState("local");
   const [sshHosts, setSshHosts] = useState<SshHost[]>([]);
   const [registeredInstances, setRegisteredInstances] = useState<RegisteredInstance[]>([]);
+  const [discoveredInstances, setDiscoveredInstances] = useState<DiscoveredInstance[]>([]);
+  const [discoveringInstances, setDiscoveringInstances] = useState(false);
   const [connectionStatus, setConnectionStatus] = useState<Record<string, "connected" | "disconnected" | "error">>({});
   const navigateRoute = useCallback((next: Route) => {
     startTransition(() => setRoute(next));
@@ -215,6 +217,14 @@ export function App() {
       .catch(() => {
         setRegisteredInstances([]);
       });
+  }, []);
+
+  const discoverInstances = useCallback(() => {
+    setDiscoveringInstances(true);
+    api.discoverLocalInstances()
+      .then(setDiscoveredInstances)
+      .catch(() => setDiscoveredInstances([]))
+      .finally(() => setDiscoveringInstances(false));
   }, []);
 
   const dockerInstances = useMemo<DockerInstance[]>(() => {
@@ -296,9 +306,10 @@ export function App() {
   useEffect(() => {
     refreshHosts();
     refreshRegisteredInstances();
+    discoverInstances();
     const timer = setInterval(refreshRegisteredInstances, 30_000);
     return () => clearInterval(timer);
-  }, [refreshHosts, refreshRegisteredInstances]);
+  }, [refreshHosts, refreshRegisteredInstances, discoverInstances]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -362,6 +373,22 @@ export function App() {
       setToasts((prev) => prev.filter((t) => t.id !== id));
     }, type === "error" ? 5000 : 3000);
   }, []);
+
+  const handleConnectDiscovered = useCallback(async (discovered: DiscoveredInstance) => {
+    try {
+      await withGuidance(
+        () => api.connectDockerInstance(discovered.homePath, discovered.label, discovered.id),
+        "connectDockerInstance",
+        discovered.id,
+        "docker_local",
+      );
+      refreshRegisteredInstances();
+      discoverInstances();
+      showToast(t("start.connected", { label: discovered.label }), "success");
+    } catch (e) {
+      showToast(e instanceof Error ? e.message : String(e), "error");
+    }
+  }, [refreshRegisteredInstances, discoverInstances, showToast, t]);
 
   // Startup precheck: validate registry
   useEffect(() => {
@@ -1092,6 +1119,9 @@ export function App() {
               onInstallReady={handleInstallReady}
               showToast={showToast}
               onNavigate={(r) => navigateRoute(r as Route)}
+              discoveredInstances={discoveredInstances}
+              discoveringInstances={discoveringInstances}
+              onConnectDiscovered={handleConnectDiscovered}
             />
           )}
           {inStart && startSection === "profiles" && (
