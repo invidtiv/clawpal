@@ -16,6 +16,7 @@ import {
 import { InstanceCard } from "@/components/InstanceCard";
 import { InstallHub } from "@/components/InstallHub";
 import { api } from "@/lib/api";
+import { withGuidance } from "@/lib/guidance";
 import type { DockerInstance, SshHost, InstallSession, RegisteredInstance, DiscoveredInstance } from "@/lib/types";
 
 const DEFAULT_DOCKER_OPENCLAW_HOME = "~/.clawpal/docker-local";
@@ -216,8 +217,18 @@ export function StartPage({
   const handleSshCheck = useCallback(async (hostId: string) => {
     setSshChecking((prev) => ({ ...prev, [hostId]: true }));
     try {
-      await api.sshConnect(hostId);
-      const status = await api.remoteGetInstanceStatus(hostId);
+      await withGuidance(
+        () => api.sshConnect(hostId),
+        "sshConnect",
+        hostId,
+        "remote_ssh",
+      );
+      const status = await withGuidance(
+        () => api.remoteGetInstanceStatus(hostId),
+        "remoteGetInstanceStatus",
+        hostId,
+        "remote_ssh",
+      );
       setHealthMap((prev) => ({
         ...prev,
         [hostId]: { healthy: status.healthy, agentCount: status.activeAgents },

@@ -19,7 +19,7 @@ import logoUrl from "./assets/logo.png";
 import { InstanceTabBar } from "./components/InstanceTabBar";
 import { InstanceContext } from "./lib/instance-context";
 import { api } from "./lib/api";
-import { withGuidance } from "./lib/guidance";
+import { explainAndBuildGuidanceError, withGuidance } from "./lib/guidance";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
@@ -229,7 +229,12 @@ export function App() {
 
   const discoverInstances = useCallback(() => {
     setDiscoveringInstances(true);
-    api.discoverLocalInstances()
+    withGuidance(
+      () => api.discoverLocalInstances(),
+      "discoverLocalInstances",
+      "local",
+      "local",
+    )
       .then(setDiscoveredInstances)
       .catch(() => setDiscoveredInstances([]))
       .finally(() => setDiscoveringInstances(false));
@@ -417,7 +422,12 @@ export function App() {
 
   // Startup precheck: validate registry
   useEffect(() => {
-    api.precheckRegistry().then((issues) => {
+    withGuidance(
+      () => api.precheckRegistry(),
+      "precheckRegistry",
+      "local",
+      "local",
+    ).then((issues) => {
       const errors = issues.filter((i: PrecheckIssue) => i.severity === "error");
       if (errors.length === 1) {
         showToast(errors[0].message, "error");
@@ -464,6 +474,36 @@ export function App() {
     return "local";
   }, [dockerInstances, sshHosts, registeredInstances]);
 
+  useEffect(() => {
+    const handleUnhandled = (operation: string, reason: unknown) => {
+      if (reason && typeof reason === "object" && (reason as any)._guidanceEmitted) {
+        return;
+      }
+      const transport = resolveInstanceTransport(activeInstance);
+      void explainAndBuildGuidanceError({
+        method: operation,
+        instanceId: activeInstance,
+        transport,
+        rawError: reason,
+        emitEvent: true,
+      });
+    };
+
+    const onUnhandledRejection = (event: PromiseRejectionEvent) => {
+      handleUnhandled("unhandledRejection", event.reason);
+    };
+    const onGlobalError = (event: ErrorEvent) => {
+      handleUnhandled("unhandledError", event.error ?? event.message ?? "unknown error");
+    };
+
+    window.addEventListener("unhandledrejection", onUnhandledRejection);
+    window.addEventListener("error", onGlobalError);
+    return () => {
+      window.removeEventListener("unhandledrejection", onUnhandledRejection);
+      window.removeEventListener("error", onGlobalError);
+    };
+  }, [activeInstance, resolveInstanceTransport]);
+
   const ensureAccessForInstance = useCallback((instanceId: string) => {
     const transport = resolveInstanceTransport(instanceId);
     withGuidance(
@@ -473,7 +513,12 @@ export function App() {
       transport,
     ).catch((e) => console.warn("ensureAccessProfile:", e));
     // Auth precheck: warn if model profiles are misconfigured
-    api.precheckAuth(instanceId).then((issues) => {
+    withGuidance(
+      () => api.precheckAuth(instanceId),
+      "precheckAuth",
+      instanceId,
+      transport,
+    ).then((issues) => {
       const errors = issues.filter((i: PrecheckIssue) => i.severity === "error");
       if (errors.length === 1) {
         showToast(errors[0].message, "error");
@@ -546,7 +591,12 @@ export function App() {
     legacyMigrationDoneRef.current = true;
     const legacyDockerInstances = readLegacyDockerInstances();
     const legacyOpenTabIds = readLegacyOpenTabs();
-    api.migrateLegacyInstances(legacyDockerInstances, legacyOpenTabIds)
+    withGuidance(
+      () => api.migrateLegacyInstances(legacyDockerInstances, legacyOpenTabIds),
+      "migrateLegacyInstances",
+      "local",
+      "local",
+    )
       .then((result) => {
         if (
           result.importedSshHosts > 0
@@ -650,34 +700,53 @@ export function App() {
       navigateRoute("home");
     });
     // Instance switch precheck
-    api.precheckInstance(id).then((issues) => {
+    withGuidance(
+      () => api.precheckInstance(id),
+      "precheckInstance",
+      id,
+      resolveInstanceTransport(id),
+    ).then((issues) => {
       const blocking = issues.filter((i: PrecheckIssue) => i.severity === "error");
       if (blocking.length === 1) {
         showToast(blocking[0].message, "error");
       } else if (blocking.length > 1) {
         showToast(`${blocking[0].message}（还有 ${blocking.length - 1} 个问题）`, "error");
-      }
-    }).catch(() => { /* ignore */ });
-    // Transport layer precheck (SSH / Docker connectivity)
-    api.precheckTransport(id).then((issues) => {
-      const blocking = issues.filter((i: PrecheckIssue) => i.severity === "error");
-      if (blocking.length === 1) {
-        showToast(blocking[0].message, "error");
-      } else if (blocking.length > 1) {
-        showToast(`${blocking[0].message}（还有 ${blocking.length - 1} 个问题）`, "error");
-      } else {
-        const warnings = issues.filter((i: PrecheckIssue) => i.severity === "warn");
-        if (warnings.length > 0) {
-          showToast(warnings[0].message, "error");
-        }
       }
     }).catch(() => { /* ignore */ });
     const transport = resolveInstanceTransport(id);
+    // Transport precheck for non-SSH targets.
+    // SSH switching immediately triggers reconnect flow below, so running
+    // precheckTransport here would cause noisy transient "not active" toasts.
+    if (transport !== "remote_ssh") {
+      withGuidance(
+        () => api.precheckTransport(id),
+        "precheckTransport",
+        id,
+        transport,
+      ).then((issues) => {
+        const blocking = issues.filter((i: PrecheckIssue) => i.severity === "error");
+        if (blocking.length === 1) {
+          showToast(blocking[0].message, "error");
+        } else if (blocking.length > 1) {
+          showToast(`${blocking[0].message}（还有 ${blocking.length - 1} 个问题）`, "error");
+        } else {
+          const warnings = issues.filter((i: PrecheckIssue) => i.severity === "warn");
+          if (warnings.length > 0) {
+            showToast(warnings[0].message, "error");
+          }
+        }
+      }).catch(() => { /* ignore */ });
+    }
     if (transport !== "remote_ssh") return;
     // Check if backend still has a live connection before reconnecting.
     // Do not pre-mark as disconnected — transient status failures would
     // otherwise gray out the whole remote UI.
-    api.sshStatus(id)
+    withGuidance(
+      () => api.sshStatus(id),
+      "sshStatus",
+      id,
+      "remote_ssh",
+    )
       .then((status) => {
         if (status === "connected") {
           setConnectionStatus((prev) => ({ ...prev, [id]: "connected" }));

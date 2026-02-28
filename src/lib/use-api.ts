@@ -1,13 +1,9 @@
 import { useCallback, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import i18n from "../i18n";
 import { useInstance } from "./instance-context";
 import { api } from "./api";
 import {
-  isSshCooldownProtectionError,
-  isTransientSshChannelError,
-  isAlreadyExplainedGuidanceError,
-  shouldEmitAgentGuidance,
+  explainAndBuildGuidanceError,
 } from "./guidance";
 
 /** Returns true if the error already triggered a guidance panel, so toast can be skipped. */
@@ -143,44 +139,13 @@ export function useApi() {
 
   const explainAndWrapError = useCallback(
     async (method: string | undefined, rawError: unknown) => {
-      const original = String(rawError);
-      // Keep cooldown/throttle errors quiet: return as-is and skip guidance explanation.
-      if (
-        isSshCooldownProtectionError(original)
-        || isTransientSshChannelError(original)
-        || isAlreadyExplainedGuidanceError(original)
-      ) {
-        return new Error(original);
-      }
-      try {
-        const explained = await api.explainOperationError(
-          instanceId,
-          method || "unknown",
-          transport,
-          original,
-          i18n.language || (typeof navigator !== "undefined" ? navigator.language : "en"),
-        );
-        const guidanceEmitted = typeof window !== "undefined" && shouldEmitAgentGuidance(instanceId, method || "unknown", original);
-        if (guidanceEmitted) {
-          window.dispatchEvent(new CustomEvent("clawpal:agent-guidance", {
-            detail: {
-              ...explained,
-              operation: method || "unknown",
-              instanceId,
-              transport,
-              rawError: original,
-              createdAt: Date.now(),
-            },
-          }));
-        }
-        const wrapped = new Error(explained.message || original);
-        if (guidanceEmitted) {
-          (wrapped as any)._guidanceEmitted = true;
-        }
-        return wrapped;
-      } catch {
-        return new Error(original);
-      }
+      return explainAndBuildGuidanceError({
+        method: method || "unknown",
+        instanceId,
+        transport,
+        rawError,
+        emitEvent: true,
+      });
     },
     [instanceId, transport],
   );

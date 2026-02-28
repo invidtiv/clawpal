@@ -90,6 +90,69 @@ export function shouldEmitAgentGuidance(instanceId: string, operation: string, e
   return true;
 }
 
+type ExplainGuidanceInput = {
+  method: string;
+  instanceId: string;
+  transport: "local" | "docker_local" | "remote_ssh";
+  rawError: unknown;
+  emitEvent?: boolean;
+};
+
+export async function explainAndBuildGuidanceError({
+  method,
+  instanceId,
+  transport,
+  rawError,
+  emitEvent = true,
+}: ExplainGuidanceInput): Promise<Error> {
+  const original = String(rawError);
+  if (
+    isSshCooldownProtectionError(original)
+    || isTransientSshChannelError(original)
+    || isAlreadyExplainedGuidanceError(original)
+  ) {
+    return new Error(original);
+  }
+
+  try {
+    const language =
+      i18n.language ||
+      (typeof navigator !== "undefined" ? navigator.language : "en");
+    const explained = await api.explainOperationError(
+      instanceId,
+      method,
+      transport,
+      original,
+      language,
+    );
+    const shouldEmit =
+      emitEvent
+      && typeof window !== "undefined"
+      && shouldEmitAgentGuidance(instanceId, method, original);
+    if (shouldEmit) {
+      window.dispatchEvent(
+        new CustomEvent("clawpal:agent-guidance", {
+          detail: {
+            ...explained,
+            operation: method,
+            instanceId,
+            transport,
+            rawError: original,
+            createdAt: Date.now(),
+          },
+        }),
+      );
+    }
+    const wrapped = new Error(explained.message || original);
+    if (shouldEmit) {
+      (wrapped as any)._guidanceEmitted = true;
+    }
+    return wrapped;
+  } catch {
+    return new Error(original);
+  }
+}
+
 // ── withGuidance wrapper for App-level lifecycle calls ──
 
 /**
@@ -111,46 +174,12 @@ export async function withGuidance<T>(
   try {
     return await fn();
   } catch (error) {
-    const original = String(error);
-    // Skip guidance for throttled/filtered errors (same rules as dispatch)
-    if (!shouldEmitAgentGuidance(instanceId, method, original)) {
-      throw error;
-    }
-    try {
-      const language =
-        i18n.language ||
-        (typeof navigator !== "undefined" ? navigator.language : "en");
-      const explained = await api.explainOperationError(
-        instanceId,
-        method,
-        transport,
-        original,
-        language,
-      );
-      if (typeof window !== "undefined") {
-        window.dispatchEvent(
-          new CustomEvent("clawpal:agent-guidance", {
-            detail: {
-              ...explained,
-              operation: method,
-              instanceId,
-              transport,
-              rawError: original,
-              createdAt: Date.now(),
-            },
-          }),
-        );
-      }
-      // Wrap in Error so _guidanceEmitted works even when original is a string
-      const wrapped = new Error(explained.message || original);
-      (wrapped as any)._guidanceEmitted = true;
-      throw wrapped;
-    } catch (guidanceError) {
-      // If guidance itself failed, rethrow the original error
-      if (guidanceError && typeof guidanceError === "object" && (guidanceError as any)._guidanceEmitted) {
-        throw guidanceError;
-      }
-      throw error;
-    }
+    throw await explainAndBuildGuidanceError({
+      method,
+      instanceId,
+      transport,
+      rawError: error,
+      emitEvent: true,
+    });
   }
 }
