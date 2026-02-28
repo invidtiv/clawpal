@@ -297,6 +297,11 @@ fn scan_data_dirs() -> Result<Vec<DiscoveredInstance>, String> {
     let home = dirs::home_dir().ok_or("cannot determine home directory")?;
     let clawpal_dir = home.join(".clawpal");
 
+    scan_data_dirs_under(&clawpal_dir)
+}
+
+fn scan_data_dirs_under(clawpal_dir: &std::path::Path) -> Result<Vec<DiscoveredInstance>, String> {
+
     if !clawpal_dir.is_dir() {
         return Ok(Vec::new());
     }
@@ -318,6 +323,7 @@ fn scan_data_dirs() -> Result<Vec<DiscoveredInstance>, String> {
         }
 
         let has_marker = path.join("openclaw.json").exists()
+            || path.join(".openclaw").join("openclaw.json").exists()
             || path.join("docker-compose.yml").exists()
             || path.join("docker-compose.yaml").exists();
 
@@ -366,5 +372,24 @@ mod tests {
             Some("/data/oc".to_string())
         );
         assert_eq!(extract_label_value(labels, "missing"), None);
+    }
+
+    #[test]
+    fn scan_data_dirs_detects_openclaw_config_under_dot_openclaw() {
+        let root = std::env::temp_dir().join(format!(
+            "clawpal-discover-local-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let docker_dir = root.join("docker-local");
+        std::fs::create_dir_all(docker_dir.join(".openclaw")).expect("create docker dir");
+        std::fs::write(docker_dir.join(".openclaw").join("openclaw.json"), "{}")
+            .expect("write openclaw config");
+
+        let items = scan_data_dirs_under(&root).expect("scan data dirs");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].id, "docker:local");
+        assert_eq!(items[0].source, "data_dir");
+
+        let _ = std::fs::remove_dir_all(root);
     }
 }

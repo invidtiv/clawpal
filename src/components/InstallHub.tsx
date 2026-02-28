@@ -14,6 +14,7 @@ import { AgentMessageBubble } from "@/components/AgentMessageBubble";
 import { SshFormWidget } from "@/components/SshFormWidget";
 import { useDoctorAgent } from "@/lib/use-doctor-agent";
 import { api } from "@/lib/api";
+import { withGuidance } from "@/lib/guidance";
 import { installHubFallbackPromptTemplate, renderPromptTemplate } from "@/lib/prompt-templates";
 import type { DoctorChatMessage, InstallMethod, InstallSession, RegisteredInstance, SshHost } from "@/lib/types";
 import {
@@ -223,19 +224,34 @@ export function InstallHub({
     setRunError(null);
     const STEPS: Array<"precheck" | "install" | "init" | "verify"> = ["precheck", "install", "init", "verify"];
     try {
-      const session = await api.installCreateSession(method, options);
+      const session = await withGuidance(
+        () => api.installCreateSession(method, options),
+        "installCreateSession",
+        "local",
+        "local",
+      );
       setActiveSessionId(session.id);
       setRunLogs((prev) => [...prev, `[session] ${session.id}`]);
 
       for (const step of STEPS) {
         setRunLogs((prev) => [...prev, `[${step}] ...`]);
-        const result = await api.installRunStep(session.id, step);
+        const result = await withGuidance(
+          () => api.installRunStep(session.id, step),
+          "installRunStep",
+          "local",
+          "local",
+        );
         const summaryText = translateInstallText(t, result.summary);
         setRunLogs((prev) => [...prev, summaryText]);
         if (!result.ok) {
           throw new Error(translateInstallText(t, result.details || result.summary) || t("installChat.stepFailed"));
         }
-        const latest = await api.installGetSession(session.id);
+        const latest = await withGuidance(
+          () => api.installGetSession(session.id),
+          "installGetSession",
+          "local",
+          "local",
+        );
         if (latest.state === "ready") {
           setRunLogs((prev) => [...prev, `[done] ${t("installChat.ready")}`]);
           onReady(latest);
@@ -243,7 +259,12 @@ export function InstallHub({
         }
       }
       // All 4 steps passed — check final state
-      const final_ = await api.installGetSession(session.id);
+      const final_ = await withGuidance(
+        () => api.installGetSession(session.id),
+        "installGetSession",
+        "local",
+        "local",
+      );
       if (final_.state === "ready") {
         setRunLogs((prev) => [...prev, `[done] ${t("installChat.ready")}`]);
         onReady(final_);
@@ -259,14 +280,24 @@ export function InstallHub({
 
   const startDeterministicFromTarget = useCallback(async (goal: string) => {
     try {
-      const decision = await api.installDecideTarget(goal);
+      const decision = await withGuidance(
+        () => api.installDecideTarget(goal),
+        "installDecideTarget",
+        "local",
+        "local",
+      );
       const method = decision.method;
       if (method === "docker" || method === "local") {
         await startDeterministicInstall(method, goal);
         return;
       }
       if (method === "remote_ssh") {
-        const hosts = await api.listSshHosts();
+        const hosts = await withGuidance(
+          () => api.listSshHosts(),
+          "listSshHosts",
+          "local",
+          "local",
+        );
         if (hosts.length === 1) {
           await startDeterministicInstall("remote_ssh", goal, {
             ssh_host_id: hosts[0].id,
@@ -466,7 +497,12 @@ export function InstallHub({
     setConnectSubmitting(true);
     setRunError(null);
     try {
-      const existingHosts = await api.listSshHosts().catch(() => [] as SshHost[]);
+      const existingHosts = await withGuidance(
+        () => api.listSshHosts(),
+        "listSshHosts",
+        "local",
+        "local",
+      ).catch(() => [] as SshHost[]);
       const requestedId = host.id?.trim();
       const idBase = requestedId || buildDefaultSshHostId(host);
       const existingIds = new Set(existingHosts.map((item) => item.id));
@@ -476,13 +512,28 @@ export function InstallHub({
         resolvedId = `${idBase}-${suffix}`;
         suffix += 1;
       }
-      const saved = await api.upsertSshHost({
-        ...host,
-        id: resolvedId,
-      });
-      await api.sshConnect(saved.id);
+      const saved = await withGuidance(
+        () => api.upsertSshHost({
+          ...host,
+          id: resolvedId,
+        }),
+        "upsertSshHost",
+        resolvedId,
+        "remote_ssh",
+      );
+      await withGuidance(
+        () => api.sshConnect(saved.id),
+        "sshConnect",
+        saved.id,
+        "remote_ssh",
+      );
       try {
-        await api.remoteGetInstanceStatus(saved.id);
+        await withGuidance(
+          () => api.remoteGetInstanceStatus(saved.id),
+          "remoteGetInstanceStatus",
+          saved.id,
+          "remote_ssh",
+        );
       } catch {
         // Remote openclaw might not be installed yet — that's OK for connect
       }

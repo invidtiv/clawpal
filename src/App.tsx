@@ -303,7 +303,12 @@ export function App() {
     const fallback = deriveDockerPaths(instance.id);
     const openclawHome = instance.openclawHome || fallback.openclawHome;
     if (deleteLocalData) {
-      await api.deleteLocalInstanceHome(openclawHome);
+      await withGuidance(
+        () => api.deleteLocalInstanceHome(openclawHome),
+        "deleteLocalInstanceHome",
+        instance.id,
+        "docker_local",
+      );
     }
     await withGuidance(
       () => api.deleteRegisteredInstance(instance.id),
@@ -1033,7 +1038,12 @@ export function App() {
         try {
           // Register the SSH host as an instance and update state
           // synchronously so the tab bar can render it immediately.
-          const instance = await api.connectSshInstance(hostId);
+          const instance = await withGuidance(
+            () => api.connectSshInstance(hostId),
+            "connectSshInstance",
+            hostId,
+            "remote_ssh",
+          );
           setRegisteredInstances((prev) => {
             const filtered = prev.filter((r) => r.id !== hostId && r.id !== instance.id);
             return [...filtered, instance];
