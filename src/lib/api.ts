@@ -116,6 +116,10 @@ export const api = {
     invoke("precheck_registry"),
   precheckInstance: (instanceId: string): Promise<PrecheckIssue[]> =>
     invoke("precheck_instance", { instanceId }),
+  precheckTransport: (instanceId: string): Promise<PrecheckIssue[]> =>
+    invoke("precheck_transport", { instanceId }),
+  precheckAuth: (instanceId: string): Promise<PrecheckIssue[]> =>
+    invoke("precheck_auth", { instanceId }),
   fixIssues: (ids: string[]): Promise<{ ok: boolean; applied: string[]; remainingIssues: string[] }> =>
     invoke("fix_issues", { ids }),
   readRawConfig: (): Promise<string> =>

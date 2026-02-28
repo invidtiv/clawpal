@@ -427,7 +427,14 @@ export function App() {
       instanceId,
       transport,
     ).catch((e) => console.warn("ensureAccessProfile:", e));
-  }, [resolveInstanceTransport]);
+    // Auth precheck: warn if model profiles are misconfigured
+    api.precheckAuth(instanceId).then((issues) => {
+      const errors = issues.filter((i: any) => i.severity === "error");
+      if (errors.length > 0) {
+        showToast(errors[0].message, "error");
+      }
+    }).catch(() => { /* ignore */ });
+  }, [resolveInstanceTransport, showToast]);
 
   const scheduleEnsureAccessForInstance = useCallback((instanceId: string, delayMs = 1200) => {
     const now = Date.now();
@@ -600,6 +607,18 @@ export function App() {
       const blocking = issues.filter((i: any) => i.severity === "error");
       if (blocking.length > 0) {
         showToast(blocking[0].message, "error");
+      }
+    }).catch(() => { /* ignore */ });
+    // Transport layer precheck (SSH / Docker connectivity)
+    api.precheckTransport(id).then((issues) => {
+      const blocking = issues.filter((i: any) => i.severity === "error");
+      if (blocking.length > 0) {
+        showToast(blocking[0].message, "error");
+      } else {
+        const warnings = issues.filter((i: any) => i.severity === "warn");
+        if (warnings.length > 0) {
+          showToast(warnings[0].message, "warning");
+        }
       }
     }).catch(() => { /* ignore */ });
     const transport = resolveInstanceTransport(id);

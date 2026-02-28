@@ -17,7 +17,8 @@ use crate::commands::{
     list_discord_guild_channels, list_history, list_model_profiles, list_recipes,
     list_registered_instances, list_session_files, list_ssh_config_hosts, list_ssh_hosts,
     local_openclaw_config_exists, log_app_event, manage_rescue_bot, migrate_legacy_instances,
-    open_url, precheck_instance, precheck_registry, preview_rollback, preview_session, read_app_log, read_error_log,
+    open_url, precheck_auth, precheck_instance, precheck_registry, precheck_transport,
+    preview_rollback, preview_session, read_app_log, read_error_log,
     read_gateway_error_log, read_gateway_log, read_raw_config, record_install_experience,
     refresh_discord_guild_channels,
     refresh_model_catalog, remote_analyze_sessions, remote_apply_config_patch,
@@ -259,6 +260,8 @@ pub fn run() {
             install_send_message,
             precheck_registry,
             precheck_instance,
+            precheck_transport,
+            precheck_auth,
         ])
         .setup(|_app| {
             // Run PATH fix in background so it doesn't block window creation.
