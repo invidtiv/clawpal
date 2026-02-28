@@ -58,6 +58,11 @@ pub enum RuntimeErrorCode {
     ModelUnavailable,
     SessionInvalid,
     TargetUnreachable,
+    AuthExpired,
+    AuthMisconfigured,
+    RegistryCorrupt,
+    InstanceOrphaned,
+    TransportStale,
     Unknown,
 }
 
@@ -69,6 +74,11 @@ impl RuntimeErrorCode {
             Self::ModelUnavailable => "MODEL_UNAVAILABLE",
             Self::SessionInvalid => "SESSION_INVALID",
             Self::TargetUnreachable => "TARGET_UNREACHABLE",
+            Self::AuthExpired => "AUTH_EXPIRED",
+            Self::AuthMisconfigured => "AUTH_MISCONFIGURED",
+            Self::RegistryCorrupt => "REGISTRY_CORRUPT",
+            Self::InstanceOrphaned => "INSTANCE_ORPHANED",
+            Self::TransportStale => "TRANSPORT_STALE",
             Self::Unknown => "UNKNOWN",
         }
     }
@@ -116,3 +126,17 @@ pub trait RuntimeAdapter {
     fn send(&self, _key: &RuntimeSessionKey, _message: &str) -> Result<Vec<RuntimeEvent>, RuntimeError>;
 }
 use serde_json::Value;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn new_error_codes_have_correct_string_repr() {
+        assert_eq!(RuntimeErrorCode::AuthExpired.as_str(), "AUTH_EXPIRED");
+        assert_eq!(RuntimeErrorCode::AuthMisconfigured.as_str(), "AUTH_MISCONFIGURED");
+        assert_eq!(RuntimeErrorCode::RegistryCorrupt.as_str(), "REGISTRY_CORRUPT");
+        assert_eq!(RuntimeErrorCode::InstanceOrphaned.as_str(), "INSTANCE_ORPHANED");
+        assert_eq!(RuntimeErrorCode::TransportStale.as_str(), "TRANSPORT_STALE");
+    }
+}
