@@ -8,6 +8,7 @@ pub mod health;
 pub mod install;
 pub mod instance;
 pub mod openclaw;
+pub mod precheck;
 pub mod profile;
 pub mod shell;
 pub mod sessions;
