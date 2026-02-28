@@ -2,7 +2,6 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import {
   Dialog,
   DialogContent,
@@ -16,7 +15,17 @@ import { SshFormWidget } from "@/components/SshFormWidget";
 import { useDoctorAgent } from "@/lib/use-doctor-agent";
 import { api } from "@/lib/api";
 import { installHubFallbackPromptTemplate, renderPromptTemplate } from "@/lib/prompt-templates";
-import type { DoctorChatMessage, InstallMethod, InstallSession, SshHost } from "@/lib/types";
+import type { DoctorChatMessage, InstallMethod, InstallSession, RegisteredInstance, SshHost } from "@/lib/types";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import i18n from "../i18n";
 
 /**
@@ -108,6 +117,16 @@ function ToolResultCollapsible({ content }: { content: string }) {
   );
 }
 
+/** Translate install step text if it looks like an i18n key (e.g. "install.docker.precheck.summary"). */
+function translateInstallText(t: (key: string) => string, text: string): string {
+  if (/^install\.\w+\.\w+\.\w+/.test(text)) {
+    const translated = t(text);
+    // t() returns the key itself when not found
+    return translated !== text ? translated : text;
+  }
+  return text;
+}
+
 const PRESET_TAGS = [
   { key: "local", labelKey: "installChat.tag.local" },
   { key: "docker", labelKey: "installChat.tag.docker" },
@@ -129,12 +148,14 @@ export function InstallHub({
   showToast,
   onNavigate,
   onReady,
+  existingInstances,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   showToast?: (message: string, type?: "success" | "error") => void;
   onNavigate?: (route: string) => void;
   onReady?: (session: InstallSession) => void;
+  existingInstances?: RegisteredInstance[];
 }) {
   const { t } = useTranslation();
   const agent = useDoctorAgent();
@@ -147,8 +168,8 @@ export function InstallHub({
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [connectSubmitting, setConnectSubmitting] = useState(false);
   // Connect-existing form state
-  const [connectPath, setConnectPath] = useState("~/.clawpal/docker-local");
-  const [connectLabel, setConnectLabel] = useState("");
+  const [showExistingDialog, setShowExistingDialog] = useState(false);
+  const [pendingInstallTag, setPendingInstallTag] = useState<{ method: InstallMethod; label: string } | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
   // Auto-scroll on new messages
@@ -173,8 +194,8 @@ export function InstallHub({
       setRunError(null);
       setActiveSessionId(null);
       setConnectSubmitting(false);
-      setConnectPath("~/.clawpal/docker-local");
-      setConnectLabel("");
+      setShowExistingDialog(false);
+      setPendingInstallTag(null);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
@@ -189,47 +210,41 @@ export function InstallHub({
     setMode("running");
     setRunLogs([]);
     setRunError(null);
+    const STEPS: Array<"precheck" | "install" | "init" | "verify"> = ["precheck", "install", "init", "verify"];
     try {
       const session = await api.installCreateSession(method, options);
       setActiveSessionId(session.id);
-      const logs: string[] = [`[session] ${session.id}`];
-      let latest = session;
-      for (let round = 0; round < 12; round++) {
-        const decision = await api.installOrchestratorNext(latest.id, goal);
-        if (!decision.step) {
-          latest = await api.installGetSession(latest.id);
-          if (latest.state === "ready") {
-            setRunLogs((prev) => [...prev, ...logs, "[done] ready"]);
-            onReady(latest);
-            return;
-          }
-          throw new Error(decision.reason || "Install halted with no next step");
-        }
-        logs.push(`[${decision.step}] ${decision.reason}`);
-        setRunLogs((prev) => [...prev, `[${decision.step}] ${decision.reason}`]);
-        const result = await api.installRunStep(
-          latest.id,
-          decision.step as "precheck" | "install" | "init" | "verify",
-        );
-        logs.push(result.summary);
-        setRunLogs((prev) => [...prev, result.summary]);
-        latest = await api.installGetSession(latest.id);
+      setRunLogs((prev) => [...prev, `[session] ${session.id}`]);
+
+      for (const step of STEPS) {
+        setRunLogs((prev) => [...prev, `[${step}] ...`]);
+        const result = await api.installRunStep(session.id, step);
+        const summaryText = translateInstallText(t, result.summary);
+        setRunLogs((prev) => [...prev, summaryText]);
         if (!result.ok) {
-          throw new Error(result.details || result.summary || "Install step failed");
+          throw new Error(translateInstallText(t, result.details || result.summary) || t("installChat.stepFailed"));
         }
+        const latest = await api.installGetSession(session.id);
         if (latest.state === "ready") {
-          setRunLogs((prev) => [...prev, "[done] ready"]);
+          setRunLogs((prev) => [...prev, `[done] ${t("installChat.ready")}`]);
           onReady(latest);
           return;
         }
       }
-      throw new Error("Install did not converge within expected steps");
+      // All 4 steps passed — check final state
+      const final_ = await api.installGetSession(session.id);
+      if (final_.state === "ready") {
+        setRunLogs((prev) => [...prev, `[done] ${t("installChat.ready")}`]);
+        onReady(final_);
+      } else {
+        throw new Error(t("installChat.notReady"));
+      }
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
       setRunError(message);
       setMode("failed");
     }
-  }, [onReady]);
+  }, [onReady, t]);
 
   const startDeterministicFromTarget = useCallback(async (goal: string) => {
     try {
@@ -289,12 +304,17 @@ export function InstallHub({
       setMode("connect");
       return;
     }
-    if (tagKey === "docker") {
-      void startDeterministicInstall("docker", tagLabel);
-      return;
-    }
-    if (tagKey === "local") {
-      void startDeterministicInstall("local", tagLabel);
+    if (tagKey === "docker" || tagKey === "local") {
+      const method = tagKey as InstallMethod;
+      const existing = (existingInstances || []).filter(
+        (inst) => inst.instanceType === (method === "docker" ? "docker" : "local"),
+      );
+      if (existing.length > 0) {
+        setPendingInstallTag({ method, label: tagLabel });
+        setShowExistingDialog(true);
+        return;
+      }
+      void startDeterministicInstall(method, tagLabel);
       return;
     }
     if (tagKey === "ssh" || tagKey === "digitalocean") {
@@ -430,29 +450,28 @@ export function InstallHub({
     });
   }, [onReady, installMethod]);
 
-  // Connect-existing submit handler
-  const handleConnectSubmit = useCallback(async () => {
-    if (!onReady || !connectPath.trim()) return;
+  // SSH connect submit handler
+  const handleSshConnectSubmit = useCallback(async (host: SshHost) => {
     setConnectSubmitting(true);
     setRunError(null);
     try {
-      const connected = await api.connectDockerInstance(
-        connectPath.trim(),
-        connectLabel.trim() || undefined,
-      );
-      const openclawHome = connected.openclawHome || connectPath.trim();
+      const saved = await api.upsertSshHost(host);
+      await api.sshConnect(saved.id);
+      try {
+        await api.remoteGetInstanceStatus(saved.id);
+      } catch {
+        // Remote openclaw might not be installed yet — that's OK for connect
+      }
       const now = new Date().toISOString();
-      onReady({
+      onReady?.({
         id: `install-${Date.now()}`,
-        method: "docker",
+        method: "remote_ssh",
         state: "ready",
         current_step: null,
         logs: [],
         artifacts: {
-          docker_instance_id: connected.id,
-          docker_instance_label: connected.label,
-          docker_openclaw_home: openclawHome,
-          docker_clawpal_data_dir: connected.clawpalDataDir || `${openclawHome}/data`,
+          ssh_host_id: saved.id,
+          ssh_host_label: saved.label,
         },
         created_at: now,
         updated_at: now,
@@ -464,49 +483,32 @@ export function InstallHub({
     } finally {
       setConnectSubmitting(false);
     }
-  }, [onReady, connectPath, connectLabel, showToast]);
+  }, [onReady, showToast]);
 
   return (
+    <>
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-2xl max-h-[80vh] flex flex-col">
         <DialogHeader>
           <DialogTitle>
-            {mode === "connect" ? t("installChat.connectTitle") : t("installChat.title")}
+            {mode === "connect" ? t("installChat.connectRemoteTitle") : t("installChat.title")}
           </DialogTitle>
           <DialogDescription className="sr-only">
-            {mode === "connect" ? t("installChat.connectTitle") : t("installChat.title")}
+            {mode === "connect" ? t("installChat.connectRemoteTitle") : t("installChat.title")}
           </DialogDescription>
         </DialogHeader>
 
         {mode === "connect" ? (
-          /* ── Connect Existing form ── */
+          /* ── Connect Remote SSH form ── */
           <div className="space-y-4 py-2">
-            <div className="space-y-1.5">
-              <Label>{t("installChat.connectType")}</Label>
-              <div>
-                <Button variant="outline" size="sm" disabled>
-                  {t("installChat.connectDocker")}
-                </Button>
-              </div>
+            <div className="text-sm text-muted-foreground">
+              {t("installChat.connectRemoteDescription")}
             </div>
-            <div className="space-y-1.5">
-              <Label htmlFor="connect-path">{t("installChat.connectPath")}</Label>
-              <Input
-                id="connect-path"
-                value={connectPath}
-                onChange={(e) => setConnectPath(e.target.value)}
-                placeholder={t("installChat.connectPathPlaceholder")}
-              />
-            </div>
-            <div className="space-y-1.5">
-              <Label htmlFor="connect-label">{t("installChat.connectLabel")}</Label>
-              <Input
-                id="connect-label"
-                value={connectLabel}
-                onChange={(e) => setConnectLabel(e.target.value)}
-                placeholder={t("installChat.connectLabelPlaceholder")}
-              />
-            </div>
+            <SshFormWidget
+              invokeId="connect-ssh-form"
+              onSubmit={(_invokeId, host) => handleSshConnectSubmit(host)}
+              onCancel={() => setMode("idle")}
+            />
             {runError && (
               <div className="text-sm text-destructive border border-destructive/30 rounded-md px-3 py-2 bg-destructive/5">
                 {runError}
@@ -554,9 +556,9 @@ export function InstallHub({
                 <button
                   type="button"
                   className="text-sm px-3 py-1.5 rounded-full border cursor-pointer hover:bg-muted/60 hover:border-primary/40 transition-colors"
-                  onClick={() => handleTagClick("connect", t("installChat.tag.connect"))}
+                  onClick={() => handleTagClick("connect", t("installChat.tag.connectRemote"))}
                 >
-                  {t("installChat.tag.connect")}
+                  {t("installChat.tag.connectRemote")}
                 </button>
               </div>
             )}
@@ -629,14 +631,11 @@ export function InstallHub({
         )}
 
         {/* Footer with Done / Connect button */}
-        {mode === "connect" && (
+        {mode === "connect" && connectSubmitting && (
           <DialogFooter>
-            <Button variant="outline" onClick={() => setMode("idle")}>
-              {t("installChat.cancel")}
-            </Button>
-            <Button onClick={handleConnectSubmit} disabled={!connectPath.trim() || connectSubmitting}>
-              {t("installChat.connectSubmit")}
-            </Button>
+            <div className="text-sm text-muted-foreground animate-pulse">
+              {t("installChat.connecting")}
+            </div>
           </DialogFooter>
         )}
         {mode === "chat" && sessionStarted && !agent.loading && (
@@ -661,11 +660,79 @@ export function InstallHub({
               }}
               disabled={!agent.bridgeConnected || agent.loading}
             >
-              Let AI help
+              {t("installChat.letAiHelp")}
             </Button>
           </DialogFooter>
         )}
       </DialogContent>
     </Dialog>
+
+    {/* Existing instance confirmation */}
+    <AlertDialog open={showExistingDialog} onOpenChange={setShowExistingDialog}>
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>{t("installChat.existingTitle")}</AlertDialogTitle>
+          <AlertDialogDescription>
+            {t("installChat.existingDescription")}
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter>
+          <AlertDialogCancel>{t("installChat.cancel")}</AlertDialogCancel>
+          <AlertDialogAction
+            onClick={() => {
+              if (pendingInstallTag) {
+                const existing = (existingInstances || []).find(
+                  (inst) => inst.instanceType === (pendingInstallTag.method === "docker" ? "docker" : "local"),
+                );
+                if (existing) {
+                  onOpenChange(false);
+                  // Directly open the existing instance
+                  const now = new Date().toISOString();
+                  onReady?.({
+                    id: `install-${Date.now()}`,
+                    method: pendingInstallTag.method,
+                    state: "ready",
+                    current_step: null,
+                    logs: [],
+                    artifacts: existing.instanceType === "docker" ? {
+                      docker_instance_id: existing.id,
+                      docker_instance_label: existing.label,
+                      docker_openclaw_home: existing.openclawHome || "",
+                      docker_clawpal_data_dir: existing.clawpalDataDir || "",
+                    } : {},
+                    created_at: now,
+                    updated_at: now,
+                  });
+                }
+              }
+              setShowExistingDialog(false);
+              setPendingInstallTag(null);
+            }}
+          >
+            {t("installChat.useExisting")}
+          </AlertDialogAction>
+          <AlertDialogAction
+            onClick={() => {
+              setShowExistingDialog(false);
+              if (pendingInstallTag) {
+                // Compute next available instance number for isolation
+                const typeFilter = pendingInstallTag.method === "docker" ? "docker" : "local";
+                const sameType = (existingInstances || []).filter((inst) => inst.instanceType === typeFilter);
+                const nextNum = sameType.length + 1;
+                const nextId = `docker:local-${nextNum}`;
+                const options = pendingInstallTag.method === "docker"
+                  ? { docker_instance_id: nextId, docker_instance_label: `Docker Local ${nextNum}` }
+                  : undefined;
+                void startDeterministicInstall(pendingInstallTag.method, pendingInstallTag.label, options);
+              }
+              setPendingInstallTag(null);
+            }}
+          >
+            {t("installChat.installNew")}
+          </AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
+    </>
   );
 }

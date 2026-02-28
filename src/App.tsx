@@ -28,6 +28,7 @@ import { cn } from "@/lib/utils";
 import { Toaster } from "sonner";
 import type { ChannelNode, DiscordGuildChannel, DiscoveredInstance, DockerInstance, GuidanceAction, InstallSession, PrecheckIssue, RegisteredInstance, SshHost } from "./lib/types";
 import { GuidanceCard } from "./components/GuidanceCard";
+import { SshFormWidget } from "./components/SshFormWidget";
 import type { AgentGuidanceItem } from "./components/GuidanceCard";
 
 const Home = lazy(() => import("./pages/Home").then((m) => ({ default: m.Home })));
@@ -201,8 +202,15 @@ export function App() {
   const [discoveredInstances, setDiscoveredInstances] = useState<DiscoveredInstance[]>([]);
   const [discoveringInstances, setDiscoveringInstances] = useState(false);
   const [connectionStatus, setConnectionStatus] = useState<Record<string, "connected" | "disconnected" | "error">>({});
+  const [sshEditOpen, setSshEditOpen] = useState(false);
+  const [editingSshHost, setEditingSshHost] = useState<SshHost | null>(null);
   const navigateRoute = useCallback((next: Route) => {
     startTransition(() => setRoute(next));
+  }, []);
+
+  const handleEditSsh = useCallback((host: SshHost) => {
+    setEditingSshHost(host);
+    setSshEditOpen(true);
   }, []);
 
   const refreshHosts = useCallback(() => {
@@ -373,6 +381,23 @@ export function App() {
       setToasts((prev) => prev.filter((t) => t.id !== id));
     }, type === "error" ? 5000 : 3000);
   }, []);
+
+  const handleSshEditSave = useCallback(async (host: SshHost) => {
+    try {
+      await withGuidance(
+        () => api.upsertSshHost(host),
+        "upsertSshHost",
+        host.id,
+        "remote_ssh",
+      );
+      refreshHosts();
+      refreshRegisteredInstances();
+      setSshEditOpen(false);
+      showToast(t("instance.sshUpdated"), "success");
+    } catch (e) {
+      showToast(e instanceof Error ? e.message : String(e), "error");
+    }
+  }, [refreshHosts, refreshRegisteredInstances, showToast, t]);
 
   const handleConnectDiscovered = useCallback(async (discovered: DiscoveredInstance) => {
     try {
@@ -1115,7 +1140,7 @@ export function App() {
                   refreshRegisteredInstances();
                 }).catch((e) => console.warn("deleteSshHost:", e));
               }}
-              onEditSsh={() => {}}
+              onEditSsh={handleEditSsh}
               onInstallReady={handleInstallReady}
               showToast={showToast}
               onNavigate={(r) => navigateRoute(r as Route)}
@@ -1350,6 +1375,23 @@ export function App() {
             {t("ssh.passphraseConfirm")}
           </Button>
         </DialogFooter>
+      </DialogContent>
+    </Dialog>
+    <Dialog open={sshEditOpen} onOpenChange={setSshEditOpen}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>{t("instance.editSsh")}</DialogTitle>
+        </DialogHeader>
+        {editingSshHost && (
+          <SshFormWidget
+            invokeId="ssh-edit-form"
+            defaults={editingSshHost}
+            onSubmit={(_invokeId, host) => {
+              handleSshEditSave({ ...host, id: editingSshHost.id });
+            }}
+            onCancel={() => setSshEditOpen(false)}
+          />
+        )}
       </DialogContent>
     </Dialog>
     <Toaster position="top-right" richColors />
