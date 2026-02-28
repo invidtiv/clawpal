@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { AgentOverview, AgentSessionAnalysis, ApplyQueueResult, ApplyResult, BackupInfo, Binding, ChannelNode, CronJob, CronRun, DiscordGuildChannel, DockerInstance, EnsureAccessResult, HistoryItem, InstallMethodCapability, InstallOrchestratorDecision, InstallSession, InstallStepResult, InstallTargetDecision, InstanceStatus, StatusExtra, ModelCatalogProvider, ModelProfile, PendingCommand, PreviewQueueResult, PreviewResult, ProviderAuthSuggestion, Recipe, RecordInstallExperienceResult, RegisteredInstance, RescueBotAction, RescueBotManageResult, RescuePrimaryDiagnosisResult, RescuePrimaryRepairResult, ResolvedApiKey, SshConfigHostSuggestion, SystemStatus, DoctorReport, SessionFile, SshHost, WatchdogStatus } from "./types";
+import type { AgentOverview, AgentSessionAnalysis, ApplyQueueResult, ApplyResult, BackupInfo, Binding, ChannelNode, CronJob, CronRun, DiscordGuildChannel, DockerInstance, EnsureAccessResult, GuidanceAction, HistoryItem, InstallMethodCapability, InstallOrchestratorDecision, InstallSession, InstallStepResult, InstallTargetDecision, InstanceStatus, StatusExtra, ModelCatalogProvider, ModelProfile, PendingCommand, PrecheckIssue, PreviewQueueResult, PreviewResult, ProviderAuthSuggestion, Recipe, RecordInstallExperienceResult, RegisteredInstance, RescueBotAction, RescueBotManageResult, RescuePrimaryDiagnosisResult, RescuePrimaryRepairResult, ResolvedApiKey, SshConfigHostSuggestion, SystemStatus, DoctorReport, SessionFile, SshHost, WatchdogStatus } from "./types";
 
 export const api = {
   setActiveOpenclawHome: (path: string | null): Promise<boolean> =>
@@ -12,7 +12,7 @@ export const api = {
     transport: "local" | "docker_local" | "remote_ssh",
     error: string,
     language?: string,
-  ): Promise<{ message: string; summary: string; actions: string[]; source: string }> =>
+  ): Promise<{ message: string; summary: string; actions: string[]; structuredActions: GuidanceAction[]; source: string }> =>
     invoke("explain_operation_error", {
       instanceId,
       operation,
@@ -52,8 +52,9 @@ export const api = {
   connectDockerInstance: (
     home: string,
     label?: string,
+    instanceId?: string,
   ): Promise<RegisteredInstance> =>
-    invoke("connect_docker_instance", { home, label: label ?? null }),
+    invoke("connect_docker_instance", { home, label: label ?? null, instanceId: instanceId ?? null }),
   migrateLegacyInstances: (
     legacyDockerInstances: DockerInstance[],
     legacyOpenTabIds: string[],
@@ -111,6 +112,10 @@ export const api = {
     invoke("preview_session", { agentId, sessionId }),
   runDoctor: (): Promise<DoctorReport> =>
     invoke("run_doctor_command", {}),
+  precheckRegistry: (): Promise<PrecheckIssue[]> =>
+    invoke("precheck_registry"),
+  precheckInstance: (instanceId: string): Promise<PrecheckIssue[]> =>
+    invoke("precheck_instance", { instanceId }),
   fixIssues: (ids: string[]): Promise<{ ok: boolean; applied: string[]; remainingIssues: string[] }> =>
     invoke("fix_issues", { ids }),
   readRawConfig: (): Promise<string> =>

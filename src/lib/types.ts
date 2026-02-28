@@ -208,6 +208,22 @@ export interface DoctorReport {
   issues: DoctorIssue[];
 }
 
+export interface GuidanceAction {
+  label: string;
+  actionType: "inline_fix" | "doctor_handoff";
+  tool?: string;
+  args?: string;
+  invokeType?: string;
+  context?: string;
+}
+
+export interface PrecheckIssue {
+  code: string;
+  severity: "error" | "warn";
+  message: string;
+  autoFixable: boolean;
+}
+
 export interface AgentOverview {
   id: string;
   name?: string;
