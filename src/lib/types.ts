@@ -293,6 +293,16 @@ export interface RegisteredInstance {
   clawpalDataDir?: string | null;
 }
 
+export interface DiscoveredInstance {
+  id: string;
+  instanceType: string;
+  label: string;
+  homePath: string;
+  source: string;
+  containerName?: string;
+  alreadyRegistered: boolean;
+}
+
 export interface SshExecResult {
   stdout: string;
   stderr: string;

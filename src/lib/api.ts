@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { AgentOverview, AgentSessionAnalysis, ApplyQueueResult, ApplyResult, BackupInfo, Binding, ChannelNode, CronJob, CronRun, DiscordGuildChannel, DockerInstance, EnsureAccessResult, GuidanceAction, HistoryItem, InstallMethodCapability, InstallOrchestratorDecision, InstallSession, InstallStepResult, InstallTargetDecision, InstanceStatus, StatusExtra, ModelCatalogProvider, ModelProfile, PendingCommand, PrecheckIssue, PreviewQueueResult, PreviewResult, ProviderAuthSuggestion, Recipe, RecordInstallExperienceResult, RegisteredInstance, RescueBotAction, RescueBotManageResult, RescuePrimaryDiagnosisResult, RescuePrimaryRepairResult, ResolvedApiKey, SshConfigHostSuggestion, SystemStatus, DoctorReport, SessionFile, SshHost, WatchdogStatus } from "./types";
+import type { AgentOverview, AgentSessionAnalysis, ApplyQueueResult, ApplyResult, BackupInfo, Binding, ChannelNode, CronJob, CronRun, DiscordGuildChannel, DiscoveredInstance, DockerInstance, EnsureAccessResult, GuidanceAction, HistoryItem, InstallMethodCapability, InstallOrchestratorDecision, InstallSession, InstallStepResult, InstallTargetDecision, InstanceStatus, StatusExtra, ModelCatalogProvider, ModelProfile, PendingCommand, PrecheckIssue, PreviewQueueResult, PreviewResult, ProviderAuthSuggestion, Recipe, RecordInstallExperienceResult, RegisteredInstance, RescueBotAction, RescueBotManageResult, RescuePrimaryDiagnosisResult, RescuePrimaryRepairResult, ResolvedApiKey, SshConfigHostSuggestion, SystemStatus, DoctorReport, SessionFile, SshHost, WatchdogStatus } from "./types";
 
 export const api = {
   setActiveOpenclawHome: (path: string | null): Promise<boolean> =>
@@ -47,6 +47,8 @@ export const api = {
     invoke("get_system_status", {}),
   listRegisteredInstances: (): Promise<RegisteredInstance[]> =>
     invoke("list_registered_instances", {}),
+  discoverLocalInstances: (): Promise<DiscoveredInstance[]> =>
+    invoke("discover_local_instances"),
   deleteRegisteredInstance: (instanceId: string): Promise<boolean> =>
     invoke("delete_registered_instance", { instanceId }),
   connectDockerInstance: (

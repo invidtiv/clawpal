@@ -1,5 +1,5 @@
 import { useTranslation } from "react-i18next";
-import { MonitorIcon, ContainerIcon, ServerIcon, EllipsisIcon, PencilIcon, Trash2Icon, RefreshCwIcon } from "lucide-react";
+import { MonitorIcon, ContainerIcon, ServerIcon, EllipsisIcon, PencilIcon, Trash2Icon, RefreshCwIcon, LinkIcon } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Popover, PopoverTrigger, PopoverContent } from "@/components/ui/popover";
@@ -22,6 +22,9 @@ interface InstanceCardProps {
   onRename?: () => void;
   onEdit?: () => void; // SSH edit only
   onDelete?: () => void;
+  discovered?: boolean;
+  discoveredSource?: string;
+  onConnect?: () => void;
 }
 
 const typeIcons: Record<InstanceType, typeof MonitorIcon> = {
@@ -57,6 +60,9 @@ export function InstanceCard({
   onRename,
   onEdit,
   onDelete,
+  discovered,
+  discoveredSource,
+  onConnect,
 }: InstanceCardProps) {
   const { t } = useTranslation();
   const TypeIcon = typeIcons[type];
@@ -71,9 +77,10 @@ export function InstanceCard({
       className={cn(
         "cursor-pointer transition-all duration-300 group relative",
         "hover:shadow-[var(--shadow-warm-hover)]",
+        discovered && "border-dashed border-2 border-muted-foreground/30",
         opened && "border-primary/30",
       )}
-      onClick={onClick}
+      onClick={discovered ? undefined : onClick}
     >
       <CardContent className="flex flex-col gap-3">
         {/* Top row: type icon + menu */}
@@ -134,45 +141,64 @@ export function InstanceCard({
         <div className="font-bold truncate">{label}</div>
 
         {/* Bottom row: health + agent count */}
-        <div className="flex items-center gap-3 text-sm text-muted-foreground">
-          {needsCheck ? (
-            <Button
-              variant="outline"
-              size="sm"
-              className="h-6 text-xs gap-1.5"
-              onClick={(e) => { e.stopPropagation(); onCheck?.(); }}
-            >
-              <RefreshCwIcon className="size-3" />
-              {t("start.check")}
-            </Button>
-          ) : checking ? (
-            <span className="flex items-center gap-1.5">
-              <RefreshCwIcon className="size-3 animate-spin" />
-              {t("start.checking")}
-            </span>
-          ) : (
-            <>
+        {!discovered && (
+          <div className="flex items-center gap-3 text-sm text-muted-foreground">
+            {needsCheck ? (
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-6 text-xs gap-1.5"
+                onClick={(e) => { e.stopPropagation(); onCheck?.(); }}
+              >
+                <RefreshCwIcon className="size-3" />
+                {t("start.check")}
+              </Button>
+            ) : checking ? (
               <span className="flex items-center gap-1.5">
-                <HealthDot healthy={healthy} offline={checked === true && healthy === null} />
-                {checked === true && healthy === null
-                  ? t("start.unreachable")
-                  : healthy === true
-                    ? t("start.healthy")
-                    : healthy === false
-                      ? t("start.unhealthy")
-                      : t("start.checking")}
+                <RefreshCwIcon className="size-3 animate-spin" />
+                {t("start.checking")}
               </span>
-              <Badge variant="secondary" className="text-xs">
-                {t("start.agents", { count: agentCount })}
+            ) : (
+              <>
+                <span className="flex items-center gap-1.5">
+                  <HealthDot healthy={healthy} offline={checked === true && healthy === null} />
+                  {checked === true && healthy === null
+                    ? t("start.unreachable")
+                    : healthy === true
+                      ? t("start.healthy")
+                      : healthy === false
+                        ? t("start.unhealthy")
+                        : t("start.checking")}
+                </span>
+                <Badge variant="secondary" className="text-xs">
+                  {t("start.agents", { count: agentCount })}
+                </Badge>
+              </>
+            )}
+            {opened && (
+              <Badge variant="outline" className="text-xs">
+                {t("start.opened")}
               </Badge>
-            </>
-          )}
-          {opened && (
-            <Badge variant="outline" className="text-xs">
-              {t("start.opened")}
-            </Badge>
-          )}
-        </div>
+            )}
+          </div>
+        )}
+
+        {discovered && discoveredSource && (
+          <div className="text-xs text-muted-foreground">
+            {discoveredSource === "container" ? t("start.fromContainer") : t("start.fromDataDir")}
+          </div>
+        )}
+
+        {discovered && onConnect && (
+          <Button
+            size="sm"
+            className="w-full gap-1.5"
+            onClick={(e) => { e.stopPropagation(); onConnect(); }}
+          >
+            <LinkIcon className="size-3.5" />
+            {t("start.connect")}
+          </Button>
+        )}
       </CardContent>
     </Card>
   );
