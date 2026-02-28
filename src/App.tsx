@@ -342,6 +342,7 @@ export function App() {
         body: JSON.stringify({ v: version, id: installId, platform: navigator.platform }),
       }).catch(() => {});
     }).catch(() => {});
+
   }, []);
 
   const [toasts, setToasts] = useState<ToastItem[]>([]);
@@ -370,6 +371,16 @@ export function App() {
       setToasts((prev) => prev.filter((t) => t.id !== id));
     }, type === "error" ? 5000 : 3000);
   }, []);
+
+  // Startup precheck: validate registry
+  useEffect(() => {
+    api.precheckRegistry().then((issues) => {
+      const errors = issues.filter((i: any) => i.severity === "error");
+      if (errors.length > 0) {
+        showToast(errors[0].message, "error");
+      }
+    }).catch(() => { /* precheck failure should not block app */ });
+  }, [showToast]);
 
   useEffect(() => {
     const onGuidance = (event: Event) => {
@@ -584,6 +595,13 @@ export function App() {
       // heavy reloads (e.g., Channels) on the critical interaction path.
       navigateRoute("home");
     });
+    // Instance switch precheck
+    api.precheckInstance(id).then((issues) => {
+      const blocking = issues.filter((i: any) => i.severity === "error");
+      if (blocking.length > 0) {
+        showToast(blocking[0].message, "error");
+      }
+    }).catch(() => { /* ignore */ });
     const transport = resolveInstanceTransport(id);
     if (transport !== "remote_ssh") return;
     // Check if backend still has a live connection before reconnecting.
