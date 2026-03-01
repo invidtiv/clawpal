@@ -362,8 +362,8 @@ export const api = {
     invoke("doctor_start_diagnosis", { context, sessionKey, agentId: agentId ?? "main", instanceId: instanceId ?? "local" }),
   doctorSendMessage: (message: string, sessionKey: string, agentId?: string, instanceId?: string): Promise<void> =>
     invoke("doctor_send_message", { message, sessionKey, agentId: agentId ?? "main", instanceId: instanceId ?? "local" }),
-  doctorApproveInvoke: (invokeId: string, target: string, sessionKey: string, agentId: string, domain?: string): Promise<Record<string, unknown>> =>
-    invoke("doctor_approve_invoke", { invokeId, target, sessionKey, agentId, domain }),
+  doctorApproveInvoke: (invokeId: string, target: string, instanceId: string, sessionKey: string, agentId: string, domain?: string): Promise<Record<string, unknown>> =>
+    invoke("doctor_approve_invoke", { invokeId, target, instanceId, sessionKey, agentId, domain }),
   doctorRejectInvoke: (invokeId: string, reason: string): Promise<void> =>
     invoke("doctor_reject_invoke", { invokeId, reason }),
   collectDoctorContext: (): Promise<string> =>

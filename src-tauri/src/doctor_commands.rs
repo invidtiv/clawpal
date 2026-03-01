@@ -6,7 +6,9 @@ use tauri::{AppHandle, Emitter, State};
 
 use crate::doctor_runtime_bridge::emit_runtime_event;
 use crate::models::resolve_paths;
-use crate::runtime::types::{RuntimeAdapter, RuntimeDomain, RuntimeError, RuntimeEvent, RuntimeSessionKey};
+use crate::runtime::types::{
+    RuntimeAdapter, RuntimeDomain, RuntimeError, RuntimeEvent, RuntimeSessionKey,
+};
 use crate::runtime::zeroclaw::adapter::ZeroclawDoctorAdapter;
 use crate::runtime::zeroclaw::install_adapter::ZeroclawInstallAdapter;
 use crate::ssh::SshConnectionPool;
@@ -116,6 +118,7 @@ pub async fn doctor_approve_invoke(
     pool: State<'_, SshConnectionPool>,
     invoke_id: String,
     target: String,
+    instance_id: Option<String>,
     session_key: String,
     agent_id: String,
     domain: Option<String>,
@@ -187,10 +190,11 @@ pub async fn doctor_approve_invoke(
     } else {
         RuntimeDomain::Doctor
     };
+    let instance_scope = instance_id.unwrap_or_else(|| target.clone());
     let key = RuntimeSessionKey::new(
         "zeroclaw",
         rt_domain,
-        target.clone(),
+        instance_scope,
         agent_id.clone(),
         session_key.clone(),
     );
@@ -277,7 +281,10 @@ pub async fn collect_doctor_context_remote(
 ) -> Result<String, String> {
     // Collect openclaw version
     let version_result = pool
-        .exec_login(&host_id, clawpal_core::doctor::remote_openclaw_version_probe_script())
+        .exec_login(
+            &host_id,
+            clawpal_core::doctor::remote_openclaw_version_probe_script(),
+        )
         .await?;
     let version = version_result.stdout.trim().to_string();
 
@@ -401,7 +408,10 @@ async fn probe_openclaw_on_target(pool: &SshConnectionPool, target: &str) -> Res
             .await
             .map_err(|e| format!("probe which failed: {e}"))?;
         let version = pool
-            .exec_login(target, clawpal_core::doctor::remote_openclaw_version_probe_script())
+            .exec_login(
+                target,
+                clawpal_core::doctor::remote_openclaw_version_probe_script(),
+            )
             .await
             .map_err(|e| format!("probe version failed: {e}"))?;
         let path_env = pool
@@ -443,14 +453,19 @@ async fn probe_openclaw_on_target(pool: &SshConnectionPool, target: &str) -> Res
     }))
 }
 
-async fn fix_openclaw_path_on_target(pool: &SshConnectionPool, target: &str) -> Result<Value, String> {
+async fn fix_openclaw_path_on_target(
+    pool: &SshConnectionPool,
+    target: &str,
+) -> Result<Value, String> {
     if !target_is_remote_instance(target) {
         return Err("doctor fix-openclaw-path currently supports remote target only".to_string());
     }
-    let find_dir = pool.exec_login(
-        target,
-        clawpal_core::doctor::remote_openclaw_fix_find_dir_script(),
-    ).await?;
+    let find_dir = pool
+        .exec_login(
+            target,
+            clawpal_core::doctor::remote_openclaw_fix_find_dir_script(),
+        )
+        .await?;
     let dir = find_dir.stdout.trim().to_string();
     if dir.is_empty() {
         return Err("cannot locate openclaw binary in known directories".to_string());
@@ -496,9 +511,14 @@ fn parse_cli_args(tokens: &[&str]) -> ParsedCliArgs {
     parsed
 }
 
-fn resolved_target<'a>(default_target: &'a str, parsed: &'a ParsedCliArgs) -> Result<&'a str, String> {
+fn resolved_target<'a>(
+    default_target: &'a str,
+    parsed: &'a ParsedCliArgs,
+) -> Result<&'a str, String> {
     match parsed.options.get("instance").and_then(|v| v.as_deref()) {
-        Some(id) if id.trim().is_empty() => Err("clawpal doctor --instance cannot be empty".to_string()),
+        Some(id) if id.trim().is_empty() => {
+            Err("clawpal doctor --instance cannot be empty".to_string())
+        }
         Some(id) => {
             if id == "local" || id.starts_with("docker:") {
                 return Ok(id);
@@ -516,8 +536,8 @@ fn resolved_target<'a>(default_target: &'a str, parsed: &'a ParsedCliArgs) -> Re
 }
 
 fn tool_stdout_json(value: Value) -> Result<Value, String> {
-    let stdout =
-        serde_json::to_string(&value).map_err(|e| format!("failed to serialize tool output: {e}"))?;
+    let stdout = serde_json::to_string(&value)
+        .map_err(|e| format!("failed to serialize tool output: {e}"))?;
     Ok(json!({
         "stdout": stdout,
         "stderr": "",
@@ -601,7 +621,10 @@ async fn doctor_domain_remote_root(
     domain: &str,
 ) -> Result<String, String> {
     let base = pool
-        .exec_login(target, clawpal_core::doctor::remote_openclaw_root_probe_script())
+        .exec_login(
+            target,
+            clawpal_core::doctor::remote_openclaw_root_probe_script(),
+        )
         .await?
         .stdout
         .trim()
@@ -609,7 +632,10 @@ async fn doctor_domain_remote_root(
     clawpal_core::doctor::doctor_domain_remote_root(&base, domain)
 }
 
-async fn resolve_remote_config_path(pool: &SshConnectionPool, target: &str) -> Result<String, String> {
+async fn resolve_remote_config_path(
+    pool: &SshConnectionPool,
+    target: &str,
+) -> Result<String, String> {
     let out = pool
         .exec_login(
             target,
@@ -731,10 +757,7 @@ async fn doctor_file_write(
         clawpal_core::doctor::validate_doctor_relative_path(&rel)?;
         let full_path = format!("{}/{}", root.trim_end_matches('/'), rel);
         validate_not_sensitive(&full_path)?;
-        let dirname_cmd = format!(
-            "mkdir -p \"$(dirname {})\"",
-            sh_single_quote(&full_path)
-        );
+        let dirname_cmd = format!("mkdir -p \"$(dirname {})\"", sh_single_quote(&full_path));
         let mkdir_out = pool.exec_login(target, &dirname_cmd).await?;
         if mkdir_out.exit_code != 0 {
             return Err(format!(
@@ -758,7 +781,9 @@ async fn doctor_file_write(
         pool.sftp_write(target, &full_path, content).await?;
         let verify = pool.sftp_read(target, &full_path).await?;
         if verify != content {
-            return Err("doctor file write verification failed: remote content mismatch".to_string());
+            return Err(
+                "doctor file write verification failed: remote content mismatch".to_string(),
+            );
         }
         return Ok(json!({
             "target": target,
@@ -861,12 +886,8 @@ async fn doctor_config_delete(
     let config_path = clawpal_core::doctor::local_openclaw_config_path(&local_openclaw_root()?);
     let raw = std::fs::read_to_string(&config_path)
         .map_err(|e| format!("failed to read local config: {e}"))?;
-    let (rendered, deleted) = clawpal_core::doctor::delete_json_path_in_str(
-        &raw,
-        dotted_path,
-        "local config",
-        "config",
-    )?;
+    let (rendered, deleted) =
+        clawpal_core::doctor::delete_json_path_in_str(&raw, dotted_path, "local config", "config")?;
     if deleted {
         std::fs::write(&config_path, rendered)
             .map_err(|e| format!("failed to write local config: {e}"))?;
@@ -902,7 +923,8 @@ async fn doctor_config_read(
     let config_path = clawpal_core::doctor::local_openclaw_config_path(&local_openclaw_root()?);
     let raw = std::fs::read_to_string(&config_path)
         .map_err(|e| format!("failed to read local config: {e}"))?;
-    let selected = clawpal_core::doctor::select_json_value_from_str(&raw, dotted_path, "local config")?;
+    let selected =
+        clawpal_core::doctor::select_json_value_from_str(&raw, dotted_path, "local config")?;
     Ok(json!({
         "target": target,
         "remote": false,
@@ -953,7 +975,8 @@ async fn doctor_config_upsert(
         "local config",
         "config",
     )?;
-    std::fs::write(&config_path, rendered).map_err(|e| format!("failed to write local config: {e}"))?;
+    std::fs::write(&config_path, rendered)
+        .map_err(|e| format!("failed to write local config: {e}"))?;
     Ok(json!({
         "target": target,
         "remote": false,
@@ -963,9 +986,15 @@ async fn doctor_config_upsert(
     }))
 }
 
-async fn resolve_remote_sessions_path(pool: &SshConnectionPool, target: &str) -> Result<String, String> {
+async fn resolve_remote_sessions_path(
+    pool: &SshConnectionPool,
+    target: &str,
+) -> Result<String, String> {
     let out = pool
-        .exec_login(target, clawpal_core::doctor::remote_sessions_discovery_script())
+        .exec_login(
+            target,
+            clawpal_core::doctor::remote_sessions_discovery_script(),
+        )
         .await?;
     Ok(out.stdout.trim().to_string())
 }
@@ -978,11 +1007,8 @@ async fn doctor_sessions_read(
     if target_is_remote_instance(target) {
         let sessions_path = resolve_remote_sessions_path(pool, target).await?;
         let raw = pool.sftp_read(target, &sessions_path).await?;
-        let selected = clawpal_core::doctor::select_json_value_from_str(
-            &raw,
-            dotted_path,
-            "remote sessions",
-        )?;
+        let selected =
+            clawpal_core::doctor::select_json_value_from_str(&raw, dotted_path, "remote sessions")?;
         return Ok(json!({
             "target": target,
             "remote": true,
@@ -992,8 +1018,7 @@ async fn doctor_sessions_read(
         }));
     }
 
-    let sessions_path =
-        clawpal_core::doctor::resolve_local_sessions_path(&local_openclaw_root()?);
+    let sessions_path = clawpal_core::doctor::resolve_local_sessions_path(&local_openclaw_root()?);
     let raw = std::fs::read_to_string(&sessions_path)
         .map_err(|e| format!("failed to read local sessions: {e}"))?;
     let selected =
@@ -1038,8 +1063,7 @@ async fn doctor_sessions_upsert(
         }));
     }
 
-    let sessions_path =
-        clawpal_core::doctor::resolve_local_sessions_path(&local_openclaw_root()?);
+    let sessions_path = clawpal_core::doctor::resolve_local_sessions_path(&local_openclaw_root()?);
     let raw = std::fs::read_to_string(&sessions_path)
         .map_err(|e| format!("failed to read local sessions: {e}"))?;
     let rendered = clawpal_core::doctor::upsert_json_path_in_str(
@@ -1089,8 +1113,7 @@ async fn doctor_sessions_delete(
         }));
     }
 
-    let sessions_path =
-        clawpal_core::doctor::resolve_local_sessions_path(&local_openclaw_root()?);
+    let sessions_path = clawpal_core::doctor::resolve_local_sessions_path(&local_openclaw_root()?);
     let raw = std::fs::read_to_string(&sessions_path)
         .map_err(|e| format!("failed to read local sessions: {e}"))?;
     let (rendered, deleted) = clawpal_core::doctor::delete_json_path_in_str(
@@ -1230,12 +1253,16 @@ async fn run_clawpal_tool(
             .positionals
             .first()
             .map(String::as_str)
-            .ok_or_else(|| "clawpal doctor config-upsert requires <json.path> <json.value>".to_string())?;
+            .ok_or_else(|| {
+                "clawpal doctor config-upsert requires <json.path> <json.value>".to_string()
+            })?;
         let value_json = parsed
             .positionals
             .get(1)
             .map(String::as_str)
-            .ok_or_else(|| "clawpal doctor config-upsert requires <json.path> <json.value>".to_string())?;
+            .ok_or_else(|| {
+                "clawpal doctor config-upsert requires <json.path> <json.value>".to_string()
+            })?;
         let out = doctor_config_upsert(pool, target, key_path, value_json).await?;
         return tool_stdout_json(out);
     }
@@ -1270,12 +1297,16 @@ async fn run_clawpal_tool(
             .positionals
             .first()
             .map(String::as_str)
-            .ok_or_else(|| "clawpal doctor sessions-upsert requires <json.path> <json.value>".to_string())?;
+            .ok_or_else(|| {
+                "clawpal doctor sessions-upsert requires <json.path> <json.value>".to_string()
+            })?;
         let value_json = parsed
             .positionals
             .get(1)
             .map(String::as_str)
-            .ok_or_else(|| "clawpal doctor sessions-upsert requires <json.path> <json.value>".to_string())?;
+            .ok_or_else(|| {
+                "clawpal doctor sessions-upsert requires <json.path> <json.value>".to_string()
+            })?;
         let out = doctor_sessions_upsert(pool, target, key_path, value_json).await?;
         return tool_stdout_json(out);
     }
@@ -1292,9 +1323,7 @@ async fn run_clawpal_tool(
         let out = doctor_sessions_delete(pool, target, key_path).await?;
         return tool_stdout_json(out);
     }
-    if token_refs.first().copied() == Some("doctor")
-        && token_refs.get(1).copied() == Some("exec")
-    {
+    if token_refs.first().copied() == Some("doctor") && token_refs.get(1).copied() == Some("exec") {
         let parsed = parse_cli_args(&token_refs[2..]);
         let target = resolved_target(target, &parsed)?;
         let tool = parsed
@@ -1334,8 +1363,8 @@ async fn run_clawpal_tool(
             if parsed.options.contains_key("all") {
                 let mut output = Vec::new();
                 for instance in registry.list() {
-                    let status =
-                        clawpal_core::health::check_instance(&instance).map_err(|e| e.to_string())?;
+                    let status = clawpal_core::health::check_instance(&instance)
+                        .map_err(|e| e.to_string())?;
                     output.push(json!({ "id": instance.id, "status": status }));
                 }
                 return tool_stdout_json(Value::Array(output));
@@ -1360,7 +1389,8 @@ async fn run_clawpal_tool(
                     .cloned()
                     .ok_or_else(|| format!("instance '{target_id}' not found"))?
             };
-            let status = clawpal_core::health::check_instance(&instance).map_err(|e| e.to_string())?;
+            let status =
+                clawpal_core::health::check_instance(&instance).map_err(|e| e.to_string())?;
             tool_stdout_json(json!({ "id": instance.id, "status": status }))
         }
         (Some("ssh"), Some("list")) => {
@@ -1416,8 +1446,8 @@ async fn run_clawpal_tool(
                 .get(2)
                 .ok_or_else(|| "clawpal profile remove requires <id>".to_string())?;
             let openclaw = clawpal_core::openclaw::OpenclawCli::new();
-            let removed = clawpal_core::profile::delete_profile(&openclaw, id)
-                .map_err(|e| e.to_string())?;
+            let removed =
+                clawpal_core::profile::delete_profile(&openclaw, id).map_err(|e| e.to_string())?;
             tool_stdout_json(json!({ "removed": removed, "id": id }))
         }
         (Some("profile"), Some("test")) => {
@@ -1465,8 +1495,8 @@ async fn run_clawpal_tool(
                 enabled: true,
             };
             let openclaw = clawpal_core::openclaw::OpenclawCli::new();
-            let saved =
-                clawpal_core::profile::upsert_profile(&openclaw, profile).map_err(|e| e.to_string())?;
+            let saved = clawpal_core::profile::upsert_profile(&openclaw, profile)
+                .map_err(|e| e.to_string())?;
             tool_stdout_json(json!(saved))
         }
         (Some("connect"), Some("docker")) => {
@@ -1551,11 +1581,7 @@ async fn run_clawpal_tool(
             let parsed = parse_cli_args(&token_refs[2..]);
             let subcommand = parsed.positionals.first().map(String::as_str);
             let options = clawpal_core::install::DockerInstallOptions {
-                home: parsed
-                    .options
-                    .get("home")
-                    .and_then(|v| v.as_ref())
-                    .cloned(),
+                home: parsed.options.get("home").and_then(|v| v.as_ref()).cloned(),
                 label: parsed
                     .options
                     .get("label")
@@ -1760,7 +1786,10 @@ mod tests {
         };
         let result = resolved_target("local", &parsed);
         assert!(result.is_err());
-        assert!(result.err().unwrap_or_default().contains("unknown instance id"));
+        assert!(result
+            .err()
+            .unwrap_or_default()
+            .contains("unknown instance id"));
     }
 
     #[test]
@@ -1769,7 +1798,10 @@ mod tests {
             positionals: Vec::new(),
             options: HashMap::from([("instance".to_string(), Some("local".to_string()))]),
         };
-        assert_eq!(resolved_target("ssh:vm1", &parsed_local).expect("local target"), "local");
+        assert_eq!(
+            resolved_target("ssh:vm1", &parsed_local).expect("local target"),
+            "local"
+        );
 
         let parsed_docker = ParsedCliArgs {
             positionals: Vec::new(),
@@ -1783,8 +1815,9 @@ mod tests {
 
     #[test]
     fn parse_cli_args_supports_space_containing_option_values() {
-        let tokens = parse_tool_tokens("connect docker --home \"/tmp/a b\" --label \"Docker Local\"")
-            .expect("parse tokens");
+        let tokens =
+            parse_tool_tokens("connect docker --home \"/tmp/a b\" --label \"Docker Local\"")
+                .expect("parse tokens");
         let token_refs: Vec<&str> = tokens.iter().map(String::as_str).collect();
         let parsed = parse_cli_args(&token_refs[2..]);
         assert_eq!(
@@ -1803,7 +1836,10 @@ mod tests {
             .expect("parse tokens");
         let token_refs: Vec<&str> = tokens.iter().map(String::as_str).collect();
         let parsed = parse_cli_args(&token_refs[2..]);
-        assert_eq!(parsed.positionals.first().map(String::as_str), Some("commands"));
+        assert_eq!(
+            parsed.positionals.first().map(String::as_str),
+            Some("commands")
+        );
         assert_eq!(
             resolved_target("local", &parsed).expect("resolve target"),
             "ssh:vm1"
@@ -1816,10 +1852,7 @@ mod tests {
             "args": "doctor --fix",
             "instance": "c7c90e52-bbc7-44be-bfe7-a07302646435"
         });
-        assert_eq!(
-            describe_invoke("openclaw", &args),
-            "openclaw doctor --fix"
-        );
+        assert_eq!(describe_invoke("openclaw", &args), "openclaw doctor --fix");
     }
 
     #[test]
@@ -1887,7 +1920,9 @@ mod tests {
     fn doctor_prompt_rejects_legacy_fix_config_command() {
         let prompt = crate::prompt_templates::doctor_domain_system();
         assert!(
-            prompt.contains("NEVER invent non-existent clawpal commands (for example: doctor fix-config)."),
+            prompt.contains(
+                "NEVER invent non-existent clawpal commands (for example: doctor fix-config)."
+            ),
             "prompt should explicitly forbid legacy doctor fix-config command"
         );
     }
@@ -1908,10 +1943,8 @@ mod tests {
 
     #[test]
     fn read_file_tail_lines_reads_last_lines() {
-        let path = std::env::temp_dir().join(format!(
-            "clawpal-doctor-tail-{}.log",
-            std::process::id()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("clawpal-doctor-tail-{}.log", std::process::id()));
         let mut file = std::fs::File::create(&path).expect("create temp file");
         writeln!(file, "l1").expect("write line 1");
         writeln!(file, "l2").expect("write line 2");

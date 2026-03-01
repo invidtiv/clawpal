@@ -277,7 +277,14 @@ export function useDoctorAgent() {
 
   const autoApprove = useCallback(async (invokeId: string) => {
     try {
-      await api.doctorApproveInvoke(invokeId, targetRef.current, sessionKeyRef.current, agentIdRef.current, domainRef.current);
+      await api.doctorApproveInvoke(
+        invokeId,
+        targetRef.current,
+        instanceScopeRef.current,
+        sessionKeyRef.current,
+        agentIdRef.current,
+        domainRef.current,
+      );
       setMessages((prev) =>
         prev.map((m) => {
           if (m.invoke?.id === invokeId && m.role === "tool-call") {
@@ -416,7 +423,14 @@ export function useDoctorAgent() {
       })
     );
     try {
-      await api.doctorApproveInvoke(invokeId, targetRef.current, sessionKeyRef.current, agentIdRef.current, domainRef.current);
+      await api.doctorApproveInvoke(
+        invokeId,
+        targetRef.current,
+        instanceScopeRef.current,
+        sessionKeyRef.current,
+        agentIdRef.current,
+        domainRef.current,
+      );
     } catch (err) {
       const text = String(err);
       if (text.includes("No pending invoke with id")) {

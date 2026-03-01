@@ -20,6 +20,7 @@ import { InstanceTabBar } from "./components/InstanceTabBar";
 import { InstanceContext } from "./lib/instance-context";
 import { api } from "./lib/api";
 import { explainAndBuildGuidanceError, withGuidance } from "./lib/guidance";
+import { useFont } from "./lib/use-font";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
@@ -78,6 +79,7 @@ let toastIdCounter = 0;
 const SSH_ERROR_MAP: Array<[RegExp, string]> = [
   [/connection refused/i, "ssh.errorConnectionRefused"],
   [/no such file/i, "ssh.errorNoSuchFile"],
+  [/name or service not known|nodename nor servname provided|temporary failure in name resolution|no address associated with hostname|getaddrinfo|failed to lookup address information|unknown host|hostname was not found/i, "ssh.errorHostUnreachable"],
   [/passphrase|sign_and_send_pubkey|agent refused operation|can't open \/dev\/tty|authentication agent/i, "ssh.errorPassphrase"],
   [/permission denied/i, "ssh.errorPermissionDenied"],
   [/host key verification failed/i, "ssh.errorHostKey"],
@@ -123,11 +125,11 @@ function deriveDockerPaths(instanceId: string): { openclawHome: string; clawpalD
 }
 
 function deriveDockerLabel(instanceId: string): string {
-  if (instanceId === DEFAULT_DOCKER_INSTANCE_ID) return "Docker Local";
+  if (instanceId === DEFAULT_DOCKER_INSTANCE_ID) return "docker-local";
   const suffix = instanceId.startsWith("docker:") ? instanceId.slice(7) : instanceId;
   const match = suffix.match(/^local-(\d+)$/);
-  if (match) return `Docker Local ${match[1]}`;
-  return `Docker ${suffix}`;
+  if (match) return `docker-local-${match[1]}`;
+  return suffix.startsWith("docker-") ? suffix : `docker-${suffix}`;
 }
 
 function fallbackInstanceLabel(instanceId: string, t: (key: string) => string): string {
@@ -171,6 +173,7 @@ function normalizeDockerInstance(instance: DockerInstance): DockerInstance {
 
 export function App() {
   const { t } = useTranslation();
+  useFont();
   const [route, setRoute] = useState<Route>("home");
   const [recipeId, setRecipeId] = useState<string | null>(null);
   const [recipeSource, setRecipeSource] = useState<string | undefined>(undefined);
@@ -338,6 +341,7 @@ export function App() {
 
   const [appUpdateAvailable, setAppUpdateAvailable] = useState(false);
   const [hasEscalatedCron, setHasEscalatedCron] = useState(false);
+  const [appVersion, setAppVersion] = useState("");
 
   // Startup: check for updates + analytics ping
   useEffect(() => {
@@ -354,6 +358,7 @@ export function App() {
 
     // Analytics ping (fire-and-forget)
     getVersion().then((version) => {
+      setAppVersion(version);
       const url = PING_URL;
       if (!url) return;
       fetch(url, {
@@ -378,6 +383,7 @@ export function App() {
   const [passphraseInput, setPassphraseInput] = useState("");
   const accessProbeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastAccessProbeAtRef = useRef<Record<string, number>>({});
+  const profileBootstrapGuidanceSigRef = useRef("");
 
   // Persist open tabs
   useEffect(() => {
@@ -459,7 +465,80 @@ export function App() {
     };
   }, []);
 
+  useEffect(() => {
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      void (async () => {
+        try {
+          const before = await api.listModelProfiles();
+          if (cancelled || before.some((p) => p.enabled)) return;
+
+          await api.extractModelProfilesFromConfig().catch(() => null);
+          const after = await api.listModelProfiles();
+          if (cancelled || after.some((p) => p.enabled)) return;
+
+          const hasConnectableInstance =
+            registeredInstances.some((inst) => inst.id !== "local")
+            || discoveredInstances.length > 0;
+          const signature = hasConnectableInstance ? "with-instance" : "no-instance";
+          if (profileBootstrapGuidanceSigRef.current === signature) return;
+          profileBootstrapGuidanceSigRef.current = signature;
+
+          const actions = hasConnectableInstance
+            ? [
+              t("onboarding.actionSyncProfiles"),
+              t("onboarding.actionAddProfile"),
+            ]
+            : [
+              t("onboarding.actionConnectInstanceFirst"),
+              t("onboarding.actionOpenConnectEntry"),
+            ];
+          window.dispatchEvent(new CustomEvent("clawpal:agent-guidance", {
+            detail: {
+              message: t("onboarding.noProfilesSummary"),
+              summary: t("onboarding.noProfilesSummary"),
+              actions,
+              source: "onboarding",
+              operation: "profiles.bootstrap.missing",
+              instanceId: "local",
+              transport: "local",
+              rawError: hasConnectableInstance
+                ? "No model profiles detected after auto extraction"
+                : "No model profiles detected and no connectable instances found",
+              createdAt: Date.now(),
+            },
+          }));
+        } catch {
+          // ignore bootstrap guidance failures
+        }
+      })();
+    }, 1200);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [discoveredInstances.length, registeredInstances, t]);
+
   const agentGuidance = agentGuidanceByInstance[activeInstance] || null;
+  const resolveGuidanceForInstance = useCallback((instanceId: string) => {
+    setAgentGuidanceByInstance((prev) => {
+      if (!prev[instanceId]) return prev;
+      const next = { ...prev };
+      delete next[instanceId];
+      return next;
+    });
+    setDoctorLaunchByInstance((prev) => {
+      if (!(instanceId in prev)) return prev;
+      const next = { ...prev };
+      delete next[instanceId];
+      return next;
+    });
+    if (instanceId === activeInstance) {
+      setAgentGuidanceOpen(false);
+      setUnreadGuidance(false);
+    }
+  }, [activeInstance]);
+
   useEffect(() => {
     if (!agentGuidance) {
       setAgentGuidanceOpen(false);
@@ -793,6 +872,7 @@ export function App() {
     let cancelled = false;
     let nextHome: string | null = null;
     let nextDataDir: string | null = null;
+    const activeRegistered = registeredInstances.find((item) => item.id === activeInstance);
     if (activeInstance === "local" || isRemote) {
       nextHome = null;
       nextDataDir = null;
@@ -801,6 +881,9 @@ export function App() {
       const fallback = deriveDockerPaths(activeInstance);
       nextHome = instance?.openclawHome || fallback.openclawHome;
       nextDataDir = instance?.clawpalDataDir || fallback.clawpalDataDir;
+    } else if (activeRegistered?.instanceType === "local" && activeRegistered.openclawHome) {
+      nextHome = activeRegistered.openclawHome;
+      nextDataDir = activeRegistered.clawpalDataDir || null;
     }
     const tokenSeed = `${activeInstance}|${nextHome || ""}|${nextDataDir || ""}`;
 
@@ -826,7 +909,7 @@ export function App() {
     return () => {
       cancelled = true;
     };
-  }, [activeInstance, isDocker, isRemote, dockerInstances]);
+  }, [activeInstance, isDocker, isRemote, dockerInstances, registeredInstances]);
 
   // Keep active remote instance self-healed: detect dropped SSH and reconnect.
   useEffect(() => {
@@ -834,6 +917,30 @@ export function App() {
     let cancelled = false;
     let inFlight = false;
     const hostId = activeInstance;
+    const reportAutoHealFailure = (rawError: unknown) => {
+      const errorText = String(rawError);
+      void explainAndBuildGuidanceError({
+        method: "sshConnect",
+        instanceId: hostId,
+        transport: "remote_ssh",
+        rawError: rawError,
+        emitEvent: true,
+      }).catch(() => null);
+      showToast(friendlySshError(errorText, t), "error");
+    };
+    const markFailure = (rawError: unknown) => {
+      if (cancelled) return;
+      const streak = (sshHealthFailStreakRef.current[hostId] || 0) + 1;
+      sshHealthFailStreakRef.current[hostId] = streak;
+      // Avoid flipping UI to disconnected/error on a single transient failure.
+      if (streak >= 2) {
+        setConnectionStatus((prev) => ({ ...prev, [hostId]: "error" }));
+        // Escalate the first stable failure in this streak to guidance + toast.
+        if (streak === 2) {
+          reportAutoHealFailure(rawError);
+        }
+      }
+    };
 
     const checkAndHeal = async () => {
       if (cancelled || inFlight) return;
@@ -852,24 +959,11 @@ export function App() {
             sshHealthFailStreakRef.current[hostId] = 0;
             setConnectionStatus((prev) => ({ ...prev, [hostId]: "connected" }));
           }
-        } catch {
-          if (!cancelled) {
-            const streak = (sshHealthFailStreakRef.current[hostId] || 0) + 1;
-            sshHealthFailStreakRef.current[hostId] = streak;
-            // Avoid flipping UI to disconnected/error on a single transient failure.
-            if (streak >= 2) {
-              setConnectionStatus((prev) => ({ ...prev, [hostId]: "error" }));
-            }
-          }
+        } catch (connectError) {
+          markFailure(connectError);
         }
-      } catch {
-        if (!cancelled) {
-          const streak = (sshHealthFailStreakRef.current[hostId] || 0) + 1;
-          sshHealthFailStreakRef.current[hostId] = streak;
-          if (streak >= 2) {
-            setConnectionStatus((prev) => ({ ...prev, [hostId]: "error" }));
-          }
-        }
+      } catch (statusError) {
+        markFailure(statusError);
       } finally {
         inFlight = false;
       }
@@ -881,7 +975,7 @@ export function App() {
       cancelled = true;
       clearInterval(timer);
     };
-  }, [activeInstance, isRemote]);
+  }, [activeInstance, isRemote, showToast, t]);
 
   // Clear cached channel data only when switching instance.
   // Avoid clearing on transient connection-status changes, which causes
@@ -981,9 +1075,10 @@ export function App() {
       if (id === "local") return { id, label: t("instance.local"), type: "local" as const };
       const registered = registryById.get(id);
       if (registered) {
+        const fallbackLabel = registered.instanceType === "docker" ? deriveDockerLabel(id) : id;
         return {
           id,
-          label: registered.label || id,
+          label: registered.label || fallbackLabel,
           type: registered.instanceType === "remote_ssh" ? "ssh" as const : registered.instanceType as "local" | "docker",
         };
       }
@@ -1054,12 +1149,17 @@ export function App() {
           scheduleEnsureAccessForInstance(instance.id, 600);
         } catch (err) {
           console.warn("connectSshInstance failed during install-ready:", err);
-          // Never fall back to local tab here: keep the user in the intended
-          // remote context so they can continue fixing connection issues.
           refreshHosts();
           refreshRegisteredInstances();
-          activateRemoteInstance(hostId, "error");
-          showToast(friendlySshError(String(err), t), "error");
+          const alreadyRegistered = registeredInstances.some((item) => item.id === hostId);
+          if (alreadyRegistered) {
+            activateRemoteInstance(hostId, "error");
+          } else {
+            setInStart(true);
+            setStartSection("overview");
+          }
+          const reason = friendlySshError(String(err), t);
+          showToast(reason, "error");
         }
       } else {
         showToast("SSH host id missing after submit. Please reopen Connect and retry.", "error");
@@ -1074,6 +1174,7 @@ export function App() {
     refreshHosts,
     refreshRegisteredInstances,
     navigateRoute,
+    registeredInstances,
     scheduleEnsureAccessForInstance,
     showToast,
     t,
@@ -1150,6 +1251,7 @@ export function App() {
         activeId={inStart ? null : activeInstance}
         startActive={inStart}
         connectionStatus={connectionStatus}
+        appVersion={appVersion}
         onSelectStart={openControlCenter}
         onSelect={handleInstanceSelect}
         onClose={closeTab}
@@ -1205,7 +1307,7 @@ export function App() {
           <a
             href="#"
             className="hover:text-foreground transition-colors duration-200"
-            onClick={(e) => { e.preventDefault(); api.openUrl("https://clawpal.zhixian.io"); }}
+            onClick={(e) => { e.preventDefault(); api.openUrl("https://clawpal.xyz"); }}
           >
             {t('nav.website')}
           </a>
@@ -1409,6 +1511,7 @@ export function App() {
             }
             onClose={() => setAgentGuidanceOpen(false)}
             onDismiss={() => { setAgentGuidanceOpen(false); setUnreadGuidance(false); }}
+            onResolve={() => resolveGuidanceForInstance(agentGuidance.instanceId)}
             onDoctorHandoff={(context) => {
               setAgentGuidanceOpen(false);
               setDoctorLaunchByInstance((prev) => ({
@@ -1433,8 +1536,7 @@ export function App() {
                   showToast(`正在重连 SSH...`, "success");
                   await connectWithPassphraseFallback(hostId);
                   showToast("SSH 重连成功", "success");
-                  setAgentGuidanceOpen(false);
-                  setUnreadGuidance(false);
+                  resolveGuidanceForInstance(hostId);
                 } else {
                   setAgentGuidanceOpen(false);
                   setDoctorLaunchByInstance((prev) => ({
