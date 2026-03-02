@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { useTranslation } from "react-i18next";
 import { useApi, hasGuidanceEmitted } from "@/lib/use-api";
 import { useInstance } from "@/lib/instance-context";
@@ -35,6 +36,8 @@ import {
 } from "@/components/ui/alert-dialog";
 import { Skeleton } from "@/components/ui/skeleton";
 import { DoctorChat } from "@/components/DoctorChat";
+import { TokenBadge } from "@/components/TokenBadge";
+import { ModelSwitcher } from "@/components/ModelSwitcher";
 import { SessionAnalysisPanel } from "@/components/SessionAnalysisPanel";
 import type { BackupInfo } from "@/lib/types";
 import { formatTime, formatBytes } from "@/lib/utils";
@@ -133,6 +136,8 @@ export function Doctor({
   const ua = useApi();
   const { instanceId, isDocker, isRemote, isConnected } = useInstance();
   const doctor = useDoctorAgent();
+  const [runtimeModel, setRuntimeModel] = useState<string | undefined>(undefined);
+  const [sessionModelOverride, setSessionModelOverride] = useState<string | undefined>(undefined);
   const [remoteConnState, setRemoteConnState] = useState<"checking" | "connected" | "disconnected">("checking");
 
   const [diagnosing, setDiagnosing] = useState(false);
@@ -198,6 +203,30 @@ export function Doctor({
     doctor.setTarget(isRemote ? instanceId : "local");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [doctor.setTarget, instanceId, isRemote]);
+
+  // Fetch runtime target model for TokenBadge / ModelSwitcher.
+  useEffect(() => {
+    invoke<{ model?: string }>("get_zeroclaw_runtime_target")
+      .then((target) => {
+        if (target?.model) setRuntimeModel(target.model);
+      })
+      .catch(() => {});
+  }, []);
+
+  // Use instanceId as the stable session key for model override / usage tracking.
+  // This matches the backend which looks up overrides by instance_id.
+  const doctorSessionId = instanceId || "local";
+
+  // Track session model override so TokenBadge uses the effective model for cost.
+  useEffect(() => {
+    if (!doctorSessionId) return;
+    invoke<string | null>("get_session_model_override", { sessionId: doctorSessionId })
+      .then((m) => setSessionModelOverride(m ?? undefined))
+      .catch(() => {});
+  }, [doctorSessionId]);
+
+  // Effective model: session override takes priority over global runtime model.
+  const effectiveModel = sessionModelOverride ?? runtimeModel;
 
   const handleStartDiagnosis = async (extraContext?: string) => {
     setStartError(null);
@@ -1030,7 +1059,7 @@ export function Doctor({
                 </div>
               )}
               <div className="flex items-center justify-between mb-3">
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-2 flex-wrap">
                   <Badge variant="outline" className="text-xs">
                     {t("doctor.engineZeroclaw")}
                   </Badge>
@@ -1038,6 +1067,8 @@ export function Doctor({
                     <span className={`inline-block w-1.5 h-1.5 rounded-full ${doctor.bridgeConnected ? "bg-emerald-500" : "bg-muted-foreground/40"}`} />
                     {doctor.bridgeConnected ? t("doctor.bridgeConnected") : t("doctor.bridgeDisconnected")}
                   </Badge>
+                  <TokenBadge sessionId={doctorSessionId} model={effectiveModel} />
+                  <ModelSwitcher sessionId={doctorSessionId} defaultModel={runtimeModel} onModelChange={setSessionModelOverride} />
                 </div>
                 <div className="flex items-center gap-2">
                   <label className="flex items-center gap-1.5 text-xs cursor-pointer select-none">

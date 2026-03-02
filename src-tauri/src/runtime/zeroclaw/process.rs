@@ -266,6 +266,43 @@ pub fn get_zeroclaw_usage_stats() -> ZeroclawUsageStats {
     usage_store().lock().map(|stats| *stats).unwrap_or_default()
 }
 
+// ---------------------------------------------------------------------------
+// Per-session usage tracking
+// ---------------------------------------------------------------------------
+
+fn session_usage_store() -> &'static Mutex<std::collections::HashMap<String, ZeroclawUsageStats>> {
+    static STORE: OnceLock<Mutex<std::collections::HashMap<String, ZeroclawUsageStats>>> =
+        OnceLock::new();
+    STORE.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
+pub fn record_session_usage(session_id: &str, prompt_tokens: u64, completion_tokens: u64) {
+    if session_id.is_empty() {
+        return;
+    }
+    if let Ok(mut map) = session_usage_store().lock() {
+        let stats = map
+            .entry(session_id.to_string())
+            .or_insert_with(ZeroclawUsageStats::default);
+        stats.total_calls = stats.total_calls.saturating_add(1);
+        stats.usage_calls = stats.usage_calls.saturating_add(1);
+        stats.prompt_tokens = stats.prompt_tokens.saturating_add(prompt_tokens);
+        stats.completion_tokens = stats.completion_tokens.saturating_add(completion_tokens);
+        stats.total_tokens = stats
+            .total_tokens
+            .saturating_add(prompt_tokens.saturating_add(completion_tokens));
+        stats.last_updated_ms = now_ms();
+    }
+}
+
+pub fn get_session_usage(session_id: &str) -> ZeroclawUsageStats {
+    session_usage_store()
+        .lock()
+        .ok()
+        .and_then(|map| map.get(session_id).copied())
+        .unwrap_or_default()
+}
+
 fn sanitize_instance_namespace(raw: &str) -> String {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -804,7 +841,9 @@ pub fn run_zeroclaw_message(
         "-m".to_string(),
         message,
     ];
-    let preferred_model = crate::commands::load_zeroclaw_model_preference();
+    // Per-session model override takes priority over global preference.
+    let preferred_model = crate::commands::preferences::lookup_session_model_override(instance_id)
+        .or_else(|| crate::commands::load_zeroclaw_model_preference());
     let provider_order = provider_order_for_runtime(&env_pairs, preferred_model.as_deref());
     if provider_order.is_empty() {
         return Err(
@@ -821,7 +860,13 @@ pub fn run_zeroclaw_message(
         let stdout = sanitize_output(&String::from_utf8_lossy(&output.stdout));
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         record_zeroclaw_usage(&stdout, &stderr);
-        if parse_usage_from_text(&stdout).is_none() && parse_usage_from_text(&stderr).is_none() {
+        // Also record per-session usage.
+        let session_usage =
+            parse_usage_from_text(&stdout).or_else(|| parse_usage_from_text(&stderr));
+        if let Some((prompt, completion, _total)) = session_usage {
+            record_session_usage(instance_id, prompt, completion);
+        }
+        if session_usage.is_none() {
             if let Ok(mut stats) = usage_store().lock() {
                 if let Some((prompt, completion, total)) =
                     read_usage_from_builtin_traces(&cmd, &cfg, &env_pairs)
@@ -831,6 +876,8 @@ pub fn run_zeroclaw_message(
                     stats.completion_tokens = stats.completion_tokens.saturating_add(completion);
                     stats.total_tokens = stats.total_tokens.saturating_add(total);
                     stats.last_updated_ms = now_ms();
+                    // Record per-session usage from traces as well.
+                    record_session_usage(instance_id, prompt, completion);
                 }
             }
         }
