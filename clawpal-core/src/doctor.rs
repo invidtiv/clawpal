@@ -855,7 +855,7 @@ tail -{} \"$gateway_data_root/logs/{file}.log\" 2>/dev/null || echo ''",
 pub fn remote_clawpal_log_tail_script(lines: usize, filename: &str) -> String {
     let file = filename.trim_start_matches(".log");
     format!(
-        "clawpal_data_dir=\"${{CLAWPAL_DATA_DIR:-${{OPENCLAW_STATE_DIR:-${{OPENCLAW_HOME:-$HOME/.openclaw}}}}/.clawpal}\"; \
+        "clawpal_data_dir=\"${{CLAWPAL_DATA_DIR:-${{OPENCLAW_STATE_DIR:-${{OPENCLAW_HOME:-$HOME/.openclaw}}}}}/.clawpal\"; \
 log_path=\"$clawpal_data_dir/logs/{file}.log\"; \
 fallback_log_path=\"$HOME/.clawpal/logs/{file}.log\"; \
 if [ -f \"$log_path\" ]; then :; elif [ -f \"$fallback_log_path\" ]; then log_path=\"$fallback_log_path\"; fi; \
