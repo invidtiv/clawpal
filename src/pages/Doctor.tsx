@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useTranslation } from "react-i18next";
 import { FileTextIcon, DownloadIcon } from "lucide-react";
@@ -11,7 +11,9 @@ import type {
   RescuePrimaryDiagnosisResult,
   RescuePrimaryIssue,
   RescuePrimaryRepairResult,
+  ModelProfile,
 } from "@/lib/types";
+import { profileToModelValue } from "@/lib/model-value";
 import {
   Card,
   CardHeader,
@@ -142,6 +144,7 @@ export function Doctor({
   const doctor = useDoctorAgent();
   const [runtimeModel, setRuntimeModel] = useState<string | undefined>(undefined);
   const [sessionModelOverride, setSessionModelOverride] = useState<string | undefined>(undefined);
+  const [modelProfiles, setModelProfiles] = useState<ModelProfile[]>([]);
   const [remoteConnState, setRemoteConnState] = useState<"checking" | "connected" | "disconnected">("checking");
 
   const [diagnosing, setDiagnosing] = useState(false);
@@ -166,12 +169,14 @@ export function Doctor({
   const [logsLoading, setLogsLoading] = useState(false);
   const [logsError, setLogsError] = useState("");
   const [showZeroclawDiagnosis, setShowZeroclawDiagnosis] = useState(false);
+  const [showRescueBotUi, setShowRescueBotUi] = useState(false);
   const [zeroclawDoctorUiLoaded, setZeroclawDoctorUiLoaded] = useState(false);
   const logsContentRef = useRef<HTMLPreElement>(null);
   const [rescueState, setRescueState] = useState<RescueUiState>(createInitialRescueUiState);
   const [primaryState, setPrimaryState] = useState<PrimaryRecoveryState>(createInitialPrimaryRecoveryState);
   const [activeDiagnosisEngine, setActiveDiagnosisEngine] = useState<"openclaw" | "zeroclaw" | null>(null);
   const lastAutoLaunchKeyRef = useRef<string | null>(null);
+  const lastDoctorTargetKeyRef = useRef<string | null>(null);
   const agentSourceLabel = showZeroclawDiagnosis
     ? t("doctor.engineZeroclaw")
     : t("installChat.letAiHelp");
@@ -224,14 +229,48 @@ export function Doctor({
   // - local/docker: execute on local machine
   // - remote ssh: execute on selected remote host
   useEffect(() => {
-    doctor.reset();
-    doctor.disconnect();
-    setActiveDiagnosisEngine(null);
-    setRescueState(createInitialRescueUiState());
-    setPrimaryState(createInitialPrimaryRecoveryState());
+    const restoreScope = isRemote
+      ? instanceId
+      : isDocker
+        ? instanceId
+        : "local";
+    const targetKey = `${isRemote ? "remote" : isDocker ? "docker" : "local"}:${restoreScope}`;
+    if (
+      lastDoctorTargetKeyRef.current
+      && lastDoctorTargetKeyRef.current !== targetKey
+    ) {
+      doctor.reset();
+      void doctor.disconnect();
+      setActiveDiagnosisEngine(null);
+      setRescueState(createInitialRescueUiState());
+      setPrimaryState(createInitialPrimaryRecoveryState());
+    }
+    lastDoctorTargetKeyRef.current = targetKey;
+
     doctor.setTarget(isRemote ? instanceId : "local");
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [doctor.setTarget, instanceId, isRemote]);
+    const restored = doctor.restoreFromCache({
+      agentId: "main",
+      instanceScope: restoreScope,
+      domain: "doctor",
+      engine: "zeroclaw",
+    });
+    if (!restored) {
+      doctor.restoreFromCache({
+        agentId: "main",
+        instanceScope: restoreScope,
+        domain: "doctor",
+        engine: "openclaw",
+      });
+    }
+  }, [
+    doctor.disconnect,
+    doctor.reset,
+    doctor.restoreFromCache,
+    doctor.setTarget,
+    instanceId,
+    isDocker,
+    isRemote,
+  ]);
 
   // Fetch runtime target model for TokenBadge / ModelSwitcher.
   useEffect(() => {
@@ -241,6 +280,19 @@ export function Doctor({
       })
       .catch(() => {});
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    ua.listModelProfiles()
+      .then((profiles) => {
+        if (cancelled) return;
+        setModelProfiles(profiles.filter((profile) => profile.enabled));
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [ua]);
 
   // Use instanceId as the stable session key for model override / usage tracking.
   // This matches the backend which looks up overrides by instance_id.
@@ -256,6 +308,23 @@ export function Doctor({
 
   // Effective model: session override takes priority over global runtime model.
   const effectiveModel = sessionModelOverride ?? runtimeModel;
+  const availableModels = useMemo(() => {
+    const uniqueModels = new Map<string, string>();
+    for (const profile of modelProfiles) {
+      const model = profileToModelValue(profile);
+      if (!model) continue;
+      const normalized = model.trim();
+      if (!normalized) continue;
+      const key = normalized.toLowerCase();
+      if (!uniqueModels.has(key)) uniqueModels.set(key, normalized);
+    }
+    if (runtimeModel && runtimeModel.trim()) {
+      const normalized = runtimeModel.trim();
+      const key = normalized.toLowerCase();
+      if (!uniqueModels.has(key)) uniqueModels.set(key, normalized);
+    }
+    return Array.from(uniqueModels.values()).sort((a, b) => a.localeCompare(b));
+  }, [modelProfiles, runtimeModel]);
 
   const handleStartDiagnosis = async (
     extraContext?: string,
@@ -692,12 +761,13 @@ export function Doctor({
 
   useEffect(() => {
     let cancelled = false;
+    if (!showRescueBotUi) return;
     void refreshRescueStatus(() => cancelled);
     return () => {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [instanceId, isRemote, isConnected]);
+  }, [instanceId, isRemote, isConnected, showRescueBotUi]);
 
   useEffect(() => {
     if (!active || !launchGuidance || !zeroclawDoctorUiLoaded) return;
@@ -745,11 +815,13 @@ export function Doctor({
         .then((prefs) => {
           if (!cancelled) {
             setShowZeroclawDiagnosis(Boolean(prefs.showZeroclawDoctorUi));
+            setShowRescueBotUi(Boolean(prefs.showRescueBotUi));
           }
         })
         .catch(() => {
           if (!cancelled) {
             setShowZeroclawDiagnosis(false);
+            setShowRescueBotUi(false);
           }
         })
         .finally(() => {
@@ -775,9 +847,7 @@ export function Doctor({
     ua.listBackups().then(setBackups).catch((e) => console.error("Failed to load backups:", e));
   }, [ua]);
   useEffect(refreshBackups, [refreshBackups]);
-  // Keep legacy recovery entry points visible, but keep zeroclaw-specific
-  // diagnosis UI hidden while the underlying logic remains unchanged.
-  const showLegacyRecoveryCards = true;
+  const showRescueBotCards = showRescueBotUi;
   const isWsl2 = instanceId.startsWith("wsl2:");
   const displayedDoctorTarget = isRemote || isDocker || isWsl2 ? instanceId : "local";
   const instanceTypeLabel = isRemote
@@ -897,7 +967,12 @@ export function Doctor({
                         {doctor.bridgeConnected ? t("doctor.bridgeConnected") : t("doctor.bridgeDisconnected")}
                       </Badge>
                       <TokenBadge sessionId={doctorSessionId} model={effectiveModel} />
-                      <ModelSwitcher sessionId={doctorSessionId} defaultModel={runtimeModel} onModelChange={setSessionModelOverride} />
+                      <ModelSwitcher
+                        sessionId={doctorSessionId}
+                        defaultModel={runtimeModel}
+                        availableModels={availableModels}
+                        onModelChange={setSessionModelOverride}
+                      />
                     </div>
                     <div className="flex items-center gap-2">
                       <label className="flex items-center gap-1.5 text-xs cursor-pointer select-none">
@@ -980,7 +1055,7 @@ export function Doctor({
           </CardContent>
         </Card>
 
-        {showLegacyRecoveryCards && (
+        {showRescueBotCards && (
           <Card className="mb-4 gap-2 py-4">
             <CardHeader className="pb-0">
               <CardTitle className="text-base">{t("doctor.rescueBotTitle")}</CardTitle>

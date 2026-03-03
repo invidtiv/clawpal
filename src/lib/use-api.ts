@@ -491,12 +491,9 @@ export function useApi() {
       deleteModelProfile: withGlobalInvalidation(
         api.deleteModelProfile,
       ),
-      testModelProfile: ((profileId: string) =>
-        dispatch(
-          api.testModelProfile,
-          api.remoteTestModelProfile,
-          "testModelProfile",
-        )(profileId)),
+      // Profile credential validation uses local model profiles and local credentials only.
+      // Avoid SSH hop here to keep test latency low.
+      testModelProfile: (profileId: string) => api.testModelProfile(profileId),
       resolveApiKeys: localGlobalCached(
         "resolveApiKeys",
         10_000,
@@ -728,6 +725,10 @@ export function useApi() {
       ),
       setZeroclawDoctorUiPreference: withGlobalInvalidation(
         api.setZeroclawDoctorUiPreference,
+        ["getAppPreferences"],
+      ),
+      setRescueBotUiPreference: withGlobalInvalidation(
+        api.setRescueBotUiPreference,
         ["getAppPreferences"],
       ),
       ensureAccessProfile: api.ensureAccessProfile,
