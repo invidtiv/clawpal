@@ -854,14 +854,21 @@ tail -{} \"$gateway_data_root/logs/{file}.log\" 2>/dev/null || echo ''",
 
 pub fn remote_clawpal_log_tail_script(lines: usize, filename: &str) -> String {
     let file = filename.trim_start_matches(".log");
-    format!(
-        "clawpal_data_dir=\"${{CLAWPAL_DATA_DIR:-${{OPENCLAW_STATE_DIR:-${{OPENCLAW_HOME:-$HOME/.openclaw}}}}}/.clawpal\"; \
-log_path=\"$clawpal_data_dir/logs/{file}.log\"; \
-fallback_log_path=\"$HOME/.clawpal/logs/{file}.log\"; \
-if [ -f \"$log_path\" ]; then :; elif [ -f \"$fallback_log_path\" ]; then log_path=\"$fallback_log_path\"; fi; \
-tail -{} \"$log_path\" 2>/dev/null || echo ''",
-        lines
-    )
+    let mut script = String::new();
+    script.push_str(
+        "clawpal_data_dir=\"${CLAWPAL_DATA_DIR:-${OPENCLAW_STATE_DIR:-${OPENCLAW_HOME:-$HOME/.openclaw}}}/.clawpal\"; ",
+    );
+    script.push_str("log_path=\"$clawpal_data_dir/logs/");
+    script.push_str(file);
+    script.push_str(".log\"; ");
+    script.push_str("fallback_log_path=\"$HOME/.clawpal/logs/");
+    script.push_str(file);
+    script.push_str(".log\"; ");
+    script.push_str("if [ -f \"$log_path\" ]; then :; elif [ -f \"$fallback_log_path\" ]; then log_path=\"$fallback_log_path\"; fi; ");
+    script.push_str("tail -");
+    script.push_str(&lines.to_string());
+    script.push_str(" \"$log_path\" 2>/dev/null || echo ''");
+    script
 }
 
 pub fn remote_openclaw_fix_find_dir_script() -> &'static str {
