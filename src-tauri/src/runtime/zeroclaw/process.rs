@@ -669,6 +669,219 @@ fn credential_clearly_mismatched_for_provider(provider: &str, secret: &str) -> b
     }
 }
 
+fn env_pair_for_mapped_provider(
+    mapped: &str,
+    credential: &crate::commands::InternalProviderCredential,
+) -> Option<(String, String)> {
+    let env_name = match mapped {
+        "openrouter" => Some("OPENROUTER_API_KEY"),
+        "openai" => Some("OPENAI_API_KEY"),
+        "openai-codex" => Some(match credential.kind {
+            crate::commands::InternalAuthKind::Authorization => "OPENAI_CODEX_TOKEN",
+            crate::commands::InternalAuthKind::ApiKey => "OPENAI_API_KEY",
+        }),
+        "anthropic" => Some(match credential.kind {
+            crate::commands::InternalAuthKind::Authorization => "ANTHROPIC_OAUTH_TOKEN",
+            crate::commands::InternalAuthKind::ApiKey => "ANTHROPIC_API_KEY",
+        }),
+        "gemini" => Some("GEMINI_API_KEY"),
+        "kimi-code" => Some("MOONSHOT_API_KEY"),
+        "moonshot" => Some("MOONSHOT_API_KEY"),
+        _ => None,
+    }?;
+    Some((env_name.to_string(), credential.secret.clone()))
+}
+
+#[derive(Debug, Clone)]
+struct ZeroclawProfileRoute {
+    profile_id: String,
+    provider_arg: String,
+    logical_provider: String,
+    model_arg: String,
+    env_overrides: Vec<(String, String)>,
+}
+
+fn normalize_model_for_custom_provider(
+    model: &str,
+    raw_provider: &str,
+    normalized_provider: Option<&str>,
+) -> String {
+    let mut normalized = model.trim().to_string();
+    if normalized.is_empty() {
+        return normalized;
+    }
+    if let Some((prefix, tail)) = normalized.split_once('/') {
+        let prefix_lower = prefix.trim().to_ascii_lowercase();
+        let raw_lower = raw_provider.trim().to_ascii_lowercase();
+        let normalized_prefix = normalize_zeroclaw_provider(prefix);
+        let prefix_matches = prefix_lower == raw_lower
+            || normalized_provider.is_some_and(|provider| {
+                prefix_lower == provider
+                    || normalized_prefix.is_some_and(|mapped| mapped == provider)
+            })
+            || prefix_lower == "openrouter";
+        if prefix_matches {
+            normalized = tail.trim().to_string();
+        }
+    }
+    normalized
+}
+
+fn route_matches_preferred_model(route: &ZeroclawProfileRoute, preferred_model: &str) -> bool {
+    let preferred = preferred_model.trim().to_ascii_lowercase();
+    if preferred.is_empty() {
+        return false;
+    }
+    let route_model = route.model_arg.trim().to_ascii_lowercase();
+    if route_model.is_empty() {
+        return false;
+    }
+    if preferred == route_model || preferred.ends_with(&format!("/{route_model}")) {
+        return true;
+    }
+    let Some((provider, _)) = preferred.split_once('/') else {
+        return false;
+    };
+    let logical = route.logical_provider.trim().to_ascii_lowercase();
+    provider == logical
+        || (provider == "openai" && logical == "openai-codex")
+        || (provider == "openai-codex" && logical == "openai")
+}
+
+fn merge_env_pairs(
+    base: &[(String, String)],
+    overrides: &[(String, String)],
+) -> Vec<(String, String)> {
+    if overrides.is_empty() {
+        return base.to_vec();
+    }
+    let mut merged = base.to_vec();
+    for (key, value) in overrides {
+        merged.retain(|(existing_key, _)| existing_key != key);
+        merged.push((key.clone(), value.clone()));
+    }
+    merged
+}
+
+fn collect_profile_routes_for_zeroclaw(preferred_model: Option<&str>) -> Vec<ZeroclawProfileRoute> {
+    let profiles = crate::commands::list_model_profiles().unwrap_or_default();
+    let provider_credentials = collect_provider_credentials_for_doctor();
+    let mut routes = Vec::<ZeroclawProfileRoute>::new();
+    let mut seen = HashSet::<String>::new();
+    let mut push_route = |route: ZeroclawProfileRoute| {
+        if route.model_arg.trim().is_empty() {
+            return;
+        }
+        let dedupe_key = format!(
+            "{}|{}|{}",
+            route.profile_id,
+            route.provider_arg,
+            route.model_arg.to_ascii_lowercase()
+        );
+        if seen.insert(dedupe_key) {
+            routes.push(route);
+        }
+    };
+
+    for profile in profiles.into_iter().filter(|profile| profile.enabled) {
+        let provider_raw = profile.provider.trim();
+        if provider_raw.is_empty() {
+            continue;
+        }
+        let provider_key = provider_raw.to_ascii_lowercase();
+        let mapped_provider = normalize_zeroclaw_provider(provider_raw);
+        let credential = provider_credentials.get(&provider_key);
+
+        if let Some(mapped) = mapped_provider {
+            let model = normalize_model_for_provider(&profile.model, Some(mapped));
+            let env_overrides = credential
+                .and_then(|resolved| env_pair_for_mapped_provider(mapped, resolved))
+                .into_iter()
+                .collect::<Vec<(String, String)>>();
+            push_route(ZeroclawProfileRoute {
+                profile_id: profile.id.clone(),
+                provider_arg: mapped.to_string(),
+                logical_provider: mapped.to_string(),
+                model_arg: model,
+                env_overrides,
+            });
+        }
+
+        let Some(base_url) = profile
+            .base_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            continue;
+        };
+        let Some(resolved_credential) = credential else {
+            continue;
+        };
+
+        let provider_lower = provider_raw.to_ascii_lowercase();
+        let use_anthropic_custom =
+            mapped_provider == Some("anthropic") || provider_lower.contains("anthropic");
+        let mismatch_provider = if use_anthropic_custom {
+            "anthropic"
+        } else {
+            "openai"
+        };
+        if credential_clearly_mismatched_for_provider(
+            mismatch_provider,
+            &resolved_credential.secret,
+        ) {
+            continue;
+        }
+        let provider_arg = if use_anthropic_custom {
+            format!("anthropic-custom:{base_url}")
+        } else {
+            format!("custom:{base_url}")
+        };
+        let logical_provider = if use_anthropic_custom {
+            "anthropic-custom".to_string()
+        } else {
+            "custom".to_string()
+        };
+        let model =
+            normalize_model_for_custom_provider(&profile.model, provider_raw, mapped_provider);
+        let env_overrides = if use_anthropic_custom {
+            let key_name = match resolved_credential.kind {
+                crate::commands::InternalAuthKind::Authorization => "ANTHROPIC_OAUTH_TOKEN",
+                crate::commands::InternalAuthKind::ApiKey => "ANTHROPIC_API_KEY",
+            };
+            vec![(key_name.to_string(), resolved_credential.secret.clone())]
+        } else {
+            vec![
+                ("API_KEY".to_string(), resolved_credential.secret.clone()),
+                (
+                    "ZEROCLAW_API_KEY".to_string(),
+                    resolved_credential.secret.clone(),
+                ),
+            ]
+        };
+        push_route(ZeroclawProfileRoute {
+            profile_id: profile.id.clone(),
+            provider_arg,
+            logical_provider,
+            model_arg: model,
+            env_overrides,
+        });
+    }
+
+    if let Some(preferred) = preferred_model {
+        routes.sort_by_key(|route| {
+            if route_matches_preferred_model(route, preferred) {
+                0u8
+            } else {
+                1u8
+            }
+        });
+    }
+
+    routes
+}
+
 fn zeroclaw_env_pairs_from_clawpal() -> Vec<(String, String)> {
     let provider_credentials = collect_provider_credentials_for_doctor();
     let mut out = Vec::<(String, String)>::new();
@@ -680,26 +893,11 @@ fn zeroclaw_env_pairs_from_clawpal() -> Vec<(String, String)> {
         if credential_clearly_mismatched_for_provider(mapped, &credential.secret) {
             continue;
         }
-        let Some(env_name) = (match mapped {
-            "openrouter" => Some("OPENROUTER_API_KEY"),
-            "openai" => Some("OPENAI_API_KEY"),
-            "openai-codex" => Some(match credential.kind {
-                crate::commands::InternalAuthKind::Authorization => "OPENAI_CODEX_TOKEN",
-                crate::commands::InternalAuthKind::ApiKey => "OPENAI_API_KEY",
-            }),
-            "anthropic" => Some(match credential.kind {
-                crate::commands::InternalAuthKind::Authorization => "ANTHROPIC_OAUTH_TOKEN",
-                crate::commands::InternalAuthKind::ApiKey => "ANTHROPIC_API_KEY",
-            }),
-            "gemini" => Some("GEMINI_API_KEY"),
-            "kimi-code" => Some("MOONSHOT_API_KEY"),
-            "moonshot" => Some("MOONSHOT_API_KEY"),
-            _ => None,
-        }) else {
+        let Some((env_name, secret)) = env_pair_for_mapped_provider(mapped, &credential) else {
             continue;
         };
-        if seen.insert(env_name.to_string()) {
-            out.push((env_name.to_string(), credential.secret));
+        if seen.insert(env_name.clone()) {
+            out.push((env_name, secret));
         }
     }
     out
@@ -934,6 +1132,7 @@ fn provider_order_for_runtime(
 pub fn get_zeroclaw_runtime_target() -> ZeroclawRuntimeTarget {
     let env_pairs = zeroclaw_env_pairs_from_clawpal();
     let preferred_model = crate::commands::load_zeroclaw_model_preference();
+    let profile_routes = collect_profile_routes_for_zeroclaw(preferred_model.as_deref());
     let profile_providers = collect_profile_providers_for_zeroclaw();
     let oauth_providers = resolve_oauth_auth_store_source_dir("local")
         .map(|dir| collect_oauth_providers_from_auth_store(dir.as_path()))
@@ -944,9 +1143,31 @@ pub fn get_zeroclaw_runtime_target() -> ZeroclawRuntimeTarget {
         &profile_providers,
         &oauth_providers,
     );
-    let provider_order_text: Vec<String> =
+    let mut provider_order_text: Vec<String> =
         provider_order.iter().map(|p| (*p).to_string()).collect();
+    for route in &profile_routes {
+        if !provider_order_text
+            .iter()
+            .any(|existing| existing.eq_ignore_ascii_case(&route.logical_provider))
+        {
+            provider_order_text.push(route.logical_provider.clone());
+        }
+    }
     let Some(provider) = provider_order.first().copied() else {
+        if let Some(route) = profile_routes.first() {
+            let source = preferred_model
+                .as_deref()
+                .filter(|preferred| route_matches_preferred_model(route, preferred))
+                .map(|_| "preferred_profile")
+                .unwrap_or("profile_route");
+            return ZeroclawRuntimeTarget {
+                provider: Some(route.logical_provider.clone()),
+                model: Some(route.model_arg.clone()),
+                source: source.to_string(),
+                preferred_model,
+                provider_order: provider_order_text,
+            };
+        }
         return ZeroclawRuntimeTarget {
             provider: None,
             model: None,
@@ -1131,13 +1352,14 @@ pub fn run_zeroclaw_message(
     // Per-session model override takes priority over global preference.
     let preferred_model = crate::commands::preferences::lookup_session_model_override(instance_id)
         .or_else(|| crate::commands::load_zeroclaw_model_preference());
+    let profile_routes = collect_profile_routes_for_zeroclaw(preferred_model.as_deref());
     let provider_order = provider_order_for_runtime(
         &env_pairs,
         preferred_model.as_deref(),
         &profile_providers,
         &oauth_providers,
     );
-    if provider_order.is_empty() {
+    if provider_order.is_empty() && profile_routes.is_empty() {
         if env_pairs.is_empty() {
             return Err(
                 "No compatible API key found in ClawPal model profiles for zeroclaw.".to_string(),
@@ -1148,8 +1370,12 @@ pub fn run_zeroclaw_message(
         );
     }
     let mut attempt_errors = Vec::<String>::new();
-    let try_once = |args: Vec<String>, timeout_secs: u64| -> Result<String, String> {
-        let output = run_zeroclaw_with_timeout(&cmd, &args, &env_pairs, timeout_secs)?;
+    let try_once = |args: Vec<String>,
+                    timeout_secs: u64,
+                    env_overrides: &[(String, String)]|
+     -> Result<String, String> {
+        let effective_env_pairs = merge_env_pairs(&env_pairs, env_overrides);
+        let output = run_zeroclaw_with_timeout(&cmd, &args, &effective_env_pairs, timeout_secs)?;
         let stdout = sanitize_output(&String::from_utf8_lossy(&output.stdout));
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         record_zeroclaw_usage(&stdout, &stderr);
@@ -1162,7 +1388,7 @@ pub fn run_zeroclaw_message(
         if session_usage.is_none() {
             if let Ok(mut stats) = usage_store().lock() {
                 if let Some((prompt, completion, total)) =
-                    read_usage_from_builtin_traces(&cmd, &cfg, &env_pairs)
+                    read_usage_from_builtin_traces(&cmd, &cfg, &effective_env_pairs)
                 {
                     stats.usage_calls = stats.usage_calls.saturating_add(1);
                     stats.prompt_tokens = stats.prompt_tokens.saturating_add(prompt);
@@ -1183,6 +1409,39 @@ pub fn run_zeroclaw_message(
         }
         Ok("(zeroclaw returned no output)".to_string())
     };
+
+    let mut preferred_profile_routes = Vec::<ZeroclawProfileRoute>::new();
+    let mut fallback_profile_routes = Vec::<ZeroclawProfileRoute>::new();
+    if let Some(preferred) = preferred_model.as_deref() {
+        for route in profile_routes {
+            if route_matches_preferred_model(&route, preferred) {
+                preferred_profile_routes.push(route);
+            } else {
+                fallback_profile_routes.push(route);
+            }
+        }
+    } else {
+        fallback_profile_routes = profile_routes;
+    }
+
+    for route in preferred_profile_routes.iter() {
+        let timeout_secs = provider_exec_timeout_secs(&route.logical_provider);
+        let mut args = base_args.clone();
+        args.push("-p".to_string());
+        args.push(route.provider_arg.clone());
+        args.push("--model".to_string());
+        args.push(route.model_arg.clone());
+        match try_once(args, timeout_secs, &route.env_overrides) {
+            Ok(v) => return Ok(v),
+            Err(e) => {
+                attempt_errors.push(format!(
+                    "profile={} provider={} model={}: {e}",
+                    route.profile_id, route.provider_arg, route.model_arg
+                ));
+            }
+        }
+    }
+
     for provider in provider_order {
         let timeout_secs = provider_exec_timeout_secs(provider);
         let mut provider_base_args = base_args.clone();
@@ -1196,7 +1455,7 @@ pub fn run_zeroclaw_message(
             Some(provider),
         );
         if model_candidates.is_empty() {
-            match try_once(provider_base_args.clone(), timeout_secs) {
+            match try_once(provider_base_args.clone(), timeout_secs, &[]) {
                 Ok(v) => return Ok(v),
                 Err(e) => {
                     attempt_errors.push(format!("provider={provider} no-model: {e}"));
@@ -1209,7 +1468,7 @@ pub fn run_zeroclaw_message(
             let mut args = provider_base_args.clone();
             args.push("--model".to_string());
             args.push(model.clone());
-            match try_once(args, timeout_secs) {
+            match try_once(args, timeout_secs, &[]) {
                 Ok(v) => return Ok(v),
                 Err(e) => {
                     attempt_errors.push(format!("provider={provider} model={model}: {e}"));
@@ -1226,11 +1485,29 @@ pub fn run_zeroclaw_message(
             }
         }
         if should_try_no_model_fallback(provider) {
-            match try_once(provider_base_args.clone(), timeout_secs) {
+            match try_once(provider_base_args.clone(), timeout_secs, &[]) {
                 Ok(v) => return Ok(v),
                 Err(e) => {
                     attempt_errors.push(format!("provider={provider} fallback: {e}"));
                 }
+            }
+        }
+    }
+
+    for route in fallback_profile_routes.iter() {
+        let timeout_secs = provider_exec_timeout_secs(&route.logical_provider);
+        let mut args = base_args.clone();
+        args.push("-p".to_string());
+        args.push(route.provider_arg.clone());
+        args.push("--model".to_string());
+        args.push(route.model_arg.clone());
+        match try_once(args, timeout_secs, &route.env_overrides) {
+            Ok(v) => return Ok(v),
+            Err(e) => {
+                attempt_errors.push(format!(
+                    "profile={} provider={} model={}: {e}",
+                    route.profile_id, route.provider_arg, route.model_arg
+                ));
             }
         }
     }
@@ -1248,12 +1525,13 @@ pub fn run_zeroclaw_message(
 #[cfg(test)]
 mod tests {
     use super::{
-        credential_clearly_mismatched_for_provider, normalize_model_for_provider,
+        credential_clearly_mismatched_for_provider, merge_env_pairs,
+        normalize_model_for_custom_provider, normalize_model_for_provider,
         normalize_zeroclaw_provider, parse_usage_from_text, parse_usage_from_value,
         pick_oauth_auth_store_source_dir, prepend_preferred_model_candidate,
-        provider_exec_timeout_secs, provider_order_for_runtime, sanitize_instance_namespace,
-        should_try_no_model_fallback, zeroclaw_command_candidates, ZEROCLAW_EXEC_TIMEOUT_SECS,
-        ZEROCLAW_LOCAL_PROVIDER_TIMEOUT_SECS,
+        provider_exec_timeout_secs, provider_order_for_runtime, route_matches_preferred_model,
+        sanitize_instance_namespace, should_try_no_model_fallback, zeroclaw_command_candidates,
+        ZeroclawProfileRoute, ZEROCLAW_EXEC_TIMEOUT_SECS, ZEROCLAW_LOCAL_PROVIDER_TIMEOUT_SECS,
     };
     use serde_json::json;
     use std::collections::HashSet;
@@ -1361,6 +1639,44 @@ mod tests {
             Some("anthropic"),
         );
         assert_eq!(candidates, vec!["claude-sonnet-4-5".to_string()]);
+    }
+
+    #[test]
+    fn custom_model_normalization_strips_profile_provider_prefix() {
+        let normalized = normalize_model_for_custom_provider(
+            "azure-openai/gpt-4o-mini",
+            "azure-openai",
+            Some("openai"),
+        );
+        assert_eq!(normalized, "gpt-4o-mini");
+    }
+
+    #[test]
+    fn preferred_match_supports_provider_model_suffix() {
+        let route = ZeroclawProfileRoute {
+            profile_id: "p1".to_string(),
+            provider_arg: "custom:https://example.com/v1".to_string(),
+            logical_provider: "custom".to_string(),
+            model_arg: "gpt-4.1-mini".to_string(),
+            env_overrides: Vec::new(),
+        };
+        assert!(route_matches_preferred_model(&route, "openai/gpt-4.1-mini"));
+    }
+
+    #[test]
+    fn merge_env_pairs_prefers_route_specific_key() {
+        let base = vec![
+            ("OPENAI_API_KEY".to_string(), "base-openai".to_string()),
+            ("OPENROUTER_API_KEY".to_string(), "base-or".to_string()),
+        ];
+        let overrides = vec![("OPENAI_API_KEY".to_string(), "route-openai".to_string())];
+        let merged = merge_env_pairs(&base, &overrides);
+        assert!(merged
+            .iter()
+            .any(|(key, value)| key == "OPENAI_API_KEY" && value == "route-openai"));
+        assert!(merged
+            .iter()
+            .any(|(key, value)| key == "OPENROUTER_API_KEY" && value == "base-or"));
     }
 
     #[test]
