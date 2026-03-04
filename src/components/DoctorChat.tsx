@@ -6,6 +6,21 @@ import { AgentMessageBubble } from "@/components/AgentMessageBubble";
 import { DiagnosisCard } from "@/components/DiagnosisCard";
 import type { DoctorChatMessage } from "@/lib/types";
 
+function formatTime(ts: number): string {
+  const d = new Date(ts);
+  return d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false });
+}
+
+function formatDate(ts: number): string {
+  return new Date(ts).toLocaleDateString();
+}
+
+function isSameDay(a: number, b: number): boolean {
+  const da = new Date(a);
+  const db = new Date(b);
+  return da.getFullYear() === db.getFullYear() && da.getMonth() === db.getMonth() && da.getDate() === db.getDate();
+}
+
 interface DoctorChatProps {
   messages: DoctorChatMessage[];
   loading: boolean;
@@ -53,20 +68,37 @@ export function DoctorChat({
               {error}
             </div>
           )}
-          {messages.map((msg) => (
-            <div key={msg.id}>
-              <AgentMessageBubble
-                message={msg}
-                onApprove={onApproveInvoke}
-                onReject={onRejectInvoke}
-              />
-              {msg.diagnosisReport && msg.diagnosisReport.items.length > 0 && (
-                <div className="mt-2">
-                  <DiagnosisCard items={msg.diagnosisReport.items} />
+          {messages.map((msg, idx) => {
+            const ts = msg.timestamp;
+            const prevTs = idx > 0 ? messages[idx - 1].timestamp : undefined;
+            const showDateSep = ts && (!prevTs || !isSameDay(prevTs, ts));
+            return (
+              <div key={msg.id}>
+                {showDateSep && (
+                  <div className="text-center text-[10px] text-muted-foreground/60 py-1">
+                    {formatDate(ts)}
+                  </div>
+                )}
+                <div className="relative group">
+                  <AgentMessageBubble
+                    message={msg}
+                    onApprove={onApproveInvoke}
+                    onReject={onRejectInvoke}
+                  />
+                  {ts && (
+                    <div className="text-[10px] text-muted-foreground/50 mt-0.5 px-1">
+                      {formatTime(ts)}
+                    </div>
+                  )}
                 </div>
-              )}
-            </div>
-          ))}
+                {msg.diagnosisReport && msg.diagnosisReport.items.length > 0 && (
+                  <div className="mt-2">
+                    <DiagnosisCard items={msg.diagnosisReport.items} />
+                  </div>
+                )}
+              </div>
+            );
+          })}
           {loading && (
             <div className="text-sm text-muted-foreground animate-pulse">
               {t("doctor.agentThinking")}

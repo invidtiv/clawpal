@@ -27,10 +27,11 @@ import type { PendingCommand, PreviewQueueResult } from "@/lib/types";
 
 interface PendingChangesBarProps {
   onApplied?: () => void;
+  onDiscarded?: () => void;
   showToast: (message: string, type?: "success" | "error") => void;
 }
 
-export function PendingChangesBar({ onApplied, showToast }: PendingChangesBarProps) {
+export function PendingChangesBar({ onApplied, onDiscarded, showToast }: PendingChangesBarProps) {
   const { t } = useTranslation();
   const api = useApi();
   const { isConnected } = useInstance();
@@ -50,6 +51,9 @@ export function PendingChangesBar({ onApplied, showToast }: PendingChangesBarPro
 
   // Discard dialog
   const [showDiscard, setShowDiscard] = useState(false);
+
+  // Cancellation token for in-flight preview calls.
+  const previewCancelledRef = useRef(false);
 
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -87,16 +91,23 @@ export function PendingChangesBar({ onApplied, showToast }: PendingChangesBarPro
   );
 
   const handlePreview = useCallback(() => {
+    previewCancelledRef.current = false;
     setPreviewing(true);
     setApplyError("");
     api
       .previewQueuedCommands()
       .then((result) => {
+        if (previewCancelledRef.current) return;
         setPreview(result);
         setShowPreview(true);
       })
-      .catch((e) => { if (!hasGuidanceEmitted(e)) showToast(String(e), "error"); })
-      .finally(() => setPreviewing(false));
+      .catch((e) => {
+        if (previewCancelledRef.current) return;
+        if (!hasGuidanceEmitted(e)) showToast(String(e), "error");
+      })
+      .finally(() => {
+        if (!previewCancelledRef.current) setPreviewing(false);
+      });
   }, [api, showToast]);
 
   const handleApply = useCallback(() => {
@@ -125,17 +136,25 @@ export function PendingChangesBar({ onApplied, showToast }: PendingChangesBarPro
   }, [api, refreshCount, showToast, onApplied, t]);
 
   const handleDiscard = useCallback(() => {
+    // Cancel any in-flight preview immediately so its result is ignored.
+    previewCancelledRef.current = true;
+    setPreviewing(false);
+    setShowPreview(false);
+    setPreview(null);
+
     api
       .discardQueuedCommands()
       .then(() => {
         setShowDiscard(false);
         setExpanded(false);
         setCommands([]);
+        setCount(0);
         refreshCount();
         showToast(t("queue.discarded"));
+        onDiscarded?.();
       })
       .catch((e) => showToast(t("queue.discardFailed", { error: String(e) }), "error"));
-  }, [api, refreshCount, showToast, t]);
+  }, [api, refreshCount, showToast, t, onDiscarded]);
 
   if (count === 0) return null;
 

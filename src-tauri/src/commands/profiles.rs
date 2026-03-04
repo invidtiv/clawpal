@@ -660,18 +660,36 @@ pub async fn remote_sync_profiles_to_local_auth(
     let mut unresolved_keys = 0usize;
     let mut failed_key_resolves = 0usize;
 
+    // Pre-fetch all needed remote env vars and auth-store files in bulk
+    // (~3 SSH calls total instead of 5-7 per profile).
+    let auth_cache = match RemoteAuthCache::build(&pool, &host_id, &remote_profiles).await {
+        Ok(cache) => Some(cache),
+        Err(_) => None,
+    };
+
     for remote in &remote_profiles {
         let mut resolved_api_key: Option<String> = None;
-        match resolve_remote_profile_api_key(&pool, &host_id, remote).await {
-            Ok(api_key) if !api_key.trim().is_empty() => {
-                resolved_api_key = Some(api_key);
+        if let Some(ref cache) = auth_cache {
+            let key = cache.resolve_for_profile(remote);
+            if !key.trim().is_empty() {
+                resolved_api_key = Some(key);
                 resolved_keys += 1;
-            }
-            Ok(_) => {
+            } else {
                 unresolved_keys += 1;
             }
-            Err(_) => {
-                failed_key_resolves += 1;
+        } else {
+            // Fallback to per-profile resolution if cache build failed.
+            match resolve_remote_profile_api_key(&pool, &host_id, remote).await {
+                Ok(api_key) if !api_key.trim().is_empty() => {
+                    resolved_api_key = Some(api_key);
+                    resolved_keys += 1;
+                }
+                Ok(_) => {
+                    unresolved_keys += 1;
+                }
+                Err(_) => {
+                    failed_key_resolves += 1;
+                }
             }
         }
 

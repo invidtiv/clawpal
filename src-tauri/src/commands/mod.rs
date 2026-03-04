@@ -622,6 +622,7 @@ fn parse_agents_cli_output(
 ) -> Result<Vec<AgentOverview>, String> {
     let arr = json
         .as_array()
+        .or_else(|| json.get("agents").and_then(Value::as_array))
         .ok_or("agents list output is not an array")?;
     let paths = if online_set.is_none() {
         Some(resolve_paths())
@@ -3459,54 +3460,35 @@ fn resolve_profile_credential_with_priority(
     profile: &ModelProfile,
     base_dir: &Path,
 ) -> Option<(InternalProviderCredential, u8)> {
-    // 1. Try auth_ref candidates:
-    //    - explicit profile auth_ref
-    //    - provider:default fallback (if auth_ref missing)
-    //    First as env var name, then as key in auth store.
+    // 1. Try explicit auth_ref (user-specified) as env var, then auth store.
     let auth_ref = profile.auth_ref.trim();
-    let mut auth_ref_candidates = Vec::<String>::new();
-    if !auth_ref.is_empty() {
-        auth_ref_candidates.push(auth_ref.to_string());
-    }
-    let provider_fallback = profile.provider.trim().to_ascii_lowercase();
-    if !provider_fallback.is_empty() {
-        let fallback_ref = format!("{provider_fallback}:default");
-        if !auth_ref_candidates
-            .iter()
-            .any(|candidate| candidate == &fallback_ref)
-        {
-            auth_ref_candidates.push(fallback_ref);
-        }
-    }
-
-    for candidate in &auth_ref_candidates {
-        if !is_valid_env_var_name(candidate) {
-            continue;
-        }
-        if let Ok(val) = std::env::var(candidate) {
-            let trimmed = val.trim();
-            if trimmed.is_empty() {
-                continue;
+    let has_explicit_auth_ref = !auth_ref.is_empty();
+    if has_explicit_auth_ref {
+        if is_valid_env_var_name(auth_ref) {
+            if let Ok(val) = std::env::var(auth_ref) {
+                let trimmed = val.trim();
+                if !trimmed.is_empty() {
+                    let kind =
+                        infer_auth_kind(&profile.provider, trimmed, InternalAuthKind::ApiKey);
+                    return Some((
+                        InternalProviderCredential {
+                            secret: trimmed.to_string(),
+                            kind,
+                        },
+                        40,
+                    ));
+                }
             }
-            let kind = infer_auth_kind(&profile.provider, trimmed, InternalAuthKind::ApiKey);
-            return Some((
-                InternalProviderCredential {
-                    secret: trimmed.to_string(),
-                    kind,
-                },
-                40,
-            ));
         }
-    }
-
-    for candidate in &auth_ref_candidates {
-        // Keys are stored at: {base_dir}/agents/{agent}/agent/{auth-profiles.json|auth.json}
-        if let Some(credential) = resolve_credential_from_agent_auth_profiles(base_dir, candidate) {
+        if let Some(credential) =
+            resolve_credential_from_agent_auth_profiles(base_dir, auth_ref)
+        {
             return Some((credential, 30));
         }
     }
 
-    // 2. Direct api_key field (legacy/manual ClawPal input)
+    // 2. Direct api_key field — takes priority over fallback auth_ref candidates
+    //    so a user-entered key is never shadowed by stale auth-store entries.
     if let Some(ref key) = profile.api_key {
         let trimmed = key.trim();
         if !trimmed.is_empty() {
@@ -3521,7 +3503,37 @@ fn resolve_profile_credential_with_priority(
         }
     }
 
-    // 3. Provider-based env var conventions.
+    // 3. Fallback: provider:default auth_ref (auto-generated) — env var then auth store.
+    let provider_fallback = profile.provider.trim().to_ascii_lowercase();
+    if !provider_fallback.is_empty() {
+        let fallback_ref = format!("{provider_fallback}:default");
+        let skip = has_explicit_auth_ref && auth_ref == fallback_ref;
+        if !skip {
+            if is_valid_env_var_name(&fallback_ref) {
+                if let Ok(val) = std::env::var(&fallback_ref) {
+                    let trimmed = val.trim();
+                    if !trimmed.is_empty() {
+                        let kind =
+                            infer_auth_kind(&profile.provider, trimmed, InternalAuthKind::ApiKey);
+                        return Some((
+                            InternalProviderCredential {
+                                secret: trimmed.to_string(),
+                                kind,
+                            },
+                            15,
+                        ));
+                    }
+                }
+            }
+            if let Some(credential) =
+                resolve_credential_from_agent_auth_profiles(base_dir, &fallback_ref)
+            {
+                return Some((credential, 15));
+            }
+        }
+    }
+
+    // 4. Provider-based env var conventions.
     for env_name in provider_env_var_candidates(&profile.provider) {
         if let Ok(val) = std::env::var(&env_name) {
             let trimmed = val.trim();
@@ -6471,31 +6483,16 @@ async fn resolve_remote_profile_api_key(
     host_id: &str,
     profile: &ModelProfile,
 ) -> Result<String, String> {
-    let mut auth_refs = Vec::<String>::new();
     let auth_ref = profile.auth_ref.trim();
-    if !auth_ref.is_empty() {
-        auth_refs.push(auth_ref.to_string());
-    }
-    let provider = profile.provider.trim().to_lowercase();
-    if !provider.is_empty() {
-        let fallback = format!("{provider}:default");
-        if !auth_refs.iter().any(|candidate| candidate == &fallback) {
-            auth_refs.push(fallback);
-        }
-    }
+    let has_explicit_auth_ref = !auth_ref.is_empty();
 
-    for auth_ref in &auth_refs {
-        // Try auth_ref as remote env var name directly (e.g. OPENAI_API_KEY)
-        if auth_ref
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_')
-        {
+    // 1. Explicit auth_ref (user-specified): env var, then auth store.
+    if has_explicit_auth_ref {
+        if is_valid_env_var_name(auth_ref) {
             if let Some(key) = read_remote_env_var(pool, host_id, auth_ref).await? {
                 return Ok(key);
             }
         }
-
-        // Try auth_ref from remote agent auth-profiles.json
         if let Some(key) =
             resolve_remote_key_from_agent_auth_profiles(pool, host_id, auth_ref).await?
         {
@@ -6503,14 +6500,7 @@ async fn resolve_remote_profile_api_key(
         }
     }
 
-    // Try provider-based env conventions as fallback
-    for env_name in provider_env_var_candidates(&profile.provider) {
-        if let Some(key) = read_remote_env_var(pool, host_id, &env_name).await? {
-            return Ok(key);
-        }
-    }
-
-    // Fallback to direct apiKey only when no authoritative source is resolved.
+    // 2. Direct api_key before fallback auth refs/env conventions.
     if let Some(key) = &profile.api_key {
         let trimmed_key = key.trim();
         if !trimmed_key.is_empty() {
@@ -6518,7 +6508,199 @@ async fn resolve_remote_profile_api_key(
         }
     }
 
+    // 3. Fallback provider:default auth_ref from auth store.
+    let provider = profile.provider.trim().to_lowercase();
+    if !provider.is_empty() {
+        let fallback = format!("{provider}:default");
+        let skip = has_explicit_auth_ref && auth_ref == fallback;
+        if !skip {
+            if let Some(key) =
+                resolve_remote_key_from_agent_auth_profiles(pool, host_id, &fallback).await?
+            {
+                return Ok(key);
+            }
+        }
+    }
+
+    // 4. Provider env var conventions.
+    for env_name in provider_env_var_candidates(&profile.provider) {
+        if let Some(key) = read_remote_env_var(pool, host_id, &env_name).await? {
+            return Ok(key);
+        }
+    }
+
     Ok(String::new())
+}
+
+// ---------------------------------------------------------------------------
+// Batched remote auth resolution — pre-fetches env vars and auth store files
+// in bulk (2-3 SSH calls total) instead of 5-7 per profile.
+// ---------------------------------------------------------------------------
+
+struct RemoteAuthCache {
+    env_vars: HashMap<String, String>,
+    auth_store_files: Vec<Value>,
+}
+
+impl RemoteAuthCache {
+    /// Build cache by collecting all needed env var names from all profiles
+    /// and reading them + all auth-store files in bulk.
+    async fn build(
+        pool: &SshConnectionPool,
+        host_id: &str,
+        profiles: &[ModelProfile],
+    ) -> Result<Self, String> {
+        // Collect all unique env var names needed across all profiles.
+        let mut env_var_names = Vec::<String>::new();
+        let mut seen_env = std::collections::HashSet::<String>::new();
+        for profile in profiles {
+            let auth_ref = profile.auth_ref.trim();
+            if !auth_ref.is_empty() && is_valid_env_var_name(auth_ref) && seen_env.insert(auth_ref.to_string()) {
+                env_var_names.push(auth_ref.to_string());
+            }
+            for env_name in provider_env_var_candidates(&profile.provider) {
+                if seen_env.insert(env_name.clone()) {
+                    env_var_names.push(env_name);
+                }
+            }
+        }
+
+        // Batch-read all env vars in a single SSH call using printenv.
+        // We use a delimiter to parse multi-value output safely.
+        let env_vars = if env_var_names.is_empty() {
+            HashMap::new()
+        } else {
+            Self::batch_read_env_vars(pool, host_id, &env_var_names).await?
+        };
+
+        // Read all auth-store files from remote agents.
+        let auth_store_files = Self::read_auth_store_files(pool, host_id).await?;
+
+        Ok(Self {
+            env_vars,
+            auth_store_files,
+        })
+    }
+
+    async fn batch_read_env_vars(
+        pool: &SshConnectionPool,
+        host_id: &str,
+        names: &[String],
+    ) -> Result<HashMap<String, String>, String> {
+        // Build a shell script that prints "NAME=VALUE\0" for each set var.
+        // Using NUL delimiter avoids issues with newlines in values.
+        let mut script = String::from("for __v in");
+        for name in names {
+            // All names are validated by is_valid_env_var_name, safe to interpolate.
+            script.push(' ');
+            script.push_str(name);
+        }
+        script.push_str("; do eval \"__val=\\${$__v+__SET__}\\${$__v}\"; ");
+        script.push_str("case \"$__val\" in __SET__*) printf '%s=%s\\n' \"$__v\" \"${__val#__SET__}\";; esac; done");
+
+        let out = pool.exec_login(host_id, &script).await
+            .map_err(|e| format!("Failed to batch-read remote env vars: {e}"))?;
+
+        let mut map = HashMap::new();
+        for line in out.stdout.lines() {
+            if let Some(eq_pos) = line.find('=') {
+                let key = &line[..eq_pos];
+                let val = line[eq_pos + 1..].trim();
+                if !val.is_empty() {
+                    map.insert(key.to_string(), val.to_string());
+                }
+            }
+        }
+        Ok(map)
+    }
+
+    async fn read_auth_store_files(
+        pool: &SshConnectionPool,
+        host_id: &str,
+    ) -> Result<Vec<Value>, String> {
+        let roots = resolve_remote_openclaw_roots(pool, host_id).await?;
+        let mut store_files = Vec::new();
+
+        for root in &roots {
+            let agents_path = format!("{}/agents", root.trim_end_matches('/'));
+            let entries = match pool.sftp_list(host_id, &agents_path).await {
+                Ok(entries) => entries,
+                Err(e) if is_remote_missing_path_error(&e) => continue,
+                Err(_) => continue,
+            };
+
+            for agent in entries.into_iter().filter(|entry| entry.is_dir) {
+                let agent_dir = format!("{}/agents/{}/agent", root.trim_end_matches('/'), agent.name);
+                for file_name in ["auth-profiles.json", "auth.json"] {
+                    let auth_file = format!("{agent_dir}/{file_name}");
+                    let text = match pool.sftp_read(host_id, &auth_file).await {
+                        Ok(text) => text,
+                        Err(_) => continue,
+                    };
+                    if let Ok(data) = serde_json::from_str::<Value>(&text) {
+                        store_files.push(data);
+                    }
+                }
+            }
+        }
+        Ok(store_files)
+    }
+
+    /// Resolve API key for a single profile using cached data.
+    fn resolve_for_profile(&self, profile: &ModelProfile) -> String {
+        let auth_ref = profile.auth_ref.trim();
+        let has_explicit_auth_ref = !auth_ref.is_empty();
+
+        // 1. Explicit auth_ref as env var, then auth store.
+        if has_explicit_auth_ref {
+            if is_valid_env_var_name(auth_ref) {
+                if let Some(val) = self.env_vars.get(auth_ref) {
+                    return val.clone();
+                }
+            }
+            if let Some(key) = self.find_in_auth_stores(auth_ref) {
+                return key;
+            }
+        }
+
+        // 2. Direct api_key — before fallback auth_ref.
+        if let Some(ref key) = profile.api_key {
+            let trimmed = key.trim();
+            if !trimmed.is_empty() {
+                return trimmed.to_string();
+            }
+        }
+
+        // 3. Fallback provider:default auth_ref.
+        let provider = profile.provider.trim().to_lowercase();
+        if !provider.is_empty() {
+            let fallback = format!("{provider}:default");
+            let skip = has_explicit_auth_ref && auth_ref == fallback;
+            if !skip {
+                if let Some(key) = self.find_in_auth_stores(&fallback) {
+                    return key;
+                }
+            }
+        }
+
+        // 4. Provider env var conventions.
+        for env_name in provider_env_var_candidates(&profile.provider) {
+            if let Some(val) = self.env_vars.get(&env_name) {
+                return val.clone();
+            }
+        }
+
+        String::new()
+    }
+
+    fn find_in_auth_stores(&self, auth_ref: &str) -> Option<String> {
+        for data in &self.auth_store_files {
+            if let Some(key) = resolve_key_from_auth_store_json(data, auth_ref) {
+                return Some(key);
+            }
+        }
+        None
+    }
 }
 
 #[tauri::command]

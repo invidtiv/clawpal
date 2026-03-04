@@ -541,6 +541,8 @@ export interface DoctorChatMessage {
   invokeId?: string;
   status?: "pending" | "approved" | "rejected" | "auto";
   diagnosisReport?: { items: DiagnosisReportItem[] };
+  /** Epoch milliseconds when the message was created. */
+  timestamp?: number;
 }
 
 export interface ApplyQueueResult {

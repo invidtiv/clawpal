@@ -1573,6 +1573,7 @@ export function App() {
             <PendingChangesBar
               showToast={showToast}
               onApplied={bumpConfigVersion}
+              onDiscarded={bumpConfigVersion}
             />
           </Suspense>
         )}

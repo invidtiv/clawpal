@@ -328,7 +328,7 @@ export function useDoctorAgent(options: UseDoctorAgentOptions = {}) {
           const last = prev[prev.length - 1];
           const next = (!isNewTurn && last?.role === "assistant" && !last.invoke)
             ? [...prev.slice(0, -1), { ...last, content: text }]
-            : [...prev, { id: nextMsgId(), role: "assistant" as const, content: text }];
+            : [...prev, { id: nextMsgId(), role: "assistant" as const, content: text, timestamp: Date.now() }];
           persistDoctorMessages(next);
           return next;
         });
@@ -350,7 +350,7 @@ export function useDoctorAgent(options: UseDoctorAgentOptions = {}) {
           const last = prev[prev.length - 1];
           const next = (!isNewTurn && last?.role === "assistant" && !last.invoke)
             ? [...prev.slice(0, -1), { ...last, content: text }]
-            : [...prev, { id: nextMsgId(), role: "assistant" as const, content: text }];
+            : [...prev, { id: nextMsgId(), role: "assistant" as const, content: text, timestamp: Date.now() }];
           persistDoctorMessages(next);
           return next;
         });
@@ -385,6 +385,7 @@ export function useDoctorAgent(options: UseDoctorAgentOptions = {}) {
               role: "assistant" as const,
               content: "",
               diagnosisReport: { items },
+              timestamp: Date.now(),
             },
           ];
           persistDoctorMessages(next);
@@ -417,6 +418,7 @@ export function useDoctorAgent(options: UseDoctorAgentOptions = {}) {
               content: invoke.command,
               invoke,
               status: (isFullAuto || isSafeAuto) ? ("auto" as const) : ("pending" as const),
+              timestamp: Date.now(),
             },
           ];
           persistDoctorMessages(next);
@@ -455,7 +457,7 @@ export function useDoctorAgent(options: UseDoctorAgentOptions = {}) {
         // Deduplicate: only append result if we haven't already
         setMessages((prev) => {
           if (prev.some((m) => m.role === "tool-result" && m.invokeId === id)) return prev;
-          const resultMsg = { id: nextMsgId(), role: "tool-result" as const, content: JSON.stringify(result, null, 2), invokeResult: result, invokeId: id };
+          const resultMsg = { id: nextMsgId(), role: "tool-result" as const, content: JSON.stringify(result, null, 2), invokeResult: result, invokeId: id, timestamp: Date.now() };
           const callIdx = prev.findIndex((m) => m.role === "tool-call" && m.invoke?.id === id);
           if (callIdx === -1) {
             const next = [...prev, resultMsg];
@@ -659,6 +661,7 @@ export function useDoctorAgent(options: UseDoctorAgentOptions = {}) {
                 id: chatMessageId,
                 role: "assistant" as const,
                 content: assistantText,
+                timestamp: Date.now(),
               }];
               persistDoctorMessages(next);
               return next;
@@ -684,7 +687,7 @@ export function useDoctorAgent(options: UseDoctorAgentOptions = {}) {
   const sendMessage = useCallback(async (message: string) => {
     setLoading(true);
     streamingRef.current = "";
-    const userMessage = { id: nextMsgId(), role: "user" as const, content: message };
+    const userMessage = { id: nextMsgId(), role: "user" as const, content: message, timestamp: Date.now() };
     setMessages((prev) => {
       const next = [...prev, userMessage];
       persistDoctorMessages(next);
@@ -720,7 +723,7 @@ export function useDoctorAgent(options: UseDoctorAgentOptions = {}) {
           throw new Error("No text returned from openclaw diagnosis");
         }
         setMessages((prev) => {
-          const next = [...prev, { id: nextMsgId(), role: "assistant" as const, content: assistantText }];
+          const next = [...prev, { id: nextMsgId(), role: "assistant" as const, content: assistantText, timestamp: Date.now() }];
           persistDoctorMessages(next);
           return next;
         });
