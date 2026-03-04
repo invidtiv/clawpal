@@ -1495,19 +1495,21 @@ pub fn run_zeroclaw_message(
                     })
                     .cloned(),
             );
-            candidates.sort_by_key(|route| doctor_fast_route_rank(route, preferred_model.as_deref()));
+            candidates
+                .sort_by_key(|route| doctor_fast_route_rank(route, preferred_model.as_deref()));
             let mut dedupe = HashSet::<String>::new();
             candidates.retain(|route| {
-                dedupe.insert(build_attempt_key(&route.provider_arg, Some(&route.model_arg)))
+                dedupe.insert(build_attempt_key(
+                    &route.provider_arg,
+                    Some(&route.model_arg),
+                ))
             });
             let mut iter = candidates.into_iter();
             preferred_profile_routes = iter
                 .by_ref()
                 .take(ZEROCLAW_DOCTOR_FAST_MAX_PROFILE_ROUTES)
                 .collect();
-            fallback_profile_routes = iter
-                .take(ZEROCLAW_DOCTOR_FAST_MAX_PROFILE_ROUTES)
-                .collect();
+            fallback_profile_routes = iter.take(ZEROCLAW_DOCTOR_FAST_MAX_PROFILE_ROUTES).collect();
         } else {
             fallback_profile_routes.clear();
         }

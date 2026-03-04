@@ -443,8 +443,8 @@ pub async fn explain_operation_error(
 #[cfg(test)]
 mod tests {
     use super::{
-        local_openclaw_not_installed_guidance, parse_guidance_json, rules_fallback,
-        GuidanceAction, OpenclawProbe,
+        local_openclaw_not_installed_guidance, parse_guidance_json, rules_fallback, GuidanceAction,
+        OpenclawProbe,
     };
 
     #[test]
