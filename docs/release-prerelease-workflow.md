@@ -56,12 +56,13 @@
 9. Linux 目标安装系统依赖（仅 `ubuntu-22.04`）
 10. signed 模式下才执行 Apple 证书导入与 API key 写入（macOS）
 11. macOS signed 模式会从导入证书自动解析 `Developer ID Application` identity
-12. `npm ci`
-13. 计算构建参数（Windows prerelease 追加 `--bundles nsis`）
-14. 执行 Tauri 打包（signed 或 unsigned 路径）
-15. unsigned 模式将 release 资产重命名为 `*-unsigned.*`
-16. 上传 Windows portable 与 `zeroclaw` sidecar（unsigned 模式同样加后缀）
-17. macOS 清理临时 keychain 与 API key 文件
+12. macOS signed 模式会先对 `src-tauri/resources/zeroclaw/darwin-{aarch64,x64}/zeroclaw` 显式 `codesign --timestamp --options runtime`
+13. `npm ci`
+14. 计算构建参数（Windows prerelease 追加 `--bundles nsis`）
+15. 执行 Tauri 打包（signed 或 unsigned 路径）
+16. unsigned 模式将 release 资产重命名为 `*-unsigned.*`
+17. 上传 Windows portable 与 `zeroclaw` sidecar（unsigned 模式同样加后缀）
+18. macOS 清理临时 keychain 与 API key 文件
 
 ## 5. Release 与 Prerelease 的差异
 
