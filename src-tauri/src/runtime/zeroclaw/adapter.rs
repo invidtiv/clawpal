@@ -7,7 +7,7 @@ use serde_json::json;
 use serde_json::Value;
 
 use super::process::run_zeroclaw_message;
-use super::session::{append_history, build_prompt_with_history, reset_history};
+use super::session::{append_history, build_prompt_with_history_fast, reset_history};
 
 pub struct ZeroclawDoctorAdapter;
 
@@ -163,7 +163,7 @@ impl RuntimeAdapter for ZeroclawDoctorAdapter {
         message: &str,
     ) -> Result<Vec<RuntimeEvent>, RuntimeError> {
         let session_key = key.storage_key();
-        let prompt = build_prompt_with_history(&session_key, message);
+        let prompt = build_prompt_with_history_fast(&session_key, message);
         let guarded = Self::doctor_domain_prompt(key, &prompt);
         let text = run_zeroclaw_message(&guarded, &key.instance_id, &key.storage_key())
             .map(Self::normalize_doctor_output)

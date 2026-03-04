@@ -57,10 +57,12 @@ struct ConnectedHost {
 pub struct SshConnectionPool {
     connections: Mutex<HashMap<String, ConnectedHost>>,
     transfer_counters: Mutex<HashMap<String, HostTransferCounter>>,
+    sftp_read_backoff_until_ms: Mutex<HashMap<String, u64>>,
 }
 
 const SSH_OP_MAX_CONCURRENCY_PER_HOST: usize = 2;
 const SSH_TRANSFER_IDLE_DECAY_MS: u64 = 8_000;
+const SFTP_READ_BACKOFF_MS: u64 = 60_000;
 
 impl SshConnectionPool {
     fn format_connection_ids(connections: &HashMap<String, ConnectedHost>) -> String {
@@ -73,6 +75,7 @@ impl SshConnectionPool {
         Self {
             connections: Mutex::new(HashMap::new()),
             transfer_counters: Mutex::new(HashMap::new()),
+            sftp_read_backoff_until_ms: Mutex::new(HashMap::new()),
         }
     }
 
@@ -140,9 +143,8 @@ impl SshConnectionPool {
             counter.total_upload_bytes = counter.total_upload_bytes.saturating_add(upload_bytes);
         }
         if download_bytes > 0 {
-            counter.total_download_bytes = counter
-                .total_download_bytes
-                .saturating_add(download_bytes);
+            counter.total_download_bytes =
+                counter.total_download_bytes.saturating_add(download_bytes);
         }
         counter.updated_at_ms = now_ms;
         Self::refresh_counter_speed(counter, now_ms);
@@ -234,6 +236,10 @@ impl SshConnectionPool {
             .await
             .entry(config.id.clone())
             .or_default();
+        self.sftp_read_backoff_until_ms
+            .lock()
+            .await
+            .remove(&config.id);
         crate::commands::logs::log_dev(format!(
             "[dev][ssh_pool] connect_with_passphrase cached id={} total={}",
             config.id,
@@ -251,6 +257,7 @@ impl SshConnectionPool {
                 "[dev][ssh_pool] disconnect removed id={} home={}",
                 id, host.home_dir
             ));
+            self.sftp_read_backoff_until_ms.lock().await.remove(id);
         } else {
             let known = {
                 let guard = self.connections.lock().await;
@@ -404,6 +411,22 @@ impl SshConnectionPool {
             ));
             message
         })?;
+        let now_ms = Self::now_ms();
+        if self.is_sftp_read_backoff_active(id, now_ms).await {
+            crate::commands::logs::log_dev(format!(
+                "[dev][ssh_pool] sftp_read skip primary due backoff id={} path={}",
+                id, resolved
+            ));
+            let bytes = self.exec_cat_read_with_retry(&conn, &resolved).await?;
+            crate::commands::logs::log_dev(format!(
+                "[dev][ssh_pool] sftp_read bytes id={} path={} bytes={} source=exec-fallback(backoff)",
+                id,
+                resolved,
+                bytes.len()
+            ));
+            self.record_transfer(id, 0, bytes.len() as u64).await;
+            return Ok(String::from_utf8_lossy(&bytes).to_string());
+        }
         let mut bytes = {
             let session = conn.session.lock().await.clone();
             session.sftp_read(&resolved).await
@@ -413,6 +436,9 @@ impl SshConnectionPool {
                 "[dev][ssh_pool] sftp_read primary error id={} path={} error={}",
                 id, resolved, err
             ));
+            if should_backoff_sftp_read(&err.to_string()) {
+                self.set_sftp_read_backoff(id, Self::now_ms()).await;
+            }
             if is_retryable_session_error(&err.to_string()) {
                 self.refresh_session(&conn).await?;
                 let session = conn.session.lock().await.clone();
@@ -420,9 +446,15 @@ impl SshConnectionPool {
             }
         }
         let bytes = match bytes {
-            Ok(bytes) => bytes,
+            Ok(bytes) => {
+                self.clear_sftp_read_backoff(id).await;
+                bytes
+            }
             Err(primary_err) => {
                 let primary_msg = primary_err.to_string();
+                if should_backoff_sftp_read(&primary_msg) {
+                    self.set_sftp_read_backoff(id, Self::now_ms()).await;
+                }
                 if !should_attempt_sftp_exec_fallback(&primary_msg) {
                     crate::commands::logs::log_dev(format!(
                         "[dev][ssh_pool] sftp_read failed without fallback id={} path={} error={}",
@@ -568,6 +600,34 @@ impl SshConnectionPool {
         Ok(conn.clone())
     }
 
+    async fn is_sftp_read_backoff_active(&self, id: &str, now_ms: u64) -> bool {
+        let mut guard = self.sftp_read_backoff_until_ms.lock().await;
+        let Some(until_ms) = guard.get(id).copied() else {
+            return false;
+        };
+        if now_ms < until_ms {
+            return true;
+        }
+        guard.remove(id);
+        false
+    }
+
+    async fn set_sftp_read_backoff(&self, id: &str, now_ms: u64) {
+        let until_ms = now_ms.saturating_add(SFTP_READ_BACKOFF_MS);
+        self.sftp_read_backoff_until_ms
+            .lock()
+            .await
+            .insert(id.to_string(), until_ms);
+        crate::commands::logs::log_dev(format!(
+            "[dev][ssh_pool] sftp_read backoff enabled id={} until_ms={}",
+            id, until_ms
+        ));
+    }
+
+    async fn clear_sftp_read_backoff(&self, id: &str) {
+        self.sftp_read_backoff_until_ms.lock().await.remove(id);
+    }
+
     async fn refresh_session(&self, conn: &ConnectedHost) -> Result<(), String> {
         crate::commands::logs::log_dev(format!(
             "[dev][ssh_pool] refresh_session begin id={}",
@@ -688,11 +748,21 @@ fn should_attempt_sftp_exec_fallback(message: &str) -> bool {
         || lowered.contains("connection closed")
 }
 
+fn should_backoff_sftp_read(message: &str) -> bool {
+    let lowered = message.to_ascii_lowercase();
+    lowered.contains("timed out")
+        || lowered.contains("timeout")
+        || lowered.contains("open channel")
+        || lowered.contains("connection reset")
+        || lowered.contains("broken pipe")
+        || lowered.contains("connection closed")
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         build_login_shell_wrapper, shell_quote, should_attempt_sftp_exec_fallback,
-        HostTransferCounter, SshConnectionPool,
+        should_backoff_sftp_read, HostTransferCounter, SshConnectionPool,
     };
 
     #[test]
@@ -716,6 +786,19 @@ mod tests {
             "ssh open channel failed: channel closed"
         ));
         assert!(!should_attempt_sftp_exec_fallback(
+            "open /tmp/missing.json: No such file or directory"
+        ));
+    }
+
+    #[test]
+    fn sftp_backoff_only_triggers_for_transport_like_errors() {
+        assert!(should_backoff_sftp_read(
+            "sftp failed: russh sftp_read timed out after 30s"
+        ));
+        assert!(should_backoff_sftp_read(
+            "ssh open channel failed: channel closed"
+        ));
+        assert!(!should_backoff_sftp_read(
             "open /tmp/missing.json: No such file or directory"
         ));
     }

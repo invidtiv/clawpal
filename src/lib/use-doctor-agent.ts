@@ -481,8 +481,22 @@ export function useDoctorAgent(options: UseDoctorAgentOptions = {}) {
       bind<{ message: string; code?: string }>("doctor:error", (e) => {
         const code = e.payload.code?.trim();
         const message = e.payload.message || "Unknown runtime error";
-        setError(code ? `[${code}] ${message}` : message);
+        const display = code ? `[${code}] ${message}` : message;
+        setError(display);
         setLoading(false);
+        setMessages((prev) => {
+          const next = [
+            ...prev,
+            {
+              id: nextMsgId(),
+              role: "assistant" as const,
+              content: `[runtime error] ${display}`,
+              timestamp: Date.now(),
+            },
+          ];
+          persistDoctorMessages(next);
+          return next;
+        });
       }),
     ]).catch((err) => {
       if (!disposed) {
@@ -687,6 +701,11 @@ export function useDoctorAgent(options: UseDoctorAgentOptions = {}) {
   const sendMessage = useCallback(async (message: string) => {
     setLoading(true);
     streamingRef.current = "";
+    // Cached sessions can be restored without calling startDiagnosis again.
+    // Re-activate event intake before sending so chat-final isn't dropped.
+    if (engineRef.current === "zeroclaw") {
+      sessionActiveRef.current = true;
+    }
     const userMessage = { id: nextMsgId(), role: "user" as const, content: message, timestamp: Date.now() };
     setMessages((prev) => {
       const next = [...prev, userMessage];
@@ -730,6 +749,14 @@ export function useDoctorAgent(options: UseDoctorAgentOptions = {}) {
         setLoading(false);
       } else {
         await api.doctorSendMessage(message, sessionKeyRef.current, agentIdRef.current, instanceScopeRef.current);
+        // Zeroclaw send is request/response over Tauri command. If runtime
+        // events are dropped on the frontend side, avoid indefinite "thinking".
+        if (
+          sessionKeyRef.current === sessionKeyForRequest
+          && engineRef.current === engineForRequest
+        ) {
+          setLoading(false);
+        }
       }
     } catch (err) {
       if (

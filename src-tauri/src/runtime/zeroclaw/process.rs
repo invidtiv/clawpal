@@ -52,6 +52,10 @@ fn now_ms() -> u64 {
 const ZEROCLAW_MESSAGE_MAX_BYTES: usize = 24 * 1024;
 const ZEROCLAW_EXEC_TIMEOUT_SECS: u64 = 90;
 const ZEROCLAW_LOCAL_PROVIDER_TIMEOUT_SECS: u64 = 45;
+const ZEROCLAW_DOCTOR_FAST_TIMEOUT_SECS: u64 = 15;
+const ZEROCLAW_DOCTOR_FAST_MAX_ATTEMPTS: usize = 2;
+const ZEROCLAW_DOCTOR_FAST_MAX_PROVIDERS: usize = 2;
+const ZEROCLAW_DOCTOR_FAST_MAX_PROFILE_ROUTES: usize = 1;
 
 fn truncate_utf8_tail(input: &str, max_bytes: usize) -> String {
     if input.len() <= max_bytes {
@@ -296,20 +300,17 @@ fn read_usage_from_builtin_traces(
     env_pairs: &[(String, String)],
 ) -> Option<(u64, u64, u64)> {
     let cfg_arg = config_dir.to_string_lossy().to_string();
-    let output = Command::new(cmd)
-        .envs(env_pairs.iter().cloned())
-        .args([
-            "--config-dir",
-            cfg_arg.as_str(),
-            "doctor",
-            "traces",
-            "--event",
-            "model_reply",
-            "--limit",
-            "1",
-        ])
-        .output()
-        .ok()?;
+    let args = vec![
+        "--config-dir".to_string(),
+        cfg_arg,
+        "doctor".to_string(),
+        "traces".to_string(),
+        "--event".to_string(),
+        "model_reply".to_string(),
+        "--limit".to_string(),
+        "1".to_string(),
+    ];
+    let output = run_zeroclaw_with_timeout(cmd, &args, env_pairs, 2).ok()?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     parse_usage_from_text(stdout.as_ref()).or_else(|| parse_usage_from_text(stderr.as_ref()))
@@ -739,9 +740,18 @@ fn route_matches_preferred_model(route: &ZeroclawProfileRoute, preferred_model: 
     if preferred == route_model || preferred.ends_with(&format!("/{route_model}")) {
         return true;
     }
-    let Some((provider, _)) = preferred.split_once('/') else {
-        return false;
+    let Some((provider, preferred_tail)) = preferred.split_once('/') else {
+        return route
+            .logical_provider
+            .trim()
+            .eq_ignore_ascii_case(preferred.as_str());
     };
+    // If preferred model includes a concrete model id, only exact model
+    // matches should be considered "preferred". Provider-level matches
+    // are treated as fallback candidates.
+    if !preferred_tail.trim().is_empty() {
+        return false;
+    }
     let logical = route.logical_provider.trim().to_ascii_lowercase();
     provider == logical
         || (provider == "openai" && logical == "openai-codex")
@@ -1327,11 +1337,48 @@ fn prepend_preferred_model_candidate(
     candidates.insert(0, normalized);
 }
 
+fn canonical_provider_for_attempt(provider: &str) -> String {
+    match normalize_zeroclaw_provider(provider) {
+        // openai/openai-codex share the same backend route in our runtime path
+        Some("openai") | Some("openai-codex") => "openai-codex".to_string(),
+        Some(other) => other.to_string(),
+        None => provider.trim().to_ascii_lowercase(),
+    }
+}
+
+fn build_attempt_key(provider: &str, model: Option<&str>) -> String {
+    let canonical_provider = canonical_provider_for_attempt(provider);
+    let canonical_model = model
+        .map(str::trim)
+        .filter(|m| !m.is_empty())
+        .map(|m| normalize_model_for_provider(m, Some(&canonical_provider)))
+        .map(|m| m.to_ascii_lowercase())
+        .unwrap_or_else(|| "<none>".to_string());
+    format!("{}::{}", canonical_provider, canonical_model)
+}
+
+fn doctor_fast_route_rank(route: &ZeroclawProfileRoute, preferred_model: Option<&str>) -> u8 {
+    let model = route.model_arg.trim().to_ascii_lowercase();
+    if model.contains("spark") || model.contains("mini") || model.contains("flash") {
+        return 0;
+    }
+    if preferred_model.is_some_and(|preferred| route_matches_preferred_model(route, preferred)) {
+        return 1;
+    }
+    2
+}
+
 pub fn run_zeroclaw_message(
     message: &str,
     instance_id: &str,
     session_scope: &str,
 ) -> Result<String, String> {
+    let run_started_ms = now_ms();
+    let doctor_fast_path = session_scope.contains(":doctor:");
+    crate::commands::logs::log_dev(format!(
+        "[dev][zeroclaw] run start instance={} scope={} doctor_fast_path={}",
+        instance_id, session_scope, doctor_fast_path
+    ));
     let cmd = resolve_zeroclaw_command_path()
         .ok_or_else(|| "zeroclaw binary not found in bundled resources".to_string())?;
     let cfg = doctor_sidecar_config_dir(instance_id, session_scope)?;
@@ -1353,12 +1400,15 @@ pub fn run_zeroclaw_message(
     let preferred_model = crate::commands::preferences::lookup_session_model_override(instance_id)
         .or_else(|| crate::commands::load_zeroclaw_model_preference());
     let profile_routes = collect_profile_routes_for_zeroclaw(preferred_model.as_deref());
-    let provider_order = provider_order_for_runtime(
+    let mut provider_order = provider_order_for_runtime(
         &env_pairs,
         preferred_model.as_deref(),
         &profile_providers,
         &oauth_providers,
     );
+    if doctor_fast_path && provider_order.len() > ZEROCLAW_DOCTOR_FAST_MAX_PROVIDERS {
+        provider_order.truncate(ZEROCLAW_DOCTOR_FAST_MAX_PROVIDERS);
+    }
     if provider_order.is_empty() && profile_routes.is_empty() {
         if env_pairs.is_empty() {
             return Err(
@@ -1370,6 +1420,9 @@ pub fn run_zeroclaw_message(
         );
     }
     let mut attempt_errors = Vec::<String>::new();
+    let mut attempts_used = 0usize;
+    let mut attempt_limit_hit = false;
+    let mut attempt_keys = HashSet::<String>::new();
     let try_once = |args: Vec<String>,
                     timeout_secs: u64,
                     env_overrides: &[(String, String)]|
@@ -1385,7 +1438,7 @@ pub fn run_zeroclaw_message(
         if let Some((prompt, completion, _total)) = session_usage {
             record_session_usage(instance_id, prompt, completion);
         }
-        if session_usage.is_none() {
+        if session_usage.is_none() && !doctor_fast_path {
             if let Ok(mut stats) = usage_store().lock() {
                 if let Some((prompt, completion, total)) =
                     read_usage_from_builtin_traces(&cmd, &cfg, &effective_env_pairs)
@@ -1423,17 +1476,108 @@ pub fn run_zeroclaw_message(
     } else {
         fallback_profile_routes = profile_routes;
     }
+    if doctor_fast_path {
+        if preferred_profile_routes.len() > ZEROCLAW_DOCTOR_FAST_MAX_PROFILE_ROUTES {
+            preferred_profile_routes.truncate(ZEROCLAW_DOCTOR_FAST_MAX_PROFILE_ROUTES);
+        }
+        if !preferred_profile_routes.is_empty() {
+            let preferred_providers = preferred_profile_routes
+                .iter()
+                .map(|route| route.logical_provider.trim().to_ascii_lowercase())
+                .collect::<HashSet<_>>();
+            let mut candidates = preferred_profile_routes.clone();
+            candidates.extend(
+                fallback_profile_routes
+                    .iter()
+                    .filter(|route| {
+                        preferred_providers
+                            .contains(&route.logical_provider.trim().to_ascii_lowercase())
+                    })
+                    .cloned(),
+            );
+            candidates.sort_by_key(|route| doctor_fast_route_rank(route, preferred_model.as_deref()));
+            let mut dedupe = HashSet::<String>::new();
+            candidates.retain(|route| {
+                dedupe.insert(build_attempt_key(&route.provider_arg, Some(&route.model_arg)))
+            });
+            let mut iter = candidates.into_iter();
+            preferred_profile_routes = iter
+                .by_ref()
+                .take(ZEROCLAW_DOCTOR_FAST_MAX_PROFILE_ROUTES)
+                .collect();
+            fallback_profile_routes = iter
+                .take(ZEROCLAW_DOCTOR_FAST_MAX_PROFILE_ROUTES)
+                .collect();
+        } else {
+            fallback_profile_routes.clear();
+        }
+    }
+    let doctor_preferred_route_only = doctor_fast_path && !preferred_profile_routes.is_empty();
+    if doctor_preferred_route_only {
+        provider_order.clear();
+        crate::commands::logs::log_dev(format!(
+            "[dev][zeroclaw] doctor fast path constrained to preferred provider routes instance={} scope={} preferred_routes={} fallback_routes={}",
+            instance_id,
+            session_scope,
+            preferred_profile_routes.len(),
+            fallback_profile_routes.len()
+        ));
+    }
 
-    for route in preferred_profile_routes.iter() {
+    let mut next_attempt_timeout = |provider_timeout: u64| -> Option<u64> {
+        if doctor_fast_path && attempts_used >= ZEROCLAW_DOCTOR_FAST_MAX_ATTEMPTS {
+            attempt_limit_hit = true;
+            return None;
+        }
+        attempts_used = attempts_used.saturating_add(1);
+        Some(if doctor_fast_path {
+            provider_timeout.min(ZEROCLAW_DOCTOR_FAST_TIMEOUT_SECS)
+        } else {
+            provider_timeout
+        })
+    };
+
+    'preferred_routes: for route in preferred_profile_routes.iter() {
+        let attempt_key = build_attempt_key(&route.provider_arg, Some(&route.model_arg));
+        if !attempt_keys.insert(attempt_key) {
+            crate::commands::logs::log_dev(format!(
+                "[dev][zeroclaw] skip duplicate attempt instance={} scope={} provider={} model={} source=profile-preferred",
+                instance_id, session_scope, route.provider_arg, route.model_arg
+            ));
+            continue;
+        }
         let timeout_secs = provider_exec_timeout_secs(&route.logical_provider);
+        let Some(timeout_secs) = next_attempt_timeout(timeout_secs) else {
+            break 'preferred_routes;
+        };
+        crate::commands::logs::log_dev(format!(
+            "[dev][zeroclaw] attempt start instance={} scope={} provider={} model={} timeout_secs={} source=profile-preferred",
+            instance_id, session_scope, route.provider_arg, route.model_arg, timeout_secs
+        ));
         let mut args = base_args.clone();
         args.push("-p".to_string());
         args.push(route.provider_arg.clone());
         args.push("--model".to_string());
         args.push(route.model_arg.clone());
         match try_once(args, timeout_secs, &route.env_overrides) {
-            Ok(v) => return Ok(v),
+            Ok(v) => {
+                let elapsed_ms = now_ms().saturating_sub(run_started_ms);
+                crate::commands::logs::log_dev(format!(
+                    "[dev][zeroclaw] run success instance={} scope={} elapsed_ms={} attempts={} provider={} model={}",
+                    instance_id,
+                    session_scope,
+                    elapsed_ms,
+                    attempts_used,
+                    route.provider_arg,
+                    route.model_arg
+                ));
+                return Ok(v);
+            }
             Err(e) => {
+                crate::commands::logs::log_dev(format!(
+                    "[dev][zeroclaw] attempt failed instance={} scope={} provider={} model={} source=profile-preferred error={}",
+                    instance_id, session_scope, route.provider_arg, route.model_arg, e
+                ));
                 attempt_errors.push(format!(
                     "profile={} provider={} model={}: {e}",
                     route.profile_id, route.provider_arg, route.model_arg
@@ -1442,7 +1586,7 @@ pub fn run_zeroclaw_message(
         }
     }
 
-    for provider in provider_order {
+    'providers: for provider in provider_order {
         let timeout_secs = provider_exec_timeout_secs(provider);
         let mut provider_base_args = base_args.clone();
         provider_base_args.push("-p".to_string());
@@ -1454,10 +1598,39 @@ pub fn run_zeroclaw_message(
             preferred_model.clone(),
             Some(provider),
         );
+        if doctor_fast_path && model_candidates.len() > 1 {
+            model_candidates.truncate(1);
+        }
         if model_candidates.is_empty() {
+            let attempt_key = build_attempt_key(provider, None);
+            if !attempt_keys.insert(attempt_key) {
+                crate::commands::logs::log_dev(format!(
+                    "[dev][zeroclaw] skip duplicate attempt instance={} scope={} provider={} model=<none> source=provider-no-model",
+                    instance_id, session_scope, provider
+                ));
+                continue;
+            }
+            let Some(timeout_secs) = next_attempt_timeout(timeout_secs) else {
+                break 'providers;
+            };
+            crate::commands::logs::log_dev(format!(
+                "[dev][zeroclaw] attempt start instance={} scope={} provider={} model=<none> timeout_secs={} source=provider-no-model",
+                instance_id, session_scope, provider, timeout_secs
+            ));
             match try_once(provider_base_args.clone(), timeout_secs, &[]) {
-                Ok(v) => return Ok(v),
+                Ok(v) => {
+                    let elapsed_ms = now_ms().saturating_sub(run_started_ms);
+                    crate::commands::logs::log_dev(format!(
+                        "[dev][zeroclaw] run success instance={} scope={} elapsed_ms={} attempts={} provider={} model=<none>",
+                        instance_id, session_scope, elapsed_ms, attempts_used, provider
+                    ));
+                    return Ok(v);
+                }
                 Err(e) => {
+                    crate::commands::logs::log_dev(format!(
+                        "[dev][zeroclaw] attempt failed instance={} scope={} provider={} model=<none> source=provider-no-model error={}",
+                        instance_id, session_scope, provider, e
+                    ));
                     attempt_errors.push(format!("provider={provider} no-model: {e}"));
                     continue;
                 }
@@ -1465,12 +1638,38 @@ pub fn run_zeroclaw_message(
         }
 
         for model in model_candidates {
+            let attempt_key = build_attempt_key(provider, Some(&model));
+            if !attempt_keys.insert(attempt_key) {
+                crate::commands::logs::log_dev(format!(
+                    "[dev][zeroclaw] skip duplicate attempt instance={} scope={} provider={} model={} source=provider-model",
+                    instance_id, session_scope, provider, model
+                ));
+                continue;
+            }
+            let Some(timeout_secs) = next_attempt_timeout(timeout_secs) else {
+                break 'providers;
+            };
+            crate::commands::logs::log_dev(format!(
+                "[dev][zeroclaw] attempt start instance={} scope={} provider={} model={} timeout_secs={} source=provider-model",
+                instance_id, session_scope, provider, model, timeout_secs
+            ));
             let mut args = provider_base_args.clone();
             args.push("--model".to_string());
             args.push(model.clone());
             match try_once(args, timeout_secs, &[]) {
-                Ok(v) => return Ok(v),
+                Ok(v) => {
+                    let elapsed_ms = now_ms().saturating_sub(run_started_ms);
+                    crate::commands::logs::log_dev(format!(
+                        "[dev][zeroclaw] run success instance={} scope={} elapsed_ms={} attempts={} provider={} model={}",
+                        instance_id, session_scope, elapsed_ms, attempts_used, provider, model
+                    ));
+                    return Ok(v);
+                }
                 Err(e) => {
+                    crate::commands::logs::log_dev(format!(
+                        "[dev][zeroclaw] attempt failed instance={} scope={} provider={} model={} source=provider-model error={}",
+                        instance_id, session_scope, provider, model, e
+                    ));
                     attempt_errors.push(format!("provider={provider} model={model}: {e}"));
                     let lower = e.to_ascii_lowercase();
                     if lower.contains("authentication_error")
@@ -1484,26 +1683,83 @@ pub fn run_zeroclaw_message(
                 }
             }
         }
-        if should_try_no_model_fallback(provider) {
+        if should_try_no_model_fallback(provider) && !doctor_fast_path {
+            let attempt_key = build_attempt_key(provider, None);
+            if !attempt_keys.insert(attempt_key) {
+                crate::commands::logs::log_dev(format!(
+                    "[dev][zeroclaw] skip duplicate attempt instance={} scope={} provider={} model=<fallback> source=provider-fallback",
+                    instance_id, session_scope, provider
+                ));
+                continue;
+            }
+            let Some(timeout_secs) = next_attempt_timeout(timeout_secs) else {
+                break 'providers;
+            };
+            crate::commands::logs::log_dev(format!(
+                "[dev][zeroclaw] attempt start instance={} scope={} provider={} model=<fallback> timeout_secs={} source=provider-fallback",
+                instance_id, session_scope, provider, timeout_secs
+            ));
             match try_once(provider_base_args.clone(), timeout_secs, &[]) {
-                Ok(v) => return Ok(v),
+                Ok(v) => {
+                    let elapsed_ms = now_ms().saturating_sub(run_started_ms);
+                    crate::commands::logs::log_dev(format!(
+                        "[dev][zeroclaw] run success instance={} scope={} elapsed_ms={} attempts={} provider={} model=<fallback>",
+                        instance_id, session_scope, elapsed_ms, attempts_used, provider
+                    ));
+                    return Ok(v);
+                }
                 Err(e) => {
+                    crate::commands::logs::log_dev(format!(
+                        "[dev][zeroclaw] attempt failed instance={} scope={} provider={} model=<fallback> source=provider-fallback error={}",
+                        instance_id, session_scope, provider, e
+                    ));
                     attempt_errors.push(format!("provider={provider} fallback: {e}"));
                 }
             }
         }
     }
 
-    for route in fallback_profile_routes.iter() {
+    'fallback_routes: for route in fallback_profile_routes.iter() {
+        let attempt_key = build_attempt_key(&route.provider_arg, Some(&route.model_arg));
+        if !attempt_keys.insert(attempt_key) {
+            crate::commands::logs::log_dev(format!(
+                "[dev][zeroclaw] skip duplicate attempt instance={} scope={} provider={} model={} source=profile-fallback",
+                instance_id, session_scope, route.provider_arg, route.model_arg
+            ));
+            continue;
+        }
         let timeout_secs = provider_exec_timeout_secs(&route.logical_provider);
+        let Some(timeout_secs) = next_attempt_timeout(timeout_secs) else {
+            break 'fallback_routes;
+        };
+        crate::commands::logs::log_dev(format!(
+            "[dev][zeroclaw] attempt start instance={} scope={} provider={} model={} timeout_secs={} source=profile-fallback",
+            instance_id, session_scope, route.provider_arg, route.model_arg, timeout_secs
+        ));
         let mut args = base_args.clone();
         args.push("-p".to_string());
         args.push(route.provider_arg.clone());
         args.push("--model".to_string());
         args.push(route.model_arg.clone());
         match try_once(args, timeout_secs, &route.env_overrides) {
-            Ok(v) => return Ok(v),
+            Ok(v) => {
+                let elapsed_ms = now_ms().saturating_sub(run_started_ms);
+                crate::commands::logs::log_dev(format!(
+                    "[dev][zeroclaw] run success instance={} scope={} elapsed_ms={} attempts={} provider={} model={}",
+                    instance_id,
+                    session_scope,
+                    elapsed_ms,
+                    attempts_used,
+                    route.provider_arg,
+                    route.model_arg
+                ));
+                return Ok(v);
+            }
             Err(e) => {
+                crate::commands::logs::log_dev(format!(
+                    "[dev][zeroclaw] attempt failed instance={} scope={} provider={} model={} source=profile-fallback error={}",
+                    instance_id, session_scope, route.provider_arg, route.model_arg, e
+                ));
                 attempt_errors.push(format!(
                     "profile={} provider={} model={}: {e}",
                     route.profile_id, route.provider_arg, route.model_arg
@@ -1511,10 +1767,30 @@ pub fn run_zeroclaw_message(
             }
         }
     }
+    if attempt_limit_hit {
+        attempt_errors.push(format!(
+            "doctor fast path attempt budget exhausted after {} attempts",
+            attempts_used
+        ));
+    }
 
     if attempt_errors.is_empty() {
+        let elapsed_ms = now_ms().saturating_sub(run_started_ms);
+        crate::commands::logs::log_dev(format!(
+            "[dev][zeroclaw] run failed instance={} scope={} elapsed_ms={} attempts={}",
+            instance_id, session_scope, elapsed_ms, attempts_used
+        ));
         Err("zeroclaw sidecar failed with no actionable error details.".to_string())
     } else {
+        let elapsed_ms = now_ms().saturating_sub(run_started_ms);
+        crate::commands::logs::log_dev(format!(
+            "[dev][zeroclaw] run failed instance={} scope={} elapsed_ms={} attempts={} errors={}",
+            instance_id,
+            session_scope,
+            elapsed_ms,
+            attempts_used,
+            attempt_errors.len()
+        ));
         Err(format!(
             "All providers/models failed. Attempts: {}",
             attempt_errors.join(" | ")
