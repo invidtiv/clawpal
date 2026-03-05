@@ -49,18 +49,25 @@
 4. `swatinem/rust-cache@v2`
 5. 从 workflow 输入 `version` 同步版本号到 `package.json` 与 `src-tauri/Cargo.toml`
 6. 根据 `is_prerelease` 自动选择 environment：
-   - 无 `-` 后缀：`release`
-   - 有 `-` 后缀：`prerelease`
+   - `false`：`release`
+   - `true`：`prerelease`
 7. 检测签名 secrets 是否齐全，判定 `signed/unsigned` 模式
 8. 若 unsigned：自动关闭 updater artifacts 和 macOS signing identity
 9. Linux 目标安装系统依赖（仅 `ubuntu-22.04`）
 10. signed 模式下才执行 Apple 证书导入与 API key 写入（macOS）
-11. `npm ci`
-12. 计算构建参数（Windows prerelease 追加 `--bundles nsis`）
-13. 执行 Tauri 打包（signed 或 unsigned 路径）
-14. unsigned 模式将 release 资产重命名为 `*-unsigned.*`
-15. 上传 Windows portable 与 `zeroclaw` sidecar（unsigned 模式同样加后缀）
-16. macOS 清理临时 keychain 与 API key 文件
+11. macOS signed 模式会从导入证书自动解析 `Developer ID Application` identity
+12. macOS signed 模式会先对 `src-tauri/resources/zeroclaw/darwin-{aarch64,x64}/zeroclaw` 显式 `codesign --timestamp --options runtime`
+13. `npm ci`
+14. 计算构建参数（Windows prerelease 追加 `--bundles nsis`）
+15. 执行 Tauri signed build（此阶段只做签名，不做内置 notarize）
+16. macOS signed 额外定位 `.app/.dmg`，输出 preflight `codesign` 诊断信息
+17. 显式调用 `xcrun notarytool submit`，记录 submission id
+18. 轮询 `xcrun notarytool info`（20s 间隔，最大 40 分钟）并实时输出状态；失败时抓取 `notarytool log`
+19. notarization Accepted 后执行 `stapler staple/validate`（app + dmg），并 `--clobber` 覆盖上传 notarized DMG
+20. 上传 notarization 诊断产物（`notary-*.json` / `notary-*.log`）供排障
+21. unsigned 模式将 release 资产重命名为 `*-unsigned.*`
+22. 上传 Windows portable（unsigned 模式同样加后缀）
+23. macOS 清理临时 keychain 与 API key 文件
 
 ## 5. Release 与 Prerelease 的差异
 
@@ -93,15 +100,15 @@
    - `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`
    - `APPLE_CERTIFICATE`
    - `APPLE_CERTIFICATE_PASSWORD`
-   - `APPLE_SIGNING_IDENTITY`
    - `APPLE_API_KEY`
    - `APPLE_API_ISSUER`
    - `APPLE_API_KEY_CONTENT`
-2. 只要任一缺失，自动进入 unsigned 模式：
+2. `APPLE_SIGNING_IDENTITY` 不再是强依赖：workflow 会优先从证书自动解析并注入
+3. 只要任一必需项缺失，自动进入 unsigned 模式：
    - 不做 Apple 导入/公证步骤
    - Tauri 配置自动关闭签名相关设置
    - 上传产物名追加 `-unsigned`
-3. signed 模式保持原命名（不加后缀）
+4. signed 模式保持原命名（不加后缀）
 
 ## 7. 必需 Secrets（发布签名相关）
 
@@ -111,10 +118,9 @@
 2. `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`
 3. `APPLE_CERTIFICATE`
 4. `APPLE_CERTIFICATE_PASSWORD`
-5. `APPLE_SIGNING_IDENTITY`
-6. `APPLE_API_KEY`
-7. `APPLE_API_ISSUER`
-8. `APPLE_API_KEY_CONTENT`
+5. `APPLE_API_KEY`
+6. `APPLE_API_ISSUER`
+7. `APPLE_API_KEY_CONTENT`
 
 缺少任意一个不会直接失败，而是自动降级为 unsigned 构建并在资产名上标记。
 
