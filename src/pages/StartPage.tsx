@@ -138,6 +138,11 @@ export function StartPage({
   const [sshChecked, setSshChecked] = useState<Record<string, boolean>>({});
   const [sshChecking, setSshChecking] = useState<Record<string, boolean>>({});
   const [sshConnectionProfiles, setSshConnectionProfiles] = useState<Record<string, SshConnectionProfile>>({});
+  const openedSshHostIds = sshHosts
+    .filter((host) => openTabIds.has(host.id))
+    .map((host) => host.id)
+    .sort();
+  const openedSshHostIdsKey = openedSshHostIds.join("|");
   const healthPollInFlightRef = useRef(false);
   const localHealthCursorRef = useRef(0);
   const dockerHealthCursorRef = useRef(0);
@@ -322,6 +327,50 @@ export function StartPage({
       setSshChecked((prev) => ({ ...prev, [hostId]: true }));
     }
   }, [connectRemoteHost]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const hydrateOpenedSshProfiles = async () => {
+      for (const hostId of openedSshHostIds) {
+        if (cancelled) return;
+        if (sshChecking[hostId] || sshConnectionProfiles[hostId]) continue;
+
+        try {
+          const status = await api.sshStatus(hostId);
+          if (cancelled || status !== "connected") continue;
+
+          setSshChecking((prev) => ({ ...prev, [hostId]: true }));
+          const profile = await api.remoteGetSshConnectionProfile(hostId);
+          if (cancelled) return;
+
+          setHealthMap((prev) => ({
+            ...prev,
+            [hostId]: {
+              healthy: profile.status.healthy,
+              agentCount: profile.status.activeAgents,
+            },
+          }));
+          setSshConnectionProfiles((prev) => ({
+            ...prev,
+            [hostId]: profile,
+          }));
+          setSshChecked((prev) => ({ ...prev, [hostId]: true }));
+        } catch {
+          if (cancelled) return;
+        } finally {
+          if (!cancelled) {
+            setSshChecking((prev) => ({ ...prev, [hostId]: false }));
+          }
+        }
+      }
+    };
+
+    void hydrateOpenedSshProfiles();
+    return () => {
+      cancelled = true;
+    };
+  }, [openedSshHostIdsKey, sshChecking, sshConnectionProfiles]);
 
   const toCardType = useCallback((instanceType: string, instanceId: string): "local" | "docker" | "ssh" | "wsl2" => {
     if (instanceType === "remote_ssh") return "ssh";
