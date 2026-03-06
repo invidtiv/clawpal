@@ -43,7 +43,7 @@ jobs:
   build:
     name: Build (${{ matrix.label }})
     needs: authorize
-    if: needs.authorize.outputs.can_download == 'true' && github.ref_name == 'develop'
+    if: needs.authorize.outputs.can_download == 'true'
     runs-on: ${{ matrix.platform }}
     strategy:
       fail-fast: false
