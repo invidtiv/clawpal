@@ -38,6 +38,7 @@ type DoctorSessionCache = {
 const DOCTOR_CHAT_CACHE_MAX_MESSAGES = 220;
 const DOCTOR_CHAT_CACHE_TTL_MS = 14 * 24 * 60 * 60 * 1000;
 const DOCTOR_CHAT_CACHE_VERSION = 1;
+const DOCTOR_CHAT_CACHE_PREFIX = "clawpal-doctor-chat-v1";
 
 function loadDoctorSessionCache(context: DoctorSessionContext): DoctorSessionCache | null {
   const key = buildDoctorCacheKey(context);

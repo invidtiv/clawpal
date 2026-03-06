@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { AgentOverview, AgentSessionAnalysis, AppPreferences, ApplyQueueResult, ApplyResult, BackupInfo, Binding, ChannelNode, CronJob, CronRun, DiscordGuildChannel, DiscoveredInstance, DockerInstance, EnsureAccessResult, GuidanceAction, HistoryItem, InstallMethodCapability, InstallOrchestratorDecision, InstallSession, InstallStepResult, InstallTargetDecision, InstanceStatus, StatusExtra, ModelCatalogProvider, ModelProfile, PendingCommand, PrecheckIssue, PreviewQueueResult, PreviewResult, ProviderAuthSuggestion, Recipe, RecordInstallExperienceResult, RegisteredInstance, RemoteAuthSyncResult, RescueBotAction, RescueBotManageResult, RescuePrimaryDiagnosisResult, RescuePrimaryRepairResult, ResolvedApiKey, SshConfigHostSuggestion, SystemStatus, DoctorReport, SessionFile, SshHost, WatchdogStatus, ZeroclawRuntimeTarget, ZeroclawUsageStats } from "./types";
+import type { AgentOverview, AgentSessionAnalysis, AppPreferences, ApplyQueueResult, ApplyResult, BackupInfo, Binding, BugReportSettings, BugReportStats, ChannelNode, CronJob, CronRun, DiscordGuildChannel, DiscoveredInstance, DockerInstance, EnsureAccessResult, GuidanceAction, HistoryItem, InstallMethodCapability, InstallOrchestratorDecision, InstallSession, InstallStepResult, InstallTargetDecision, InstanceStatus, StatusExtra, ModelCatalogProvider, ModelProfile, PendingCommand, PrecheckIssue, PreviewQueueResult, PreviewResult, ProviderAuthSuggestion, Recipe, RecordInstallExperienceResult, RegisteredInstance, RelatedSecretPushResult, RemoteAuthSyncResult, RescueBotAction, RescueBotManageResult, RescuePrimaryDiagnosisResult, RescuePrimaryRepairResult, ResolvedApiKey, SshConfigHostSuggestion, SshConnectionProfile, SshDiagnosticReport, SshHost, SshIntent, SshTransferStats, SystemStatus, DoctorReport, SessionFile, WatchdogStatus, ZeroclawOauthCompleteResult, ZeroclawOauthLoginStartResult, ZeroclawRuntimeTarget, ZeroclawUsageStats } from "./types";
 
 export const api = {
   setActiveOpenclawHome: (path: string | null): Promise<boolean> =>
@@ -8,6 +8,14 @@ export const api = {
     invoke("set_active_clawpal_data_dir", { path }),
   getAppPreferences: (): Promise<AppPreferences> =>
     invoke("get_app_preferences", {}),
+  getBugReportSettings: (): Promise<BugReportSettings> =>
+    invoke("get_bug_report_settings", {}),
+  setBugReportSettings: (settings: BugReportSettings): Promise<BugReportSettings> =>
+    invoke("set_bug_report_settings", { settings }),
+  getBugReportStats: (): Promise<BugReportStats> =>
+    invoke("get_bug_report_stats", {}),
+  testBugReportConnection: (): Promise<boolean> =>
+    invoke("test_bug_report_connection", {}),
   getZeroclawUsageStats: (): Promise<ZeroclawUsageStats> =>
     invoke("get_zeroclaw_usage_stats", {}),
   getZeroclawRuntimeTarget: (): Promise<ZeroclawRuntimeTarget> =>
@@ -16,6 +24,10 @@ export const api = {
     invoke("set_zeroclaw_model_preference", { model }),
   setZeroclawDoctorUiPreference: (showUi: boolean): Promise<AppPreferences> =>
     invoke("set_zeroclaw_doctor_ui_preference", { showUi }),
+  setRescueBotUiPreference: (showUi: boolean): Promise<AppPreferences> =>
+    invoke("set_rescue_bot_ui_preference", { showUi }),
+  setSshTransferSpeedUiPreference: (showUi: boolean): Promise<AppPreferences> =>
+    invoke("set_ssh_transfer_speed_ui_preference", { showUi }),
   explainOperationError: (
     instanceId: string,
     operation: string,
@@ -110,6 +122,28 @@ export const api = {
     invoke("test_model_profile", { profileId }),
   resolveProviderAuth: (provider: string): Promise<ProviderAuthSuggestion> =>
     invoke("resolve_provider_auth", { provider }),
+  startZeroclawOauthLogin: (
+    provider: string,
+    profile?: string,
+    instanceId?: string,
+  ): Promise<ZeroclawOauthLoginStartResult> =>
+    invoke("start_zeroclaw_oauth_login", {
+      provider,
+      profile: profile ?? null,
+      instanceId: instanceId ?? null,
+    }),
+  completeZeroclawOauthLogin: (
+    provider: string,
+    redirectInput: string,
+    profile?: string,
+    instanceId?: string,
+  ): Promise<ZeroclawOauthCompleteResult> =>
+    invoke("complete_zeroclaw_oauth_login", {
+      provider,
+      redirectInput,
+      profile: profile ?? null,
+      instanceId: instanceId ?? null,
+    }),
   resolveApiKeys: (): Promise<ResolvedApiKey[]> =>
     invoke("resolve_api_keys", {}),
   listAgentsOverview: (): Promise<AgentOverview[]> =>
@@ -195,12 +229,18 @@ export const api = {
     invoke("ssh_disconnect", { hostId }),
   sshStatus: (hostId: string): Promise<string> =>
     invoke("ssh_status", { hostId }),
+  diagnoseSsh: (hostId: string, intent: SshIntent): Promise<SshDiagnosticReport> =>
+    invoke("diagnose_ssh", { hostId, intent }),
+  getSshTransferStats: (hostId: string): Promise<SshTransferStats> =>
+    invoke("get_ssh_transfer_stats", { hostId }),
 
   // Remote business commands
   remoteReadRawConfig: (hostId: string): Promise<string> =>
     invoke("remote_read_raw_config", { hostId }),
   remoteGetInstanceStatus: (hostId: string): Promise<InstanceStatus> =>
     invoke("remote_get_system_status", { hostId }),
+  remoteGetSshConnectionProfile: (hostId: string): Promise<SshConnectionProfile> =>
+    invoke("remote_get_ssh_connection_profile", { hostId }),
   remoteGetStatusExtra: (hostId: string): Promise<StatusExtra> =>
     invoke("remote_get_status_extra", { hostId }),
   remoteListAgentsOverview: (hostId: string): Promise<AgentOverview[]> =>
@@ -257,6 +297,8 @@ export const api = {
     invoke("remote_resolve_api_keys", { hostId }),
   remoteSyncProfilesToLocalAuth: (hostId: string): Promise<RemoteAuthSyncResult> =>
     invoke("remote_sync_profiles_to_local_auth", { hostId }),
+  pushRelatedSecretsToRemote: (hostId: string): Promise<RelatedSecretPushResult> =>
+    invoke("push_related_secrets_to_remote", { hostId }),
   remoteExtractModelProfilesFromConfig: (hostId: string): Promise<{ created: number; reused: number; skippedInvalid: number }> =>
     invoke("remote_extract_model_profiles_from_config", { hostId }),
   remoteRefreshModelCatalog: (hostId: string): Promise<ModelCatalogProvider[]> =>
