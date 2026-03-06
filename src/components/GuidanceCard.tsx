@@ -2,6 +2,7 @@ import { XIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import type { GuidanceAction } from "../lib/types";
 import { useTranslation } from "react-i18next";
+import { SshRepairPanel } from "@/components/SshRepairPanel";
 
 export interface AgentGuidanceItem {
   message: string;
@@ -14,6 +15,7 @@ export interface AgentGuidanceItem {
   instanceId: string;
   transport: string;
   rawError: string;
+  sshDiagnostic?: import("../lib/types").SshDiagnosticReport | null;
   createdAt: number;
 }
 
@@ -37,6 +39,9 @@ export function GuidanceCard({
   onInlineFix,
 }: GuidanceCardProps) {
   const { t } = useTranslation();
+
+  const repairPlan = guidance.sshDiagnostic?.repairPlan ?? [];
+
   return (
     <div className="w-[420px] max-w-[calc(100vw-2rem)] rounded-xl border border-border bg-card shadow-xl p-4 space-y-3">
       <div className="flex items-start justify-between gap-3">
@@ -61,6 +66,9 @@ export function GuidanceCard({
             <li key={`${idx}-${action}`}>{action}</li>
           ))}
         </ol>
+      )}
+      {repairPlan.length > 0 && (
+        <SshRepairPanel repairPlan={repairPlan} translate={t} />
       )}
       <div className="flex flex-wrap items-center gap-2 pt-1">
         {(guidance.structuredActions ?? []).map((sa, idx) => (
