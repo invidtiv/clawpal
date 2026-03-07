@@ -695,16 +695,6 @@ export function useApi() {
       readGatewayLog: dispatch(api.readGatewayLog, api.remoteReadGatewayLog),
       readGatewayErrorLog: dispatch(api.readGatewayErrorLog, api.remoteReadGatewayErrorLog),
 
-      // Doctor Agent (local-only, no remote dispatch)
-      doctorConnect: api.doctorConnect,
-      doctorDisconnect: api.doctorDisconnect,
-      doctorStartDiagnosis: api.doctorStartDiagnosis,
-      doctorSendMessage: api.doctorSendMessage,
-      doctorApproveInvoke: api.doctorApproveInvoke,
-      doctorRejectInvoke: api.doctorRejectInvoke,
-      collectDoctorContext: api.collectDoctorContext,
-      collectDoctorContextRemote: api.collectDoctorContextRemote,
-
       // Local-only (no remote equivalent needed)
       getAppPreferences: localGlobalCached(
         "getAppPreferences",
@@ -729,28 +719,6 @@ export function useApi() {
         api.testBugReportConnection,
         ["getBugReportStats"],
       ),
-      getZeroclawUsageStats: localGlobalCached(
-        "getZeroclawUsageStats",
-        2_000,
-        api.getZeroclawUsageStats,
-      ),
-      getZeroclawRuntimeTarget: localGlobalCached(
-        "getZeroclawRuntimeTarget",
-        2_000,
-        api.getZeroclawRuntimeTarget,
-      ),
-      setZeroclawModelPreference: withGlobalInvalidation(
-        api.setZeroclawModelPreference,
-        ["getAppPreferences", "getZeroclawRuntimeTarget"],
-      ),
-      setZeroclawDoctorUiPreference: withGlobalInvalidation(
-        api.setZeroclawDoctorUiPreference,
-        ["getAppPreferences"],
-      ),
-      setRescueBotUiPreference: withGlobalInvalidation(
-        api.setRescueBotUiPreference,
-        ["getAppPreferences"],
-      ),
       setSshTransferSpeedUiPreference: withGlobalInvalidation(
         api.setSshTransferSpeedUiPreference,
         ["getAppPreferences"],
@@ -771,8 +739,6 @@ export function useApi() {
       recordInstallExperience: api.recordInstallExperience,
       openUrl: api.openUrl,
       resolveProviderAuth: api.resolveProviderAuth,
-      startZeroclawOauthLogin: api.startZeroclawOauthLogin,
-      completeZeroclawOauthLogin: api.completeZeroclawOauthLogin,
       getCachedModelCatalog: localCached(
         "getCachedModelCatalog",
         8_000,

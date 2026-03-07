@@ -11,7 +11,6 @@ import { isAlreadyExplainedGuidanceError } from "@/lib/guidance";
 import { useTheme } from "@/lib/use-theme";
 import { useFont } from "@/lib/use-font";
 import type { UiFont } from "@/lib/use-font";
-import { profileToModelValue } from "@/lib/model-value";
 import { getProfilePushEligibility, resolveProfileCredentialView } from "@/lib/profile-credential";
 import type {
   ModelCatalogProvider,
@@ -19,8 +18,6 @@ import type {
   ProviderAuthSuggestion,
   RegisteredInstance,
   ResolvedApiKey,
-  ZeroclawRuntimeTarget,
-  ZeroclawUsageStats,
 } from "@/lib/types";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 import { BugReportSettings } from "@/components/BugReportSettings";
@@ -123,15 +120,6 @@ function defaultOauthAuthRef(provider: string): string {
     return "openai-codex:default";
   }
   return "";
-}
-
-function oauthProfileNameFromAuthRef(authRef: string): string {
-  const trimmed = authRef.trim();
-  if (!trimmed) return "default";
-  const idx = trimmed.indexOf(":");
-  if (idx < 0) return "default";
-  const profile = trimmed.slice(idx + 1).trim();
-  return profile || "default";
 }
 
 function isEnvVarLikeAuthRef(authRef: string): boolean {
@@ -256,7 +244,6 @@ export function Settings({
   globalMode = false,
   section = "all",
   onOpenDoctor,
-  onNavigateToProfiles,
 }: {
   onDataChange?: () => void;
   hasAppUpdate?: boolean;
@@ -264,7 +251,6 @@ export function Settings({
   globalMode?: boolean;
   section?: "all" | "profiles" | "preferences";
   onOpenDoctor?: () => void;
-  onNavigateToProfiles?: () => void;
 }) {
   const { t, i18n } = useTranslation();
   const ua = useApi();
@@ -278,10 +264,6 @@ export function Settings({
   const [profileDialogOpen, setProfileDialogOpen] = useState(false);
   const [message, setMessage] = useState("");
   const [authSuggestion, setAuthSuggestion] = useState<ProviderAuthSuggestion | null>(null);
-  const [oauthAuthorizeUrl, setOauthAuthorizeUrl] = useState("");
-  const [oauthRedirectInput, setOauthRedirectInput] = useState("");
-  const [oauthStarting, setOauthStarting] = useState(false);
-  const [oauthCompleting, setOauthCompleting] = useState(false);
   const [testingProfileId, setTestingProfileId] = useState<string | null>(null);
   const [pushDialogOpen, setPushDialogOpen] = useState(false);
   const [pushTargets, setPushTargets] = useState<ProfilePushTarget[]>([
@@ -298,18 +280,10 @@ export function Settings({
   const [pushingProfiles, setPushingProfiles] = useState(false);
   const [importingLocalProfiles, setImportingLocalProfiles] = useState(false);
   const [importingRemoteProfiles, setImportingRemoteProfiles] = useState(false);
-  const [zeroclawModel, setZeroclawModel] = useState("");
-
-  const [zeroclawUsage, setZeroclawUsage] = useState<ZeroclawUsageStats | null>(null);
-  const [zeroclawUsageLoading, setZeroclawUsageLoading] = useState(true);
-  const [zeroclawTarget, setZeroclawTarget] = useState<ZeroclawRuntimeTarget | null>(null);
-  const [zeroclawTargetLoading, setZeroclawTargetLoading] = useState(true);
   const [showSshTransferSpeedUi, setShowSshTransferSpeedUi] = useState(false);
   const [showClawpalLogsUi, setShowClawpalLogsUi] = useState(false);
   const [showGatewayLogsUi, setShowGatewayLogsUi] = useState(false);
   const [showOpenclawContextUi, setShowOpenclawContextUi] = useState(false);
-  const zeroclawPrefsLoadedRef = useRef(false);
-  const zeroclawLastSavedRef = useRef("");
 
   const [catalogRefreshed, setCatalogRefreshed] = useState(false);
 
@@ -479,10 +453,6 @@ export function Settings({
   useEffect(() => {
     ua.getAppPreferences()
       .then((prefs) => {
-        const value = prefs.zeroclawModel || "";
-        setZeroclawModel(value);
-        zeroclawLastSavedRef.current = value.trim();
-        zeroclawPrefsLoadedRef.current = true;
         setShowSshTransferSpeedUi(Boolean(prefs.showSshTransferSpeedUi));
         setShowClawpalLogsUi(Boolean(prefs.showClawpalLogsUi));
         setShowGatewayLogsUi(Boolean(prefs.showGatewayLogsUi));
@@ -490,57 +460,6 @@ export function Settings({
       })
       .catch((e) => console.error("Failed to load app preferences:", e));
   }, [ua]);
-
-  useEffect(() => {
-    let cancelled = false;
-    let firstLoad = true;
-    const loadStats = () => {
-      // Only show loading spinners on the initial fetch to avoid flickering.
-      if (firstLoad) {
-        setZeroclawUsageLoading(true);
-        setZeroclawTargetLoading(true);
-      }
-      ua.getZeroclawUsageStats()
-        .then((stats) => {
-          if (!cancelled) setZeroclawUsage(stats);
-        })
-        .catch(() => {
-          if (!cancelled) setZeroclawUsage(null);
-        })
-        .finally(() => {
-          if (!cancelled) setZeroclawUsageLoading(false);
-        });
-      ua.getZeroclawRuntimeTarget()
-        .then((target) => {
-          if (!cancelled) setZeroclawTarget(target);
-        })
-        .catch(() => {
-          if (!cancelled) setZeroclawTarget(null);
-        })
-        .finally(() => {
-          if (!cancelled) setZeroclawTargetLoading(false);
-          firstLoad = false;
-        });
-    };
-    loadStats();
-    const timer = window.setInterval(loadStats, 4_000);
-    return () => {
-      cancelled = true;
-      window.clearInterval(timer);
-    };
-  }, [ua]);
-
-  const zeroclawTargetText = useMemo(() => {
-    if (zeroclawTargetLoading) return t("settings.zeroclawEffectiveModelLoading");
-    const provider = zeroclawTarget?.provider?.trim();
-    if (!provider) return t("settings.zeroclawEffectiveModelUnavailable");
-    const model = zeroclawTarget?.model?.trim();
-    const modelLabel = model ? `${provider}/${model}` : provider;
-    if (zeroclawTarget?.source === "preferred") {
-      return t("settings.zeroclawEffectiveModelPreferred", { model: modelLabel });
-    }
-    return t("settings.zeroclawEffectiveModelAuto", { model: modelLabel });
-  }, [zeroclawTargetLoading, zeroclawTarget, t]);
 
   // Load catalog on mount
   useEffect(() => {
@@ -635,13 +554,6 @@ export function Settings({
   }, [form.provider, form.id, ua, profiles, resolvedCredentialMap]);
 
   useEffect(() => {
-    if (!providerUsesOAuthAuth(form.provider)) {
-      setOauthAuthorizeUrl("");
-      setOauthRedirectInput("");
-    }
-  }, [form.provider]);
-
-  useEffect(() => {
     if (!providerUsesOAuthAuth(form.provider) && credentialSource === "oauth") {
       setCredentialSource("env");
     }
@@ -667,29 +579,6 @@ export function Settings({
     }
     return Array.from(set).sort((a, b) => a.localeCompare(b));
   }, [catalog, profiles]);
-
-  const zeroclawModelCandidates = useMemo(() => {
-    const fromProfiles = (profiles || [])
-      .filter((profile) => profile.enabled)
-      .filter((profile) => profile.provider.trim())
-      .map((profile) => profileToModelValue(profile));
-    return Array.from(new Set(fromProfiles)).sort((a, b) => a.localeCompare(b));
-  }, [profiles]);
-
-  useEffect(() => {
-    if (!zeroclawPrefsLoadedRef.current) return;
-    // Skip validation until profiles have loaded; an empty candidate list
-    // before that point would incorrectly clear the persisted selection.
-    if (profiles === null) return;
-    const current = zeroclawModel.trim();
-    if (!current) return;
-    const exists = zeroclawModelCandidates.some(
-      (candidate) => candidate.toLowerCase() === current.toLowerCase(),
-    );
-    if (!exists) {
-      setZeroclawModel("");
-    }
-  }, [zeroclawModel, zeroclawModelCandidates, profiles]);
 
   const saveProfile = async (authRefOverride?: string): Promise<boolean> => {
     if (!form.provider || !form.model) {
@@ -731,8 +620,6 @@ export function Settings({
       setMessage(t('settings.profileSaved'));
       setForm(emptyForm());
       setProfileDialogOpen(false);
-      setOauthAuthorizeUrl("");
-      setOauthRedirectInput("");
       refreshProfiles();
       onDataChange?.();
       return true;
@@ -747,52 +634,6 @@ export function Settings({
     void saveProfile();
   };
 
-  const startOauthLogin = async () => {
-    if (!providerUsesOAuthAuth(form.provider)) return;
-    const provider = normalizeOauthProvider(form.provider);
-    const authRef = form.authRef.trim() || defaultOauthAuthRef(provider);
-    const profile = oauthProfileNameFromAuthRef(authRef);
-    setOauthStarting(true);
-    try {
-      const result = await ua.startZeroclawOauthLogin(provider, profile, ua.instanceId);
-      setForm((prev) => ({ ...prev, authRef: result.authRef || prev.authRef || authRef }));
-      setOauthAuthorizeUrl(result.authorizeUrl);
-      setMessage(t("settings.oauthStartSuccess"));
-    } catch (e) {
-      setMessage(t("settings.oauthStartFailed", { error: String(e) }));
-    } finally {
-      setOauthStarting(false);
-    }
-  };
-
-  const completeOauthAndSave = async () => {
-    if (!providerUsesOAuthAuth(form.provider)) return;
-    const provider = normalizeOauthProvider(form.provider);
-    const authRef = form.authRef.trim() || defaultOauthAuthRef(provider);
-    const profile = oauthProfileNameFromAuthRef(authRef);
-    const redirectInput = oauthRedirectInput.trim();
-    if (!redirectInput) {
-      setMessage(t("settings.oauthRedirectRequired"));
-      return;
-    }
-    setOauthCompleting(true);
-    try {
-      const result = await ua.completeZeroclawOauthLogin(
-        provider,
-        redirectInput,
-        profile,
-        ua.instanceId,
-      );
-      const resolvedAuthRef = result.authRef || authRef;
-      setForm((prev) => ({ ...prev, authRef: resolvedAuthRef }));
-      await saveProfile(resolvedAuthRef);
-    } catch (e) {
-      setMessage(t("settings.oauthCompleteFailed", { error: String(e) }));
-    } finally {
-      setOauthCompleting(false);
-    }
-  };
-
   const editProfile = (profile: ModelProfile) => {
     setCredentialSource(inferCredentialSource(profile.provider, profile.authRef || ""));
     setForm({
@@ -805,20 +646,12 @@ export function Settings({
       baseUrl: profile.baseUrl || "",
       enabled: profile.enabled,
     });
-    setOauthAuthorizeUrl("");
-    setOauthRedirectInput("");
-    setOauthStarting(false);
-    setOauthCompleting(false);
     setProfileDialogOpen(true);
   };
 
   const openAddProfile = () => {
     setCredentialSource("manual");
     setForm(emptyForm());
-    setOauthAuthorizeUrl("");
-    setOauthRedirectInput("");
-    setOauthStarting(false);
-    setOauthCompleting(false);
     setProfileDialogOpen(true);
   };
 
@@ -1062,30 +895,6 @@ export function Settings({
       });
   }, [t, ua]);
 
-  useEffect(() => {
-    if (!zeroclawPrefsLoadedRef.current) return;
-    const next = zeroclawModel.trim();
-    if (next === zeroclawLastSavedRef.current) return;
-    let cancelled = false;
-    const timer = window.setTimeout(() => {
-      ua.setZeroclawModelPreference(next.length > 0 ? next : null)
-        .then((prefs) => {
-          if (cancelled) return;
-          const persisted = prefs.zeroclawModel || "";
-          zeroclawLastSavedRef.current = persisted.trim();
-          if (persisted !== zeroclawModel) {
-            setZeroclawModel(persisted);
-          }
-        })
-        .catch((e) => {
-          if (cancelled) return;
-          const errorText = e instanceof Error ? e.message : String(e);
-          toast.error(t("settings.zeroclawModelSaveFailed", { error: errorText }));
-        });
-    }, 350);
-    return () => { cancelled = true; window.clearTimeout(timer); };
-  }, [ua, zeroclawModel, t]);
-
   return (
     <section>
       <h2 className="text-2xl font-bold mb-4">{t('settings.title')}</h2>
@@ -1195,89 +1004,6 @@ export function Settings({
                   </div>
                 </div>
 
-                <div className="h-px bg-border" />
-
-                <div className="flex items-center gap-3 flex-wrap">
-                  <Label className="text-sm font-semibold shrink-0">{t("settings.zeroclawModel")}</Label>
-                  <div className="w-[320px] max-w-full">
-                    <Select
-                      value={
-                        zeroclawModel && zeroclawModelCandidates.includes(zeroclawModel)
-                          ? zeroclawModel
-                          : "__none__"
-                      }
-                      onValueChange={(val) => {
-                        const model = val === "__none__" ? "" : val;
-                        setZeroclawModel(model);
-                        if (model) {
-                          const slashIdx = model.indexOf("/");
-                          const provider = slashIdx > 0 ? model.slice(0, slashIdx) : "";
-                          const modelName = slashIdx > 0 ? model.slice(slashIdx + 1) : model;
-                          setZeroclawTarget((prev) => ({
-                            ...prev,
-                            provider,
-                            model: modelName,
-                            source: "preferred",
-                            preferredModel: model,
-                            providerOrder: prev?.providerOrder ?? [],
-                          }));
-                        }
-                      }}
-                    >
-                      <SelectTrigger>
-                        <SelectValue placeholder={t("settings.zeroclawModelPlaceholder")} />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="__none__">
-                          <span className="text-muted-foreground">{t("home.notSet")}</span>
-                        </SelectItem>
-                        {zeroclawModelCandidates.map((model) => (
-                          <SelectItem key={model} value={model}>
-                            {model}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                  </div>
-                  {zeroclawModelCandidates.length === 0 && (
-                    <p className="text-xs text-muted-foreground basis-full mt-1">
-                      {onNavigateToProfiles ? (
-                        <button
-                          type="button"
-                          className="underline hover:text-foreground transition-colors"
-                          onClick={onNavigateToProfiles}
-                        >
-                          {t("settings.zeroclawNoProfilesLink")}
-                        </button>
-                      ) : (
-                        t("settings.zeroclawNoProfiles")
-                      )}
-                    </p>
-                  )}
-                  <div className="ml-auto text-right text-xs text-muted-foreground min-w-[240px]">
-                    {zeroclawUsageLoading ? (
-                      <div>{t("settings.zeroclawUsageLoading")}</div>
-                    ) : (
-                      <>
-                        <div>
-                          {t("settings.zeroclawUsageTotalTokens", {
-                            count: zeroclawUsage?.totalTokens || 0,
-                          })}
-                        </div>
-                        <div>
-                          {t("settings.zeroclawUsageCalls", {
-                            count: zeroclawUsage?.totalCalls || 0,
-                          })}
-                        </div>
-                      </>
-                    )}
-                    <div>
-                      {t("settings.zeroclawEffectiveModelLabel", {
-                        model: zeroclawTargetText,
-                      })}
-                    </div>
-                  </div>
-                </div>
               </CardContent>
             </Card>
             )}
@@ -1604,10 +1330,6 @@ export function Settings({
         if (!open) {
           setCredentialSource("manual");
           setForm(emptyForm());
-          setOauthAuthorizeUrl("");
-          setOauthRedirectInput("");
-          setOauthStarting(false);
-          setOauthCompleting(false);
         }
       }}>
         <DialogContent>
@@ -1708,50 +1430,7 @@ export function Settings({
             {credentialSource === "oauth" && providerUsesOAuthAuth(form.provider) && (
               <div className="rounded-md border border-border/70 bg-muted/30 px-3 py-2 text-xs text-muted-foreground space-y-2">
                 <p>{t("settings.oauthProviderHint", { provider: normalizeOauthProvider(form.provider) })}</p>
-                <div className="flex flex-wrap gap-2">
-                  <Button
-                    type="button"
-                    size="sm"
-                    variant="outline"
-                    onClick={startOauthLogin}
-                    disabled={oauthStarting || oauthCompleting}
-                  >
-                    {oauthStarting ? t("settings.oauthStarting") : t("settings.oauthStart")}
-                  </Button>
-                  {oauthAuthorizeUrl && (
-                    <Button
-                      type="button"
-                      size="sm"
-                      variant="outline"
-                      onClick={() => {
-                        ua.openUrl(oauthAuthorizeUrl).catch((e) => {
-                          setMessage(t("settings.oauthOpenLinkFailed", { error: String(e) }));
-                        });
-                      }}
-                    >
-                      {t("settings.oauthOpenLink")}
-                    </Button>
-                  )}
-                </div>
-                {oauthAuthorizeUrl && (
-                  <p className="font-mono break-all">{oauthAuthorizeUrl}</p>
-                )}
-                <div className="space-y-1">
-                  <Label>{t("settings.oauthRedirectInputLabel")}</Label>
-                  <Input
-                    placeholder={t("settings.oauthRedirectInputPlaceholder")}
-                    value={oauthRedirectInput}
-                    onChange={(e) => setOauthRedirectInput(e.target.value)}
-                  />
-                </div>
-                <Button
-                  type="button"
-                  size="sm"
-                  onClick={completeOauthAndSave}
-                  disabled={oauthStarting || oauthCompleting || !oauthRedirectInput.trim()}
-                >
-                  {oauthCompleting ? t("settings.oauthCompleting") : t("settings.oauthCompleteAndSave")}
-                </Button>
+                <p>{t("settings.oauthManualHint")}</p>
               </div>
             )}
 

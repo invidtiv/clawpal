@@ -1,7 +1,7 @@
 export function resolveDoctorPageFeatureVisibility() {
   return {
-    showDoctorClaw: true,
+    showDoctorClaw: false,
     showOtherAgentHelp: false,
-    showRescueBot: false,
+    showRescueBot: true,
   };
 }

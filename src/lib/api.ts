@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { AgentOverview, AgentSessionAnalysis, AppPreferences, ApplyQueueResult, ApplyResult, BackupInfo, Binding, BugReportSettings, BugReportStats, ChannelNode, CronJob, CronRun, DiscordGuildChannel, DiscoveredInstance, DockerInstance, EnsureAccessResult, GuidanceAction, HistoryItem, InstallMethodCapability, InstallOrchestratorDecision, InstallSession, InstallStepResult, InstallTargetDecision, InstanceStatus, StatusExtra, ModelCatalogProvider, ModelProfile, PendingCommand, PrecheckIssue, PreviewQueueResult, PreviewResult, ProfilePushResult, ProviderAuthSuggestion, Recipe, RecordInstallExperienceResult, RegisteredInstance, RelatedSecretPushResult, RemoteAuthSyncResult, RescueBotAction, RescueBotManageResult, RescuePrimaryDiagnosisResult, RescuePrimaryRepairResult, ResolvedApiKey, SshConfigHostSuggestion, SshConnectionProfile, SshDiagnosticReport, SshHost, SshIntent, SshTransferStats, SystemStatus, DoctorReport, SessionFile, WatchdogStatus, ZeroclawOauthCompleteResult, ZeroclawOauthLoginStartResult, ZeroclawRuntimeTarget, ZeroclawUsageStats } from "./types";
+import type { AgentOverview, AgentSessionAnalysis, AppPreferences, ApplyQueueResult, ApplyResult, BackupInfo, Binding, BugReportSettings, BugReportStats, ChannelNode, CronJob, CronRun, DiscordGuildChannel, DiscoveredInstance, DockerInstance, EnsureAccessResult, GuidanceAction, HistoryItem, InstallMethodCapability, InstallOrchestratorDecision, InstallSession, InstallStepResult, InstallTargetDecision, InstanceStatus, StatusExtra, ModelCatalogProvider, ModelProfile, PendingCommand, PrecheckIssue, PreviewQueueResult, PreviewResult, ProfilePushResult, ProviderAuthSuggestion, Recipe, RecordInstallExperienceResult, RegisteredInstance, RelatedSecretPushResult, RemoteAuthSyncResult, RescueBotAction, RescueBotManageResult, RescuePrimaryDiagnosisResult, RescuePrimaryRepairResult, ResolvedApiKey, SshConfigHostSuggestion, SshConnectionProfile, SshDiagnosticReport, SshHost, SshIntent, SshTransferStats, SystemStatus, DoctorReport, SessionFile, WatchdogStatus } from "./types";
 
 export const api = {
   setActiveOpenclawHome: (path: string | null): Promise<boolean> =>
@@ -18,16 +18,6 @@ export const api = {
     invoke("test_bug_report_connection", {}),
   captureFrontendError: (message: string, stack?: string, level?: string) =>
     invoke("capture_frontend_error", { message, stack, level }),
-  getZeroclawUsageStats: (): Promise<ZeroclawUsageStats> =>
-    invoke("get_zeroclaw_usage_stats", {}),
-  getZeroclawRuntimeTarget: (): Promise<ZeroclawRuntimeTarget> =>
-    invoke("get_zeroclaw_runtime_target", {}),
-  setZeroclawModelPreference: (model: string | null): Promise<AppPreferences> =>
-    invoke("set_zeroclaw_model_preference", { model }),
-  setZeroclawDoctorUiPreference: (showUi: boolean): Promise<AppPreferences> =>
-    invoke("set_zeroclaw_doctor_ui_preference", { showUi }),
-  setRescueBotUiPreference: (showUi: boolean): Promise<AppPreferences> =>
-    invoke("set_rescue_bot_ui_preference", { showUi }),
   setSshTransferSpeedUiPreference: (showUi: boolean): Promise<AppPreferences> =>
     invoke("set_ssh_transfer_speed_ui_preference", { showUi }),
   setClawpalLogsUiPreference: (showUi: boolean): Promise<AppPreferences> =>
@@ -130,28 +120,6 @@ export const api = {
     invoke("test_model_profile", { profileId }),
   resolveProviderAuth: (provider: string): Promise<ProviderAuthSuggestion> =>
     invoke("resolve_provider_auth", { provider }),
-  startZeroclawOauthLogin: (
-    provider: string,
-    profile?: string,
-    instanceId?: string,
-  ): Promise<ZeroclawOauthLoginStartResult> =>
-    invoke("start_zeroclaw_oauth_login", {
-      provider,
-      profile: profile ?? null,
-      instanceId: instanceId ?? null,
-    }),
-  completeZeroclawOauthLogin: (
-    provider: string,
-    redirectInput: string,
-    profile?: string,
-    instanceId?: string,
-  ): Promise<ZeroclawOauthCompleteResult> =>
-    invoke("complete_zeroclaw_oauth_login", {
-      provider,
-      redirectInput,
-      profile: profile ?? null,
-      instanceId: instanceId ?? null,
-    }),
   resolveApiKeys: (): Promise<ResolvedApiKey[]> =>
     invoke("resolve_api_keys", {}),
   listAgentsOverview: (): Promise<AgentOverview[]> =>
@@ -413,28 +381,6 @@ export const api = {
   remoteQueuedCommandsCount: (hostId: string): Promise<number> =>
     invoke("remote_queued_commands_count", { hostId }),
 
-  // Doctor Agent
-  doctorConnect: (): Promise<void> =>
-    invoke("doctor_connect"),
-  doctorDisconnect: (): Promise<void> =>
-    invoke("doctor_disconnect"),
-  doctorStartDiagnosis: (context: string, sessionKey: string, agentId?: string, instanceId?: string): Promise<void> =>
-    invoke("doctor_start_diagnosis", { context, sessionKey, agentId: agentId ?? "main", instanceId: instanceId ?? "local" }),
-  doctorSendMessage: (message: string, sessionKey: string, agentId?: string, instanceId?: string): Promise<void> =>
-    invoke("doctor_send_message", { message, sessionKey, agentId: agentId ?? "main", instanceId: instanceId ?? "local" }),
-  doctorApproveInvoke: (invokeId: string, target: string, instanceId: string, sessionKey: string, agentId: string, domain?: string): Promise<Record<string, unknown>> =>
-    invoke("doctor_approve_invoke", { invokeId, target, instanceId, sessionKey, agentId, domain }),
-  doctorRejectInvoke: (invokeId: string, reason: string): Promise<void> =>
-    invoke("doctor_reject_invoke", { invokeId, reason }),
-  collectDoctorContext: (): Promise<string> =>
-    invoke("collect_doctor_context"),
-  collectDoctorContextRemote: (hostId: string): Promise<string> =>
-    invoke("collect_doctor_context_remote", { hostId }),
-  // Install Agent
-  installStartSession: (context: string, sessionKey: string, agentId?: string, instanceId?: string): Promise<void> =>
-    invoke("install_start_session", { context, sessionKey, agentId: agentId ?? "main", instanceId: instanceId ?? "local" }),
-  installSendMessage: (message: string, sessionKey: string, agentId?: string, instanceId?: string): Promise<void> =>
-    invoke("install_send_message", { message, sessionKey, agentId: agentId ?? "main", instanceId: instanceId ?? "local" }),
   // Logs
   readAppLog: (lines?: number): Promise<string> =>
     invoke("read_app_log", { lines }),

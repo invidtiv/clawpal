@@ -1,7 +1,6 @@
 use super::*;
+#[cfg(test)]
 use std::path::Path;
-use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
 
 fn local_global_openclaw_base_dir() -> std::path::PathBuf {
     resolve_paths().base_dir
@@ -41,12 +40,8 @@ fn build_resolved_api_key(
 }
 
 fn oauth_session_ready(profile: &ModelProfile) -> bool {
-    let Some(oauth_provider) = normalize_zeroclaw_oauth_provider(&profile.provider) else {
-        return false;
-    };
-    let oauth_profile_name = profile_name_from_auth_ref(&profile.auth_ref);
-    oauth_store_has_profile("local", oauth_provider, oauth_profile_name)
-        || oauth_store_has_profile_any_instance(oauth_provider, oauth_profile_name)
+    let _ = profile;
+    false
 }
 
 fn missing_profile_auth_hint(provider: &str, remote: bool) -> String {
@@ -132,29 +127,8 @@ fn dedupe_profiles_by_model_key(profiles: Vec<ModelProfile>) -> Vec<ModelProfile
     deduped
 }
 
-const ZEROCLAW_OAUTH_LOGIN_CAPTURE_TIMEOUT_SECS: u64 = 4;
-const ZEROCLAW_OAUTH_COMPLETE_TIMEOUT_SECS: u64 = 30;
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ZeroclawOauthLoginStartResult {
-    pub provider: String,
-    pub profile: String,
-    pub auth_ref: String,
-    pub authorize_url: String,
-    pub details: String,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ZeroclawOauthCompleteResult {
-    pub provider: String,
-    pub profile: String,
-    pub auth_ref: String,
-    pub details: String,
-}
-
-fn normalize_zeroclaw_oauth_provider(provider: &str) -> Option<&'static str> {
+#[cfg(test)]
+fn normalize_oauth_provider_alias(provider: &str) -> Option<&'static str> {
     match provider.trim().to_ascii_lowercase().as_str() {
         "openai-codex" | "openai_codex" | "github-copilot" | "copilot" | "openai" => {
             Some("openai-codex")
@@ -163,100 +137,18 @@ fn normalize_zeroclaw_oauth_provider(provider: &str) -> Option<&'static str> {
     }
 }
 
-fn normalize_oauth_profile_name(profile: Option<String>) -> String {
-    let profile = profile
-        .as_deref()
-        .map(str::trim)
-        .filter(|v| !v.is_empty())
-        .unwrap_or("default");
-    profile.to_string()
-}
-
-fn oauth_auth_ref(provider: &str, profile: &str) -> String {
-    format!("{provider}:{profile}")
-}
-
-fn trim_command_details(input: &str) -> String {
-    let trimmed = input.trim();
-    if trimmed.is_empty() {
-        return String::new();
-    }
-    truncate_error_text(trimmed, 1200)
-}
-
-fn run_command_with_timeout_capture(
-    cmd_path: &Path,
-    args: &[String],
-    timeout_secs: u64,
-    context: &str,
-) -> Result<(i32, String, String, bool), String> {
-    let mut command = Command::new(cmd_path);
-    command
-        .args(args)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .stdin(Stdio::null());
-
-    let mut child = command
-        .spawn()
-        .map_err(|e| format!("failed to start {context}: {e}"))?;
-
-    let deadline = Instant::now() + Duration::from_secs(timeout_secs);
-    let mut timed_out = false;
-    loop {
-        match child
-            .try_wait()
-            .map_err(|e| format!("failed while waiting for {context}: {e}"))?
-        {
-            Some(_) => break,
-            None => {
-                if Instant::now() >= deadline {
-                    timed_out = true;
-                    let _ = child.kill();
-                    break;
-                }
-                std::thread::sleep(Duration::from_millis(100));
-            }
-        }
-    }
-
-    let output = child
-        .wait_with_output()
-        .map_err(|e| format!("failed to collect {context} output: {e}"))?;
-    let exit_code = output.status.code().unwrap_or(-1);
-    let stdout = String::from_utf8_lossy(&output.stdout)
-        .trim_end()
-        .to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr)
-        .trim_end()
-        .to_string();
-    Ok((exit_code, stdout, stderr, timed_out))
-}
-
-fn extract_first_http_url(text: &str) -> Option<String> {
-    for token in text.split_whitespace() {
-        if token.starts_with("http://") || token.starts_with("https://") {
-            let cleaned = token
-                .trim_matches(|ch: char| matches!(ch, '"' | '\'' | ')' | ']' | '}' | ',' | ';'))
-                .trim_end_matches('.');
-            if cleaned.starts_with("http://") || cleaned.starts_with("https://") {
-                return Some(cleaned.to_string());
-            }
-        }
-    }
-    None
-}
-
+#[cfg(test)]
 fn oauth_store_provider_ids(provider: &str) -> &'static [&'static str] {
-    match normalize_zeroclaw_oauth_provider(provider) {
+    match normalize_oauth_provider_alias(provider) {
         // Backward compatible:
-        // - New zeroclaw auth store uses `openai-codex:*`
+        // - New auth store variants use `openai-codex:*`
         // - Older store variants may still use `openai:*`
         Some("openai-codex") => &["openai-codex", "openai"],
         _ => &[],
     }
 }
 
+#[cfg(test)]
 fn oauth_profile_id_matches(profile_id: &str, provider_ids: &[&str], profile_name: &str) -> bool {
     let trimmed = profile_id.trim();
     if trimmed.is_empty() {
@@ -271,15 +163,7 @@ fn oauth_profile_id_matches(profile_id: &str, provider_ids: &[&str], profile_nam
         && profile.trim().eq_ignore_ascii_case(profile_name)
 }
 
-fn profile_name_from_auth_ref(auth_ref: &str) -> &str {
-    auth_ref
-        .trim()
-        .split_once(':')
-        .map(|(_, profile)| profile.trim())
-        .filter(|profile| !profile.is_empty())
-        .unwrap_or("default")
-}
-
+#[cfg(test)]
 fn oauth_store_file_has_profile(config_dir: &Path, provider: &str, profile_name: &str) -> bool {
     let provider_ids = oauth_store_provider_ids(provider);
     if provider_ids.is_empty() {
@@ -335,32 +219,6 @@ fn oauth_store_file_has_profile(config_dir: &Path, provider: &str, profile_name:
         }
     }
 
-    false
-}
-
-fn oauth_store_has_profile(instance_id: &str, provider: &str, profile_name: &str) -> bool {
-    let Ok(cfg_dir) =
-        crate::runtime::zeroclaw::process::zeroclaw_oauth_config_dir_for_instance(instance_id)
-    else {
-        return false;
-    };
-    oauth_store_file_has_profile(&cfg_dir, provider, profile_name)
-}
-
-fn oauth_store_has_profile_any_instance(provider: &str, profile_name: &str) -> bool {
-    let oauth_root = resolve_paths()
-        .clawpal_dir
-        .join("zeroclaw-sidecar")
-        .join("oauth");
-    let Ok(entries) = std::fs::read_dir(oauth_root) else {
-        return false;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() && oauth_store_file_has_profile(&path, provider, profile_name) {
-            return true;
-        }
-    }
     false
 }
 
@@ -1506,35 +1364,20 @@ mod tests {
     #[test]
     fn oauth_provider_normalization_maps_codex_aliases() {
         assert_eq!(
-            normalize_zeroclaw_oauth_provider("openai-codex"),
+            normalize_oauth_provider_alias("openai-codex"),
             Some("openai-codex")
         );
         assert_eq!(
-            normalize_zeroclaw_oauth_provider("github-copilot"),
+            normalize_oauth_provider_alias("github-copilot"),
             Some("openai-codex")
         );
         assert_eq!(
-            normalize_zeroclaw_oauth_provider("copilot"),
+            normalize_oauth_provider_alias("copilot"),
             Some("openai-codex")
         );
         assert_eq!(
-            normalize_zeroclaw_oauth_provider("openai"),
+            normalize_oauth_provider_alias("openai"),
             Some("openai-codex")
-        );
-    }
-
-    #[test]
-    fn extract_first_http_url_parses_login_output() {
-        let text = "Open this URL in your browser:\nhttps://auth.openai.com/oauth/authorize?foo=bar\nWaiting for callback ...";
-        let url = extract_first_http_url(text).expect("url");
-        assert!(url.starts_with("https://auth.openai.com/oauth/authorize"));
-    }
-
-    #[test]
-    fn oauth_auth_ref_uses_provider_and_profile_name() {
-        assert_eq!(
-            oauth_auth_ref("openai-codex", "default"),
-            "openai-codex:default"
         );
     }
 
@@ -1794,197 +1637,6 @@ pub fn upsert_model_profile(profile: ModelProfile) -> Result<ModelProfile, Strin
 }
 
 #[tauri::command]
-pub async fn start_zeroclaw_oauth_login(
-    provider: String,
-    profile: Option<String>,
-    instance_id: Option<String>,
-) -> Result<ZeroclawOauthLoginStartResult, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let normalized_provider = normalize_zeroclaw_oauth_provider(&provider)
-            .ok_or_else(|| format!("Unsupported OAuth provider: {}", provider.trim()))?;
-        let profile_name = normalize_oauth_profile_name(profile);
-        let auth_ref = oauth_auth_ref(normalized_provider, &profile_name);
-        let instance = instance_id
-            .as_deref()
-            .map(str::trim)
-            .filter(|v| !v.is_empty())
-            .unwrap_or("local")
-            .to_string();
-        let cfg_dir =
-            crate::runtime::zeroclaw::process::zeroclaw_oauth_config_dir_for_instance(&instance)?;
-        let cmd_path =
-            crate::runtime::zeroclaw::process::resolve_zeroclaw_command_path_for_internal()
-                .ok_or_else(|| "zeroclaw binary not found in bundled resources".to_string())?;
-        let cfg_arg = cfg_dir.to_string_lossy().to_string();
-        let args = vec![
-            "--config-dir".to_string(),
-            cfg_arg,
-            "auth".to_string(),
-            "login".to_string(),
-            "--provider".to_string(),
-            normalized_provider.to_string(),
-            "--profile".to_string(),
-            profile_name.clone(),
-        ];
-        let (exit_code, stdout, stderr, timed_out) = run_command_with_timeout_capture(
-            &cmd_path,
-            &args,
-            ZEROCLAW_OAUTH_LOGIN_CAPTURE_TIMEOUT_SECS,
-            "zeroclaw auth login",
-        )?;
-        let merged = format!("{}\n{}", stdout, stderr);
-        let details = trim_command_details(&merged);
-        let authorize_url = extract_first_http_url(&merged).ok_or_else(|| {
-            if !timed_out && exit_code != 0 {
-                format!(
-                    "zeroclaw auth login failed ({exit_code}). {}",
-                    if details.is_empty() {
-                        "No diagnostic details from zeroclaw.".to_string()
-                    } else {
-                        details.clone()
-                    }
-                )
-            } else if timed_out {
-                format!(
-                    "OAuth login timed out after {}s and no authorization URL was detected. {}",
-                    ZEROCLAW_OAUTH_LOGIN_CAPTURE_TIMEOUT_SECS,
-                    if details.is_empty() {
-                        "Try again and ensure zeroclaw auth login output is visible.".to_string()
-                    } else {
-                        details.clone()
-                    }
-                )
-            } else {
-                "OAuth login did not return an authorization URL.".to_string()
-            }
-        })?;
-        Ok(ZeroclawOauthLoginStartResult {
-            provider: normalized_provider.to_string(),
-            profile: profile_name,
-            auth_ref,
-            authorize_url,
-            details,
-        })
-    })
-    .await
-    .map_err(|e| format!("Task join failed: {e}"))?
-}
-
-#[tauri::command]
-pub async fn complete_zeroclaw_oauth_login(
-    provider: String,
-    redirect_input: String,
-    profile: Option<String>,
-    instance_id: Option<String>,
-) -> Result<ZeroclawOauthCompleteResult, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let normalized_provider = normalize_zeroclaw_oauth_provider(&provider)
-            .ok_or_else(|| format!("Unsupported OAuth provider: {}", provider.trim()))?;
-        let profile_name = normalize_oauth_profile_name(profile);
-        let auth_ref = oauth_auth_ref(normalized_provider, &profile_name);
-        let input = redirect_input.trim();
-        if input.is_empty() {
-            return Err("OAuth redirect URL or code is required.".to_string());
-        }
-        let instance = instance_id
-            .as_deref()
-            .map(str::trim)
-            .filter(|v| !v.is_empty())
-            .unwrap_or("local")
-            .to_string();
-        let cfg_dir =
-            crate::runtime::zeroclaw::process::zeroclaw_oauth_config_dir_for_instance(&instance)?;
-        let cmd_path =
-            crate::runtime::zeroclaw::process::resolve_zeroclaw_command_path_for_internal()
-                .ok_or_else(|| "zeroclaw binary not found in bundled resources".to_string())?;
-        let cfg_arg = cfg_dir.to_string_lossy().to_string();
-        let paste_args = vec![
-            "--config-dir".to_string(),
-            cfg_arg.clone(),
-            "auth".to_string(),
-            "paste-redirect".to_string(),
-            "--provider".to_string(),
-            normalized_provider.to_string(),
-            "--profile".to_string(),
-            profile_name.clone(),
-            "--input".to_string(),
-            input.to_string(),
-        ];
-        let (paste_code, paste_stdout, paste_stderr, paste_timed_out) =
-            run_command_with_timeout_capture(
-                &cmd_path,
-                &paste_args,
-                ZEROCLAW_OAUTH_COMPLETE_TIMEOUT_SECS,
-                "zeroclaw auth paste-redirect",
-            )?;
-        if paste_timed_out {
-            return Err(format!(
-                "zeroclaw auth paste-redirect timed out after {}s.",
-                ZEROCLAW_OAUTH_COMPLETE_TIMEOUT_SECS
-            ));
-        }
-        if paste_code != 0 {
-            let details = trim_command_details(&format!("{}\n{}", paste_stdout, paste_stderr));
-            return Err(format!(
-                "zeroclaw auth paste-redirect failed ({paste_code}): {}",
-                if details.is_empty() {
-                    "No diagnostic details from zeroclaw.".to_string()
-                } else {
-                    details
-                }
-            ));
-        }
-
-        let use_args = vec![
-            "--config-dir".to_string(),
-            cfg_arg,
-            "auth".to_string(),
-            "use".to_string(),
-            "--provider".to_string(),
-            normalized_provider.to_string(),
-            "--profile".to_string(),
-            profile_name.clone(),
-        ];
-        let (use_code, use_stdout, use_stderr, use_timed_out) = run_command_with_timeout_capture(
-            &cmd_path,
-            &use_args,
-            ZEROCLAW_OAUTH_COMPLETE_TIMEOUT_SECS,
-            "zeroclaw auth use",
-        )?;
-        if use_timed_out {
-            return Err(format!(
-                "zeroclaw auth use timed out after {}s.",
-                ZEROCLAW_OAUTH_COMPLETE_TIMEOUT_SECS
-            ));
-        }
-        if use_code != 0 {
-            let details = trim_command_details(&format!("{}\n{}", use_stdout, use_stderr));
-            return Err(format!(
-                "zeroclaw auth use failed ({use_code}): {}",
-                if details.is_empty() {
-                    "No diagnostic details from zeroclaw.".to_string()
-                } else {
-                    details
-                }
-            ));
-        }
-
-        let details = trim_command_details(&format!(
-            "{}\n{}\n{}\n{}",
-            paste_stdout, paste_stderr, use_stdout, use_stderr
-        ));
-        Ok(ZeroclawOauthCompleteResult {
-            provider: normalized_provider.to_string(),
-            profile: profile_name,
-            auth_ref,
-            details,
-        })
-    })
-    .await
-    .map_err(|e| format!("Task join failed: {e}"))?
-}
-
-#[tauri::command]
 pub fn delete_model_profile(profile_id: String) -> Result<bool, String> {
     let openclaw = clawpal_core::openclaw::OpenclawCli::new();
     clawpal_core::profile::delete_profile(&openclaw, &profile_id).map_err(|e| e.to_string())
@@ -2027,21 +1679,7 @@ pub fn resolve_provider_auth(provider: String) -> Result<ProviderAuthSuggestion,
         }
     }
 
-    // 2. Check zeroclaw OAuth auth store (local instance)
-    if let Some(normalized_provider) = normalize_zeroclaw_oauth_provider(provider_trimmed) {
-        let default_profile = "default";
-        if oauth_store_has_profile("local", normalized_provider, default_profile)
-            || oauth_store_has_profile_any_instance(normalized_provider, default_profile)
-        {
-            return Ok(ProviderAuthSuggestion {
-                auth_ref: Some(oauth_auth_ref(normalized_provider, default_profile)),
-                has_key: true,
-                source: "zeroclaw oauth profile".into(),
-            });
-        }
-    }
-
-    // 3. Check env vars
+    // 2. Check env vars
     for env_name in provider_env_var_candidates(provider_trimmed) {
         if std::env::var(&env_name)
             .map(|v| !v.trim().is_empty())
@@ -2055,7 +1693,7 @@ pub fn resolve_provider_auth(provider: String) -> Result<ProviderAuthSuggestion,
         }
     }
 
-    // 4. Check existing model profiles for this provider
+    // 3. Check existing model profiles for this provider
     let profiles = load_model_profiles(&paths);
     for p in &profiles {
         if p.provider.eq_ignore_ascii_case(provider_trimmed) {
@@ -2126,19 +1764,7 @@ pub async fn test_model_profile(profile_id: String) -> Result<bool, String> {
 
     let global_base = local_global_openclaw_base_dir();
     let api_key = resolve_profile_api_key(&profile, &global_base);
-    let normalized_oauth_provider = normalize_zeroclaw_oauth_provider(&profile.provider);
     if api_key.trim().is_empty() {
-        if let Some(oauth_provider) = normalized_oauth_provider {
-            let oauth_profile_name = profile_name_from_auth_ref(&profile.auth_ref);
-            if oauth_store_has_profile("local", oauth_provider, oauth_profile_name)
-                || oauth_store_has_profile_any_instance(oauth_provider, oauth_profile_name)
-            {
-                return Ok(true);
-            }
-            return Err(format!(
-                "No OAuth session found for {oauth_provider}:{oauth_profile_name}. Start OAuth login from Settings and complete authorization first."
-            ));
-        }
         if !provider_supports_optional_api_key(&profile.provider) {
             let hint = missing_profile_auth_hint(&profile.provider, false);
             return Err(

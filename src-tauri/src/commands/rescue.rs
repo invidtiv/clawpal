@@ -43,12 +43,16 @@ pub async fn remote_manage_rescue_bot(
     }
 
     if action == RescueBotAction::Status && !already_configured {
+        let runtime_state = infer_rescue_bot_runtime_state(false, None, None);
         return Ok(RescueBotManageResult {
             action: action.as_str().into(),
             profile,
             main_port,
             rescue_port,
             min_recommended_port,
+            configured: false,
+            active: false,
+            runtime_state,
             was_already_configured: false,
             commands: Vec::new(),
         });
@@ -81,12 +85,33 @@ pub async fn remote_manage_rescue_bot(
         commands.push(result);
     }
 
+    let configured = match action {
+        RescueBotAction::Unset => false,
+        RescueBotAction::Activate | RescueBotAction::Set | RescueBotAction::Deactivate => true,
+        RescueBotAction::Status => already_configured,
+    };
+    let status_output = commands
+        .iter()
+        .rev()
+        .find(|result| {
+            result
+                .command
+                .windows(2)
+                .any(|window| window[0] == "gateway" && window[1] == "status")
+        })
+        .map(|result| &result.output);
+    let runtime_state = infer_rescue_bot_runtime_state(configured, status_output, None);
+    let active = runtime_state == "active";
+
     Ok(RescueBotManageResult {
         action: action.as_str().into(),
         profile,
         main_port,
         rescue_port,
         min_recommended_port,
+        configured,
+        active,
+        runtime_state,
         was_already_configured: already_configured,
         commands,
     })

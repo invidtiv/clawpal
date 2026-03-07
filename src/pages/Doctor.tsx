@@ -1,23 +1,26 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { FileTextIcon, DownloadIcon } from "lucide-react";
-import { toast } from "sonner";
-import { hasGuidanceEmitted, useApi } from "@/lib/use-api";
-import { useInstance } from "@/lib/instance-context";
-import { useDoctorAgent } from "@/lib/use-doctor-agent";
-import type {
-  RescuePrimaryDiagnosisResult,
-  RescuePrimaryIssue,
-  RescuePrimaryRepairResult,
-} from "@/lib/types";
 import {
-  Card,
-  CardHeader,
-  CardTitle,
-  CardContent,
-} from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
+  AlertTriangleIcon,
+  CheckCircle2Icon,
+  CircleDashedIcon,
+  DownloadIcon,
+  FileTextIcon,
+  LoaderCircleIcon,
+  MoreHorizontalIcon,
+  PlayIcon,
+  PauseCircleIcon,
+  PauseIcon,
+  RefreshCwIcon,
+  StethoscopeIcon,
+  Trash2Icon,
+} from "lucide-react";
+import { toast } from "sonner";
+
+import { DoctorRecoveryOverview } from "@/components/DoctorRecoveryOverview";
+import { RescueAsciiHeader } from "@/components/RescueAsciiHeader";
 import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import {
   Dialog,
   DialogContent,
@@ -25,43 +28,40 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-  AlertDialogTrigger,
-} from "@/components/ui/alert-dialog";
-import { DoctorChat } from "@/components/DoctorChat";
-import { DoctorChatToolbar } from "@/components/DoctorChatToolbar";
-import { AsyncActionButton } from "@/components/ui/AsyncActionButton";
-import { resolveDoctorPageFeatureVisibility } from "@/lib/doctor-page-features";
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
+import { Skeleton } from "@/components/ui/skeleton";
+import { useInstance } from "@/lib/instance-context";
 import {
-  buildDoctorLaunchGuidanceKey,
-  hasZeroclawSession as hasZeroclawSessionState,
-  resolveDoctorChatConnected,
-  resolveEngineConnectionState,
-  resolvePendingDoctorLaunch,
-  shouldDisableOpenclawStart,
-  shouldShowDoctorDisconnectUi,
-  shouldDisableZeroclawStart,
-} from "@/lib/doctor-dual-engine";
-
-type RescueMessageTone = "info" | "success" | "error";
+  buildStatusProgressLines,
+  buildCheckProgressLines,
+  buildFixProgressLines,
+  getPrimaryRescueAction,
+  getPrimaryRescueActionIcon,
+  getIdleRescueProgress,
+  isIconOnlyPrimaryRescueAction,
+  shouldShowPrimaryRecovery,
+} from "@/lib/rescueBotUi";
+import type {
+  RescueBotAction,
+  RescueBotManageResult,
+  RescueBotRuntimeState,
+  RescuePrimaryDiagnosisResult,
+  RescuePrimaryRepairResult,
+} from "@/lib/types";
+import { useApi } from "@/lib/use-api";
 
 interface RescueUiState {
-  activating: boolean;
-  deactivating: boolean;
-  unsetting: boolean;
+  pendingAction: RescueBotAction | null;
   statusChecking: boolean;
-  configured: boolean | null;
+  runtimeState: RescueBotRuntimeState;
+  configured: boolean;
+  active: boolean;
   profile: string;
   port: number | null;
-  message: string | null;
-  messageTone: RescueMessageTone;
+  error: string | null;
 }
 
 interface PrimaryRecoveryState {
@@ -74,44 +74,19 @@ interface PrimaryRecoveryState {
   repairError: string | null;
 }
 
-interface DoctorLaunchGuidance {
-  message: string;
-  summary: string;
-  actions: string[];
-  preferredEngine?: "openclaw" | "zeroclaw";
-  operation: string;
-  instanceId: string;
-  transport: string;
-  rawError: string;
-  createdAt: number;
-}
-
-interface PendingDoctorLaunch {
-  key: string;
-  engine: "openclaw" | "zeroclaw";
-  extraContext: string;
-  summary: string;
-  instanceId: string;
-}
-
 interface DoctorProps {
-  active?: boolean;
   showGatewayLogsUi?: boolean;
-  launchGuidance?: DoctorLaunchGuidance | null;
-  onLaunchGuidanceConsumed?: (instanceId: string) => void;
-  connectRemoteHost?: (hostId: string) => Promise<void>;
 }
 
 const createInitialRescueUiState = (): RescueUiState => ({
-  activating: false,
-  deactivating: false,
-  unsetting: false,
+  pendingAction: null,
   statusChecking: false,
-  configured: null,
+  runtimeState: "checking",
+  configured: false,
+  active: false,
   profile: "rescue",
   port: null,
-  message: null,
-  messageTone: "info",
+  error: null,
 });
 
 const createInitialPrimaryRecoveryState = (): PrimaryRecoveryState => ({
@@ -124,99 +99,145 @@ const createInitialPrimaryRecoveryState = (): PrimaryRecoveryState => ({
   repairError: null,
 });
 
-function buildLaunchGuidanceContext(guidance: DoctorLaunchGuidance): string {
-  const lines: string[] = [
-    "[Escalated App Error Context]",
-    `instance: ${guidance.instanceId}`,
-    `transport: ${guidance.transport}`,
-    `operation: ${guidance.operation}`,
-    `error: ${guidance.rawError}`,
-  ];
-  const summary = (guidance.summary || guidance.message || "").trim();
-  if (summary) lines.push(`assistant_summary: ${summary}`);
-  if (guidance.actions.length > 0) {
-    lines.push("assistant_suggested_actions:");
-    for (const action of guidance.actions) {
-      lines.push(`- ${action}`);
+function useRotatingLine(active: boolean, lines: string[]) {
+  const [index, setIndex] = useState(0);
+
+  useEffect(() => {
+    if (!active || lines.length === 0) {
+      setIndex(0);
+      return;
     }
+    setIndex(0);
+    const timer = window.setInterval(() => {
+      setIndex((current) => (current + 1) % lines.length);
+    }, 1400);
+    return () => window.clearInterval(timer);
+  }, [active, lines]);
+
+  if (!active || lines.length === 0) {
+    return null;
   }
-  lines.push("Please prioritize diagnosing and fixing this exact failure path first.");
-  return lines.join("\n");
+  return {
+    line: lines[index] ?? null,
+    index,
+    total: lines.length,
+  };
 }
 
-export function Doctor({
-  active = false,
-  showGatewayLogsUi = false,
-  launchGuidance = null,
-  onLaunchGuidanceConsumed,
-  connectRemoteHost,
-}: DoctorProps) {
+function RescueStatusIndicator({
+  state,
+  title,
+}: {
+  state: RescueBotRuntimeState;
+  title: string;
+}) {
+  if (state === "active") {
+    return (
+      <div
+        className="inline-flex size-9 items-center justify-center rounded-full border border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
+        title={title}
+        aria-label={title}
+      >
+        <CheckCircle2Icon className="size-4" />
+      </div>
+    );
+  }
+  if (state === "configured_inactive") {
+    return (
+      <div
+        className="inline-flex size-9 items-center justify-center rounded-full border border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300"
+        title={title}
+        aria-label={title}
+      >
+        <PauseCircleIcon className="size-4" />
+      </div>
+    );
+  }
+  if (state === "error") {
+    return (
+      <div
+        className="inline-flex size-9 items-center justify-center rounded-full border border-destructive/30 bg-destructive/10 text-destructive"
+        title={title}
+        aria-label={title}
+      >
+        <AlertTriangleIcon className="size-4" />
+      </div>
+    );
+  }
+  if (state === "checking") {
+    return (
+      <div
+        className="inline-flex size-9 items-center justify-center rounded-full border border-border/60 bg-muted/40 text-muted-foreground"
+        title={title}
+        aria-label={title}
+      >
+        <LoaderCircleIcon className="size-4 animate-spin" />
+      </div>
+    );
+  }
+  return (
+    <div
+      className="inline-flex size-9 items-center justify-center rounded-full border border-border/60 bg-muted/40 text-muted-foreground"
+      title={title}
+      aria-label={title}
+    >
+      <CircleDashedIcon className="size-4" />
+    </div>
+  );
+}
+
+function RescueOverviewSkeleton({ progressLine }: { progressLine: string | null }) {
+  return (
+    <div className="mt-4 space-y-4">
+      <Card className="border-border/60 bg-muted/20">
+        <CardContent className="space-y-3 py-4">
+          <div className="h-5 overflow-hidden text-sm text-muted-foreground">
+            <span
+              key={progressLine}
+              className="inline-block whitespace-nowrap transition-opacity duration-300 animate-pulse"
+            >
+              {progressLine ?? ""}
+            </span>
+          </div>
+          <Skeleton className="h-5 w-2/3" />
+          <Skeleton className="h-4 w-5/6" />
+          <Skeleton className="h-9 w-36" />
+        </CardContent>
+      </Card>
+      {Array.from({ length: 5 }).map((_, index) => (
+        <Card key={index} className="gap-2 py-4">
+          <CardHeader className="pb-0">
+            <Skeleton className="h-5 w-28" />
+            <Skeleton className="mt-2 h-4 w-3/4" />
+          </CardHeader>
+          <CardContent className="pt-3">
+            <div className="grid gap-2">
+              <Skeleton className="h-16 w-full" />
+              <Skeleton className="h-16 w-full" />
+            </div>
+          </CardContent>
+        </Card>
+      ))}
+    </div>
+  );
+}
+
+export function Doctor({ showGatewayLogsUi = false }: DoctorProps) {
   const { t } = useTranslation();
   const ua = useApi();
-  const { instanceId, isDocker, isRemote, isConnected } = useInstance();
-  const zeroclawDoctor = useDoctorAgent();
-  const openclawDoctor = useDoctorAgent({ enableBridgeEvents: false });
-  const [zeroclawDiagnosing, setZeroclawDiagnosing] = useState(false);
-  const [zeroclawStartupStage, setZeroclawStartupStage] = useState<"idle" | "connecting" | "collecting" | "starting">("idle");
-  const [zeroclawStartError, setZeroclawStartError] = useState<string | null>(null);
-  const [openclawDiagnosing, setOpenclawDiagnosing] = useState(false);
-  const [openclawStartError, setOpenclawStartError] = useState<string | null>(null);
+  const { isRemote, isConnected } = useInstance();
 
-  // Full-auto confirmation dialog
-  const [fullAutoConfirmOpen, setFullAutoConfirmOpen] = useState(false);
-
-  // Logs state
   const [logsOpen, setLogsOpen] = useState(false);
   const [logsTab, setLogsTab] = useState<"app" | "error">("app");
   const [logsContent, setLogsContent] = useState("");
   const [logsLoading, setLogsLoading] = useState(false);
   const [logsError, setLogsError] = useState("");
-  const [zeroclawDoctorUiLoaded] = useState(true);
-  const [pendingDoctorLaunch, setPendingDoctorLaunch] = useState<PendingDoctorLaunch | null>(null);
   const logsContentRef = useRef<HTMLPreElement>(null);
-  const [rescueState, setRescueState] = useState<RescueUiState>(createInitialRescueUiState);
-  const [primaryState, setPrimaryState] = useState<PrimaryRecoveryState>(createInitialPrimaryRecoveryState);
-  const lastQueuedLaunchKeyRef = useRef<string | null>(null);
-  const lastDoctorTargetKeyRef = useRef<string | null>(null);
-  const letAiConnectionState = resolveEngineConnectionState({
-    diagnosing: openclawDiagnosing,
-    connected: openclawDoctor.connected,
-  });
-  const isZeroclawStarting = zeroclawDiagnosing;
-  const isOpenclawStarting = openclawDiagnosing;
-  const hasZeroclawSession = hasZeroclawSessionState({
-    connected: zeroclawDoctor.connected,
-    messageCount: zeroclawDoctor.messages.length,
-  });
-  const showZeroclawDisconnectUi = shouldShowDoctorDisconnectUi({
-    engine: "zeroclaw",
-    connected: zeroclawDoctor.connected,
-    messageCount: zeroclawDoctor.messages.length,
-  });
-  const zeroclawChatConnected = resolveDoctorChatConnected({
-    engine: "zeroclaw",
-    connected: zeroclawDoctor.connected,
-  });
 
-  const {
-    activating: rescueActivating,
-    deactivating: rescueDeactivating,
-    unsetting: rescueUnsetting,
-    statusChecking: rescueStatusChecking,
-    configured: rescueConfigured,
-    profile: rescueProfile,
-    port: rescuePort,
-    message: rescueMessage,
-    messageTone: rescueMessageTone,
-  } = rescueState;
-  const {
-    checkLoading: primaryCheckLoading,
-    checkResult: primaryCheckResult,
-    checkError: primaryCheckError,
-    repairing: primaryRepairing,
-    repairResult: primaryRepairResult,
-    repairError: primaryRepairError,
-  } = primaryState;
+  const [rescueState, setRescueState] = useState<RescueUiState>(createInitialRescueUiState);
+  const [primaryState, setPrimaryState] = useState<PrimaryRecoveryState>(
+    createInitialPrimaryRecoveryState,
+  );
 
   const updateRescueState = (patch: Partial<RescueUiState>) => {
     setRescueState((prev) => ({ ...prev, ...patch }));
@@ -226,209 +247,21 @@ export function Doctor({
     setPrimaryState((prev) => ({ ...prev, ...patch }));
   };
 
-  // Keep execution target synced with current instance tab:
-  // - local/docker: execute on local machine
-  // - remote ssh: execute on selected remote host
-  useEffect(() => {
-    const restoreScope = isRemote
-      ? instanceId
-      : isDocker
-        ? instanceId
-        : "local";
-    const targetKey = `${isRemote ? "remote" : isDocker ? "docker" : "local"}:${restoreScope}`;
-    if (
-      lastDoctorTargetKeyRef.current
-      && lastDoctorTargetKeyRef.current !== targetKey
-    ) {
-      zeroclawDoctor.reset();
-      openclawDoctor.reset();
-      void zeroclawDoctor.disconnect();
-      void openclawDoctor.disconnect();
-      setZeroclawDiagnosing(false);
-      setOpenclawDiagnosing(false);
-      setZeroclawStartupStage("idle");
-      setZeroclawStartError(null);
-      setOpenclawStartError(null);
-      setRescueState(createInitialRescueUiState());
+  const applyRescueResult = useCallback((result: RescueBotManageResult) => {
+    updateRescueState({
+      runtimeState: result.runtimeState,
+      configured: result.configured,
+      active: result.active,
+      profile: result.profile,
+      port: result.configured ? result.rescuePort : null,
+      error: null,
+    });
+    if (!result.active) {
       setPrimaryState(createInitialPrimaryRecoveryState());
-      setPendingDoctorLaunch(null);
-      lastQueuedLaunchKeyRef.current = null;
     }
-    lastDoctorTargetKeyRef.current = targetKey;
+  }, []);
 
-    const target = isRemote ? instanceId : "local";
-    zeroclawDoctor.setTarget(target);
-    openclawDoctor.setTarget(target);
-
-    zeroclawDoctor.restoreFromCache({
-      agentId: "main",
-      instanceScope: restoreScope,
-      domain: "doctor",
-      engine: "zeroclaw",
-    });
-    openclawDoctor.restoreFromCache({
-      agentId: "main",
-      instanceScope: restoreScope,
-      domain: "doctor",
-      engine: "openclaw",
-    });
-  }, [
-    openclawDoctor.disconnect,
-    openclawDoctor.reset,
-    openclawDoctor.restoreFromCache,
-    openclawDoctor.setTarget,
-    instanceId,
-    isDocker,
-    isRemote,
-    zeroclawDoctor.disconnect,
-    zeroclawDoctor.reset,
-    zeroclawDoctor.restoreFromCache,
-    zeroclawDoctor.setTarget,
-  ]);
-
-  const handleStartDiagnosis = async (
-    extraContext?: string,
-    overrideEngine?: "zeroclaw" | "openclaw"
-  ) => {
-    const engine = overrideEngine ?? "zeroclaw";
-    const doctorForEngine = engine === "zeroclaw" ? zeroclawDoctor : openclawDoctor;
-    if (engine === "zeroclaw" && !zeroclawDoctorUiLoaded) {
-      setZeroclawStartError(t("doctor.loading"));
-      return;
-    }
-    if (engine === "zeroclaw") {
-      setZeroclawStartError(null);
-      setZeroclawDiagnosing(true);
-      setZeroclawStartupStage("connecting");
-    } else {
-      setOpenclawStartError(null);
-      setOpenclawDiagnosing(true);
-    }
-    try {
-      if (isRemote && !instanceId.trim()) {
-        throw new Error(t("doctor.targetUnavailable"));
-      }
-      const diagnosisScope = isRemote
-        ? instanceId
-        : isDocker
-          ? instanceId
-          : "local";
-
-      if (isRemote) {
-        const status = await ua.sshStatus(instanceId);
-        if (status !== "connected") {
-          if (connectRemoteHost) {
-            await connectRemoteHost(instanceId);
-          } else {
-            await ua.sshConnect(instanceId);
-          }
-        }
-      }
-
-      if (engine === "zeroclaw") {
-        await zeroclawDoctor.connect();
-        setZeroclawStartupStage("collecting");
-      }
-      const baseContext = isRemote
-        ? await ua.collectDoctorContextRemote(instanceId)
-        : await ua.collectDoctorContext();
-      const context = extraContext
-        ? `${baseContext}\n\n${extraContext}`
-        : baseContext;
-      const diagnosisTransport: "local" | "docker_local" | "remote_ssh" = isRemote
-        ? "remote_ssh"
-        : isDocker
-          ? "docker_local"
-          : "local";
-      if (engine === "zeroclaw") {
-        setZeroclawStartupStage("starting");
-      }
-      await doctorForEngine.startDiagnosis(
-        context,
-        "main",
-        diagnosisScope,
-        diagnosisTransport,
-        undefined,
-        "doctor",
-        engine,
-      );
-    } catch (err) {
-      const msg = String(err);
-      if (engine === "zeroclaw") {
-        setZeroclawStartError(msg);
-      } else {
-        setOpenclawStartError(msg);
-      }
-    } finally {
-      if (engine === "zeroclaw") {
-        setZeroclawDiagnosing(false);
-        setZeroclawStartupStage("idle");
-      } else {
-        setOpenclawDiagnosing(false);
-      }
-    }
-  };
-
-  const startupHint = isZeroclawStarting && zeroclawDoctor.messages.length === 0
-    ? (zeroclawStartupStage === "collecting"
-      ? t("doctor.startupCollecting")
-      : zeroclawStartupStage === "starting"
-        ? t("doctor.startupStarting")
-        : t("doctor.startupConnecting"))
-    : null;
-
-  const handleStopDiagnosis = async (engine: "zeroclaw" | "openclaw" = "zeroclaw") => {
-    const doctorForEngine = engine === "zeroclaw" ? zeroclawDoctor : openclawDoctor;
-    await doctorForEngine.disconnect();
-    doctorForEngine.reset();
-    if (engine === "zeroclaw") {
-      setZeroclawDiagnosing(false);
-      setZeroclawStartupStage("idle");
-      setZeroclawStartError(null);
-    } else {
-      setOpenclawDiagnosing(false);
-      setOpenclawStartError(null);
-    }
-  };
-
-  const handleClearDiagnosis = async (engine: "zeroclaw" | "openclaw" = "zeroclaw") => {
-    const doctorForEngine = engine === "zeroclaw" ? zeroclawDoctor : openclawDoctor;
-    if (doctorForEngine.connected || doctorForEngine.bridgeConnected) {
-      await doctorForEngine.disconnect();
-    }
-    doctorForEngine.clearHistory();
-    if (engine === "zeroclaw") {
-      setZeroclawDiagnosing(false);
-      setZeroclawStartupStage("idle");
-      setZeroclawStartError(null);
-    } else {
-      setOpenclawDiagnosing(false);
-      setOpenclawStartError(null);
-    }
-  };
-
-  const pendingOpenclawLaunch = pendingDoctorLaunch?.engine === "openclaw"
-    ? pendingDoctorLaunch
-    : null;
-  const pendingZeroclawLaunch = pendingDoctorLaunch?.engine === "zeroclaw"
-    ? pendingDoctorLaunch
-    : null;
-
-  const handleStartQueuedOrManualDiagnosis = async (engine: "zeroclaw" | "openclaw") => {
-    const pending = pendingDoctorLaunch?.engine === engine
-      ? pendingDoctorLaunch
-      : null;
-
-    if (pending) {
-      onLaunchGuidanceConsumed?.(pending.instanceId);
-      setPendingDoctorLaunch(null);
-    }
-
-    await handleStartDiagnosis(pending?.extraContext, engine);
-  };
-
-  // Logs helpers
-  const fetchLog = (which: "app" | "error") => {
+  const fetchLog = useCallback((which: "app" | "error") => {
     setLogsLoading(true);
     setLogsError("");
     const fn = which === "app" ? ua.readGatewayLog : ua.readGatewayErrorLog;
@@ -447,7 +280,7 @@ export function Doctor({
         setLogsError(text || t("doctor.noLogs"));
       })
       .finally(() => setLogsLoading(false));
-  };
+  }, [t, ua]);
 
   const openLogs = () => {
     setLogsTab("app");
@@ -480,176 +313,120 @@ export function Doctor({
     }
   };
 
-  const refreshRescueStatus = async (isCancelled?: () => boolean) => {
+  const refreshRescueStatus = useCallback(async (isCancelled?: () => boolean) => {
     const cancelled = () => isCancelled?.() ?? false;
     if (isRemote && !isConnected) {
       if (cancelled()) return;
       updateRescueState({
-        configured: null,
+        statusChecking: false,
+        runtimeState: "error",
+        configured: false,
+        active: false,
         port: null,
-        message: t("doctor.rescueBotConnectRequired"),
-        messageTone: "info",
+        error: t("doctor.rescueBotConnectRequired"),
       });
       return;
     }
 
-    updateRescueState({ statusChecking: true });
+    updateRescueState({ statusChecking: true, error: null });
     try {
       const result = await ua.manageRescueBot("status");
       if (cancelled()) return;
-      updateRescueState({
-        configured: result.wasAlreadyConfigured,
-        profile: result.profile,
-        port: result.wasAlreadyConfigured ? result.rescuePort : null,
-        message: result.wasAlreadyConfigured
-          ? t("doctor.rescueBotAlreadyConfiguredState", {
-            profile: result.profile,
-            port: result.rescuePort,
-          })
-          : t("doctor.rescueBotNotConfigured"),
-        messageTone: "info",
-      });
+      applyRescueResult(result);
     } catch (error) {
       const text = error instanceof Error ? error.message : String(error);
       if (cancelled()) return;
       updateRescueState({
-        configured: null,
+        runtimeState: "error",
+        configured: false,
+        active: false,
         port: null,
-        message: t("doctor.rescueBotStatusCheckFailed", { error: text }),
-        messageTone: "error",
+        error: t("doctor.rescueBotStatusCheckFailed", {
+          defaultValue: "Failed to check Rescue Bot: {{error}}",
+          error: text,
+        }),
       });
     } finally {
       if (cancelled()) return;
       updateRescueState({ statusChecking: false });
     }
-  };
+  }, [applyRescueResult, isConnected, isRemote, t, ua]);
 
-  const handleActivateRescueBot = async () => {
+  const runRescueAction = async (action: RescueBotAction) => {
     if (isRemote && !isConnected) {
-      updateRescueState({
-        message: t("doctor.rescueBotConnectRequired"),
-        messageTone: "error",
-      });
+      updateRescueState({ runtimeState: "error", error: t("doctor.rescueBotConnectRequired") });
       return;
     }
-    updateRescueState({
-      activating: true,
-      message: null,
-      messageTone: "info",
-    });
+
+    updateRescueState({ pendingAction: action, error: null });
     try {
-      const result = await ua.manageRescueBot("activate");
+      const result = await ua.manageRescueBot(action);
+      applyRescueResult(result);
+      const successText = (() => {
+        switch (action) {
+          case "set":
+            return t("doctor.rescueBotSetSuccess", {
+              defaultValue: "Recovery helper is ready.",
+            });
+          case "activate":
+            return t("doctor.rescueBotActivateSuccess", {
+              defaultValue: "Recovery helper is enabled.",
+            });
+          case "deactivate":
+            return t("doctor.rescueBotDeactivateSuccess", {
+              defaultValue: "Recovery helper is paused.",
+            });
+          case "unset":
+            return t("doctor.rescueBotUnsetSuccess", {
+              defaultValue: "Recovery helper setup was removed.",
+            });
+          default:
+            return null;
+        }
+      })();
+      updateRescueState({ statusChecking: true });
+      try {
+        const statusResult = await ua.manageRescueBot("status");
+        applyRescueResult(statusResult);
+      } catch (error) {
+        const text = error instanceof Error ? error.message : String(error);
+        updateRescueState({
+          runtimeState: "error",
+          error: t("doctor.rescueBotStatusCheckFailed", {
+            defaultValue: "Failed to refresh helper status: {{error}}",
+            error: text,
+          }),
+        });
+        toast.error(
+          t("doctor.rescueBotStatusCheckFailed", {
+            defaultValue: "Failed to refresh helper status: {{error}}",
+            error: text,
+          }),
+        );
+        return;
+      } finally {
+        updateRescueState({ statusChecking: false });
+      }
+      if (successText) {
+        toast.success(successText);
+      }
+    } catch (error) {
+      const text = error instanceof Error ? error.message : String(error);
       updateRescueState({
-        configured: true,
-        profile: result.profile,
-        port: result.rescuePort,
-        message: t("doctor.rescueBotActivated", {
-          profile: result.profile,
-          port: result.rescuePort,
+        runtimeState: "error",
+        error: t("doctor.rescueBotActionFailed", {
+          defaultValue: "Rescue Bot action failed: {{error}}",
+          error: text,
         }),
-        messageTone: "success",
       });
-    } catch (error) {
-      const text = error instanceof Error ? error.message : String(error);
-      if (text.includes("Gateway restart timed out")) {
-        updateRescueState({
-          message: t("doctor.rescueBotFailedTimeout", { error: text }),
-          messageTone: "error",
-        });
-      } else {
-        updateRescueState({
-          message: t("doctor.rescueBotFailed", { error: text }),
-          messageTone: "error",
-        });
-      }
+      toast.error(
+        t("doctor.rescueBotActionFailed", {
+          defaultValue: "Rescue Bot action failed: {{error}}",
+          error: text,
+        }),
+      );
     } finally {
-      updateRescueState({ activating: false });
-    }
-  };
-
-  const handleDeactivateRescueBot = async () => {
-    if (isRemote && !isConnected) {
-      updateRescueState({
-        message: t("doctor.rescueBotConnectRequired"),
-        messageTone: "error",
-      });
-      return;
-    }
-    updateRescueState({
-      deactivating: true,
-      message: null,
-      messageTone: "info",
-    });
-    try {
-      const result = await ua.manageRescueBot("deactivate");
-      if (result.wasAlreadyConfigured) {
-        updateRescueState({
-          profile: result.profile,
-          configured: true,
-          port: result.rescuePort,
-          message: t("doctor.rescueBotDeactivated", { profile: result.profile }),
-          messageTone: "success",
-        });
-      } else {
-        updateRescueState({
-          profile: result.profile,
-          configured: false,
-          port: null,
-          message: t("doctor.rescueBotAlreadyNotConfigured"),
-          messageTone: "info",
-        });
-      }
-    } catch (error) {
-      const text = error instanceof Error ? error.message : String(error);
-      updateRescueState({
-        message: t("doctor.rescueBotDeactivateFailed", { error: text }),
-        messageTone: "error",
-      });
-    } finally {
-      updateRescueState({ deactivating: false });
-    }
-  };
-
-  const handleUnsetRescueBot = async () => {
-    if (isRemote && !isConnected) {
-      updateRescueState({
-        message: t("doctor.rescueBotConnectRequired"),
-        messageTone: "error",
-      });
-      return;
-    }
-    updateRescueState({
-      unsetting: true,
-      message: null,
-      messageTone: "info",
-    });
-    try {
-      const result = await ua.manageRescueBot("unset");
-      if (result.wasAlreadyConfigured) {
-        updateRescueState({
-          profile: result.profile,
-          configured: false,
-          port: null,
-          message: t("doctor.rescueBotUnset", { profile: result.profile }),
-          messageTone: "success",
-        });
-      } else {
-        updateRescueState({
-          profile: result.profile,
-          configured: false,
-          port: null,
-          message: t("doctor.rescueBotAlreadyNotConfigured"),
-          messageTone: "info",
-        });
-      }
-    } catch (error) {
-      const text = error instanceof Error ? error.message : String(error);
-      updateRescueState({
-        message: t("doctor.rescueBotUnsetFailed", { error: text }),
-        messageTone: "error",
-      });
-    } finally {
-      updateRescueState({ unsetting: false });
+      updateRescueState({ pendingAction: null });
     }
   };
 
@@ -660,105 +437,69 @@ export function Doctor({
     }
     updatePrimaryState({
       checkLoading: true,
+      checkResult: null,
       checkError: null,
-      repairError: null,
+      repairing: false,
+      repairingIssueId: null,
       repairResult: null,
+      repairError: null,
     });
     try {
-      const result = await ua.diagnosePrimaryViaRescue("primary", rescueProfile);
+      const result = await ua.diagnosePrimaryViaRescue("primary", rescueState.profile);
       updatePrimaryState({ checkResult: result });
     } catch (error) {
       const text = error instanceof Error ? error.message : String(error);
       updatePrimaryState({
-        checkResult: null,
-        checkError: t("doctor.primaryCheckFailed", { error: text }),
+        checkError: t("doctor.primaryCheckFailed", {
+          defaultValue: "Primary recovery check failed: {{error}}",
+          error: text,
+        }),
       });
     } finally {
       updatePrimaryState({ checkLoading: false });
     }
   };
 
-  const primaryStatusLabel = (status: RescuePrimaryDiagnosisResult["status"]) => {
-    if (status === "healthy") return t("doctor.primaryStatusHealthy");
-    if (status === "degraded") return t("doctor.primaryStatusDegraded");
-    return t("doctor.primaryStatusBroken");
-  };
-
-  const formatCheckedAt = (checkedAt: string) => {
-    const value = new Date(checkedAt);
-    if (Number.isNaN(value.getTime())) return checkedAt;
-    return value.toLocaleString();
-  };
-
-  const countSafeFixableIssues = (result: RescuePrimaryDiagnosisResult | null) =>
-    result?.issues.filter((issue) => issue.source === "primary" && issue.autoFixable).length ?? 0;
-
-  const handleRepairPrimaryViaRescue = async () => {
+  const handleRepairPrimaryViaRescue = async (issueIds?: string[]) => {
     if (isRemote && !isConnected) {
       updatePrimaryState({ repairError: t("doctor.rescueBotConnectRequired") });
       return;
     }
+    const selectedIssueIds =
+      issueIds
+      ?? primaryState.checkResult?.summary.selectedFixIssueIds
+      ?? [];
     updatePrimaryState({
       repairing: true,
-      repairingIssueId: null,
+      repairingIssueId: issueIds?.length === 1 ? issueIds[0] : null,
       repairError: null,
       repairResult: null,
     });
     try {
-      const selectedIssueIds =
-        primaryCheckResult?.issues
-          .filter((issue) => issue.source === "primary" && issue.autoFixable)
-          .map((issue) => issue.id) ?? [];
       const result = await ua.repairPrimaryViaRescue(
         "primary",
-        rescueProfile,
-        selectedIssueIds.length > 0 ? selectedIssueIds : undefined,
+        rescueState.profile,
+        selectedIssueIds,
       );
       updatePrimaryState({
         repairResult: result,
         checkResult: result.after,
         checkError: null,
       });
+      toast.success(
+        t("doctor.primaryRepairSuccess", {
+          defaultValue: "Applied {{count}} fix(es).",
+          count: result.appliedIssueIds.length,
+        }),
+      );
     } catch (error) {
       const text = error instanceof Error ? error.message : String(error);
       updatePrimaryState({
         repairResult: null,
-        repairError: t("doctor.primaryRepairFailed", { error: text }),
-      });
-    } finally {
-      updatePrimaryState({
-        repairing: false,
-        repairingIssueId: null,
-      });
-    }
-  };
-
-  const handleRepairPrimaryIssue = async (issue: RescuePrimaryIssue) => {
-    if (!issue.autoFixable || issue.source !== "primary") {
-      return;
-    }
-    if (isRemote && !isConnected) {
-      updatePrimaryState({ repairError: t("doctor.rescueBotConnectRequired") });
-      return;
-    }
-    updatePrimaryState({
-      repairing: true,
-      repairingIssueId: issue.id,
-      repairError: null,
-      repairResult: null,
-    });
-    try {
-      const result = await ua.repairPrimaryViaRescue("primary", rescueProfile, [issue.id]);
-      updatePrimaryState({
-        repairResult: result,
-        checkResult: result.after,
-        checkError: null,
-      });
-    } catch (error) {
-      const text = error instanceof Error ? error.message : String(error);
-      updatePrimaryState({
-        repairResult: null,
-        repairError: t("doctor.primaryRepairFailed", { error: text }),
+        repairError: t("doctor.primaryRepairFailed", {
+          defaultValue: "Primary repair failed: {{error}}",
+          error: text,
+        }),
       });
     } finally {
       updatePrimaryState({
@@ -770,562 +511,285 @@ export function Doctor({
 
   useEffect(() => {
     let cancelled = false;
-    const { showRescueBot } = resolveDoctorPageFeatureVisibility();
-    if (!showRescueBot) return;
     void refreshRescueStatus(() => cancelled);
     return () => {
       cancelled = true;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [instanceId, isRemote, isConnected]);
+  }, [isConnected, isRemote, refreshRescueStatus]);
 
   useEffect(() => {
-    const resolved = resolvePendingDoctorLaunch({
-      active,
-      doctorUiLoaded: zeroclawDoctorUiLoaded,
-      launchGuidance,
-      lastLaunchKey: lastQueuedLaunchKeyRef.current,
-    });
-    if (!resolved.shouldQueue || !launchGuidance || !resolved.engine) return;
-    lastQueuedLaunchKeyRef.current = resolved.nextLaunchKey;
-    setPendingDoctorLaunch({
-      key: buildDoctorLaunchGuidanceKey(launchGuidance),
-      engine: resolved.engine,
-      extraContext: buildLaunchGuidanceContext(launchGuidance),
-      summary: (launchGuidance.summary || launchGuidance.message || "").trim(),
-      instanceId: launchGuidance.instanceId,
-    });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [active, launchGuidance, onLaunchGuidanceConsumed, zeroclawDoctorUiLoaded]);
+    if (logsOpen) {
+      fetchLog(logsTab);
+    }
+  }, [fetchLog, logsOpen, logsTab]);
 
-  useEffect(() => {
-    if (logsOpen) fetchLog(logsTab);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [logsOpen, logsTab]);
-  const {
-    showDoctorClaw: showZeroclawDiagnosis,
-    showOtherAgentHelp: showOpenclawDoctorCard,
-    showRescueBot: showRescueBotCards,
-  } = resolveDoctorPageFeatureVisibility();
-  const isWsl2 = instanceId.startsWith("wsl2:");
-  const displayedDoctorTarget = isRemote || isDocker || isWsl2 ? instanceId : "local";
-  const instanceTypeLabel = isRemote
-    ? t("doctor.targetTypeSsh")
-    : isDocker
-      ? t("doctor.targetTypeDocker")
-      : isWsl2
-        ? t("doctor.targetTypeWsl2")
-        : t("doctor.targetTypeLocal");
-  const isPureLocal = !isRemote && !isDocker && !isWsl2;
+  const visibleRuntimeState: RescueBotRuntimeState =
+    rescueState.pendingAction || rescueState.statusChecking
+      ? "checking"
+      : rescueState.runtimeState;
+
+  const primaryAction = getPrimaryRescueAction(rescueState.runtimeState);
+  const primaryActionLabel = (() => {
+    if (primaryAction === "activate") {
+      return t("doctor.rescueBotActivate", { defaultValue: "Play" });
+    }
+    return t("doctor.rescueBotDeactivate", { defaultValue: "Pause" });
+  })();
+  const primaryActionBusyLabel = (() => {
+    if (primaryAction === "activate") {
+      return t("doctor.activatingRescueBot", { defaultValue: "Starting..." });
+    }
+    return t("doctor.deactivatingRescueBot", { defaultValue: "Pausing..." });
+  })();
+  const statusLabel = (() => {
+    switch (visibleRuntimeState) {
+      case "active":
+        return t("doctor.rescueBotStateActive", { defaultValue: "Helper is enabled" });
+      case "configured_inactive":
+        return t("doctor.rescueBotStateInactive", {
+          defaultValue: "Helper is paused",
+        });
+      case "checking":
+        return t("doctor.rescueBotChecking", { defaultValue: "Checking helper status" });
+      case "error":
+        return t("doctor.rescueBotStateError", {
+          defaultValue: "Helper needs attention",
+        });
+      default:
+        return t("doctor.rescueBotStateUnset", {
+          defaultValue: "Helper is not set up",
+        });
+    }
+  })();
+
+  const statusProgress = useRotatingLine(
+    rescueState.pendingAction !== null || rescueState.statusChecking,
+    useMemo(() => buildStatusProgressLines(), []),
+  );
+  const checkProgress = useRotatingLine(
+    primaryState.checkLoading,
+    useMemo(() => buildCheckProgressLines(), []),
+  );
+  const fixProgress = useRotatingLine(
+    primaryState.repairing,
+    useMemo(
+      () => buildFixProgressLines(primaryState.checkResult?.sections ?? []),
+      [primaryState.checkResult],
+    ),
+  );
+  const rescueHeaderProgress =
+    fixProgress
+    ?? checkProgress
+    ?? statusProgress;
+  const rescueHeaderProgressValue = rescueHeaderProgress
+    ? (rescueHeaderProgress.index + 1) / rescueHeaderProgress.total
+    : getIdleRescueProgress(visibleRuntimeState);
+
+  const primaryRecoveryVisible = shouldShowPrimaryRecovery(rescueState.runtimeState);
+  const iconOnlyPrimaryAction = isIconOnlyPrimaryRescueAction(rescueState.runtimeState);
+  const primaryActionIcon = getPrimaryRescueActionIcon(rescueState.runtimeState);
+  const actionsDisabled =
+    rescueState.statusChecking
+    || rescueState.pendingAction !== null
+    || (isRemote && !isConnected);
 
   return (
     <section>
-      <h2 className="text-2xl font-bold mb-4">{t("doctor.title")}</h2>
-      <div className="flex flex-col">
-        {showZeroclawDiagnosis && (
-          <Card className="gap-2 py-4 mb-4">
-            <CardHeader className="pb-0">
-              <div className="flex items-center justify-between gap-3 flex-wrap">
-                <CardTitle className="text-base">{t("doctor.engineZeroclaw")}</CardTitle>
-                {showGatewayLogsUi ? (
+      <h2 className="mb-4 text-2xl font-bold">{t("doctor.title")}</h2>
+      <Card className="mb-4 gap-2 py-4">
+        <CardHeader className="pb-0">
+          <div className="flex flex-col items-center gap-3 text-center">
+            <RescueAsciiHeader
+              state={visibleRuntimeState}
+              title={statusLabel}
+              progress={rescueHeaderProgressValue}
+              animateProgress={Boolean(rescueHeaderProgress)}
+            />
+            <div className="flex items-center justify-center gap-2">
+              {iconOnlyPrimaryAction ? (
+                <Button
+                  variant="ghost"
+                  size="icon-sm"
+                  onClick={() => void runRescueAction(primaryAction)}
+                  disabled={actionsDisabled}
+                  aria-label={rescueState.pendingAction === primaryAction ? primaryActionBusyLabel : primaryActionLabel}
+                  title={rescueState.pendingAction === primaryAction ? primaryActionBusyLabel : primaryActionLabel}
+                  className={
+                    primaryAction === "deactivate"
+                      ? "text-muted-foreground hover:bg-destructive/10 hover:text-destructive transition-colors"
+                      : "text-muted-foreground hover:bg-emerald-500/10 hover:text-emerald-700 dark:hover:text-emerald-300 transition-colors"
+                  }
+                >
+                  {rescueState.pendingAction === primaryAction || rescueState.statusChecking ? (
+                    <LoaderCircleIcon className="size-3.5 animate-spin" />
+                  ) : primaryActionIcon === "pause" ? (
+                    <PauseIcon className="size-3.5" />
+                  ) : (
+                    <PlayIcon className="size-3.5" />
+                  )}
+                </Button>
+              ) : null}
+              <Popover>
+                <PopoverTrigger asChild>
                   <Button
                     variant="ghost"
                     size="icon-sm"
-                    onClick={openLogs}
-                    aria-label={t("doctor.gatewayLogs")}
-                    title={t("doctor.gatewayLogs")}
-                    className="text-muted-foreground hover:text-foreground"
-                  >
-                    <FileTextIcon className="size-3.5" />
-                  </Button>
-                ) : null}
-              </div>
-            </CardHeader>
-            <CardContent>
-              {!hasZeroclawSession ? (
-                <>
-                  {zeroclawStartError && (
-                    <div className="mb-3 text-sm text-destructive">{zeroclawStartError}</div>
-                  )}
-                  {zeroclawDoctor.error && (
-                    <div className="mb-3 text-sm text-destructive">{zeroclawDoctor.error}</div>
-                  )}
-                  {startupHint && (
-                    <div className="mb-3 text-sm text-muted-foreground animate-pulse">
-                      {startupHint}
-                    </div>
-                  )}
-                  {pendingZeroclawLaunch && (
-                    <div className="mb-3 rounded-md border border-primary/20 bg-primary/5 px-3 py-2">
-                      <div className="text-sm font-medium">
-                        {pendingZeroclawLaunch.summary || t("doctor.startDiagnosis")}
-                      </div>
-                      <div className="text-xs text-muted-foreground mt-1">
-                        {t("doctor.pendingHandoffReady")}
-                      </div>
-                    </div>
-                  )}
-                  <Button
-                    onClick={() => {
-                      void handleStartQueuedOrManualDiagnosis("zeroclaw");
-                    }}
-                    disabled={shouldDisableZeroclawStart({
-                      diagnosing: isZeroclawStarting,
-                      doctorUiLoaded: zeroclawDoctorUiLoaded,
+                    disabled={actionsDisabled}
+                    aria-label={t("doctor.rescueBotMore", {
+                      defaultValue: "More options",
+                    })}
+                    title={t("doctor.rescueBotMore", {
+                      defaultValue: "More options",
                     })}
                   >
-                    {isZeroclawStarting
-                      ? t("doctor.connecting")
-                      : t("doctor.startDiagnosis")}
+                    <MoreHorizontalIcon className="size-3.5" />
                   </Button>
-                </>
-              ) : showZeroclawDisconnectUi ? (
-                <>
-                  <div className="flex items-center justify-between mb-3 p-2 rounded-md bg-destructive/10 border border-destructive/20">
-                    <span className="text-sm text-destructive">
-                      {zeroclawDoctor.error || t("doctor.disconnected")}
-                    </span>
-                    <div className="flex items-center gap-2">
-                      <Button size="sm" onClick={() => zeroclawDoctor.reconnect()}>
-                        {t("doctor.reconnect")}
+                </PopoverTrigger>
+                <PopoverContent align="end" className="w-56 p-3">
+                  <div className="grid gap-2">
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="justify-start"
+                      onClick={() => {
+                        void refreshRescueStatus();
+                      }}
+                      disabled={actionsDisabled}
+                    >
+                      <RefreshCwIcon className="size-3.5" />
+                      {t("doctor.refresh", { defaultValue: "Check status" })}
+                    </Button>
+                    {rescueState.configured ? (
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="justify-start text-muted-foreground hover:text-destructive"
+                        onClick={() => void runRescueAction("unset")}
+                        disabled={actionsDisabled}
+                      >
+                        <Trash2Icon className="size-3.5" />
+                        {t("doctor.unset", { defaultValue: "Remove setup" })}
                       </Button>
-                      <Button variant="outline" size="sm" onClick={() => {
-                        void handleStopDiagnosis("zeroclaw");
-                      }}>
-                        {t("doctor.stopDiagnosis")}
-                      </Button>
-                    </div>
+                    ) : null}
                   </div>
-                  <DoctorChat
-                    messages={zeroclawDoctor.messages}
-                    loading={false}
-                    error={null}
-                    connected={false}
-                    onSendMessage={zeroclawDoctor.sendMessage}
-                    onApproveInvoke={zeroclawDoctor.approveInvoke}
-                    onRejectInvoke={zeroclawDoctor.rejectInvoke}
-                  />
-                </>
-              ) : (
-                <>
-                  {startupHint && (
-                    <div className="mb-3 text-sm text-muted-foreground animate-pulse">
-                      {startupHint}
-                    </div>
-                  )}
-                  <DoctorChatToolbar
-                    fullAuto={zeroclawDoctor.fullAuto}
-                    clearDisabled={zeroclawDoctor.loading || isZeroclawStarting}
-                    onFullAutoChange={(checked) => {
-                      if (checked) {
-                        setFullAutoConfirmOpen(true);
-                      } else {
-                        zeroclawDoctor.setFullAuto(false);
-                      }
-                    }}
-                    onClear={() => {
-                      void handleClearDiagnosis("zeroclaw");
-                    }}
-                  />
-                  <DoctorChat
-                    messages={zeroclawDoctor.messages}
-                    loading={zeroclawDoctor.loading}
-                    error={zeroclawDoctor.error}
-                    connected={zeroclawChatConnected}
-                    onSendMessage={zeroclawDoctor.sendMessage}
-                    onApproveInvoke={zeroclawDoctor.approveInvoke}
-                    onRejectInvoke={zeroclawDoctor.rejectInvoke}
-                  />
-                </>
-              )}
-            </CardContent>
-          </Card>
-        )}
-
-        {showOpenclawDoctorCard && (
-        <Card className="gap-2 py-4 mb-4">
-          <CardHeader className="pb-0">
-            <div className="flex items-center justify-between gap-3 flex-wrap">
-              <CardTitle className="text-base">{t("installChat.letAiHelp")}</CardTitle>
-              <div className="flex items-center gap-2 flex-wrap justify-end">
-                <span className="text-xs text-muted-foreground">{t("doctor.targetExecutionLabel")}</span>
-                <code className="rounded bg-muted px-1.5 py-0.5 text-xs">{displayedDoctorTarget}</code>
-                <Badge variant="outline" className="text-[10px]">{instanceTypeLabel}</Badge>
-                <Badge
-                  variant={letAiConnectionState === "disconnected" ? "destructive" : "outline"}
-                  className="text-[10px]"
+                </PopoverContent>
+              </Popover>
+              {showGatewayLogsUi ? (
+                <Button
+                  variant="ghost"
+                  size="icon-sm"
+                  onClick={openLogs}
+                  aria-label={t("doctor.gatewayLogs")}
+                  title={t("doctor.gatewayLogs")}
+                  className="text-muted-foreground hover:text-foreground"
                 >
-                  {letAiConnectionState === "checking"
-                    ? t("doctor.connecting")
-                    : letAiConnectionState === "connected"
-                      ? t("doctor.connected")
-                      : t("doctor.disconnected")}
-                </Badge>
-                {isPureLocal && (
-                  <span className="text-[11px] text-amber-700 dark:text-amber-300">
-                    {t("doctor.targetExecutionLocalWarning")}
-                  </span>
-                )}
-                <Button variant="outline" size="sm" onClick={openLogs}>
-                  <FileTextIcon className="h-3.5 w-3.5 mr-1.5" />
-                  {t("doctor.gatewayLogs")}
+                  <FileTextIcon className="size-3.5" />
+                </Button>
+              ) : null}
+            </div>
+            <div className="max-w-md text-sm text-muted-foreground">
+              {t("doctor.rescueBotHint", {
+                defaultValue:
+                  "Safe checks and guided fixes before touching your main gateway.",
+              })}
+            </div>
+          </div>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          {rescueState.error ? (
+            <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+              <div>{rescueState.error}</div>
+              {showGatewayLogsUi ? (
+                <div className="mt-2">
+                  <Button variant="outline" size="sm" onClick={openLogs}>
+                    {t("doctor.viewGatewayLogs", {
+                      defaultValue: "View Gateway Logs",
+                    })}
+                  </Button>
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+
+          {primaryRecoveryVisible ? (
+            <div className="border-t border-border/50 pt-4">
+              <div className="flex items-center justify-between gap-3 flex-wrap">
+                <div>
+                  <h3 className="text-sm font-medium text-foreground/90">
+                    {t("doctor.primaryRecoveryTitle", {
+                      defaultValue: "Check Primary Agent",
+                    })}
+                  </h3>
+                  <p className="mt-1 text-sm text-muted-foreground">
+                    {t("doctor.primaryRecoveryHint", {
+                      defaultValue:
+                        "Run a structured recovery check across gateway, models, tools, agents, and channels.",
+                    })}
+                  </p>
+                </div>
+                <Button
+                  variant="ghost"
+                  size="icon-sm"
+                  onClick={handleCheckPrimaryViaRescue}
+                  disabled={primaryState.checkLoading || primaryState.repairing || (isRemote && !isConnected)}
+                  aria-label={t("doctor.primaryCheckNow", { defaultValue: "Check Primary Agent" })}
+                  title={t("doctor.primaryCheckNow", { defaultValue: "Check Primary Agent" })}
+                  className="text-muted-foreground hover:text-foreground"
+                >
+                  {primaryState.checkLoading
+                    ? <LoaderCircleIcon className="size-3.5 animate-spin" />
+                    : <StethoscopeIcon className="size-3.5" />}
                 </Button>
               </div>
-            </div>
-          </CardHeader>
-          <CardContent>
-            {openclawStartError && (
-              <div className="mb-3 text-sm text-destructive">{openclawStartError}</div>
-            )}
-            {openclawDoctor.error && (
-              <div className="mb-3 text-sm text-destructive">{openclawDoctor.error}</div>
-            )}
-            {pendingOpenclawLaunch && (
-              <div className="mb-3 rounded-md border border-primary/20 bg-primary/5 px-3 py-2">
-                <div className="text-sm font-medium">
-                  {pendingOpenclawLaunch.summary || t("installChat.letAiHelp")}
-                </div>
-                <div className="text-xs text-muted-foreground mt-1">
-                  {t("doctor.pendingHandoffReady")}
-                </div>
-              </div>
-            )}
-            <Button
-              onClick={() => {
-                void handleStartQueuedOrManualDiagnosis("openclaw");
-              }}
-              disabled={shouldDisableOpenclawStart({ diagnosing: isOpenclawStarting })}
-              variant={showZeroclawDiagnosis ? "outline" : "default"}
-            >
-              {isOpenclawStarting
-                ? t("doctor.connecting")
-                : t("installChat.letAiHelp")}
-            </Button>
-          </CardContent>
-        </Card>
-        )}
 
-        {showRescueBotCards && (
-          <Card className="mb-4 gap-2 py-4">
-            <CardHeader className="pb-0">
-              <CardTitle className="text-base">{t("doctor.rescueBotTitle")}</CardTitle>
-            </CardHeader>
-            <CardContent>
-              <div className="flex items-center justify-between gap-3 flex-wrap">
-                <p className="text-sm text-muted-foreground">{t("doctor.rescueBotHint")}</p>
-                <div className="flex items-center gap-2">
-                  <Button
-                    variant="default"
-                    size="sm"
-                    onClick={handleActivateRescueBot}
-                    disabled={
-                      rescueActivating
-                      || rescueDeactivating
-                      || rescueUnsetting
-                      || rescueStatusChecking
-                      || (isRemote && !isConnected)
-                    }
-                  >
-                    {rescueActivating ? t("doctor.activatingRescueBot") : t("doctor.activateRescueBot")}
-                  </Button>
-                  <Button
-                    variant="secondary"
-                    size="sm"
-                    onClick={handleDeactivateRescueBot}
-                    disabled={
-                      rescueActivating
-                      || rescueDeactivating
-                      || rescueUnsetting
-                      || rescueStatusChecking
-                      || rescueConfigured !== true
-                      || (isRemote && !isConnected)
-                    }
-                  >
-                    {rescueDeactivating ? t("doctor.deactivatingRescueBot") : t("doctor.deactivateRescueBot")}
-                  </Button>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={handleUnsetRescueBot}
-                    disabled={
-                      rescueActivating
-                      || rescueDeactivating
-                      || rescueUnsetting
-                      || rescueStatusChecking
-                      || rescueConfigured !== true
-                      || (isRemote && !isConnected)
-                    }
-                  >
-                    {rescueUnsetting ? t("doctor.unsettingRescueBot") : t("doctor.unsetRescueBot")}
-                  </Button>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={() => {
-                      void refreshRescueStatus();
-                    }}
-                    disabled={
-                      rescueActivating
-                      || rescueDeactivating
-                      || rescueUnsetting
-                      || rescueStatusChecking
-                      || (isRemote && !isConnected)
-                    }
-                  >
-                    {rescueStatusChecking ? t("doctor.rescueBotChecking") : t("doctor.refresh")}
-                  </Button>
-                </div>
-              </div>
-              {rescueMessage && (
-                <div
-                  className={`mt-3 rounded-md border px-3 py-2 text-sm ${
-                    rescueMessageTone === "error"
-                      ? "border-destructive/40 bg-destructive/10 text-destructive"
-                      : rescueMessageTone === "success"
-                        ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
-                        : "border-border/50 bg-muted/40 text-muted-foreground"
-                  }`}
-                >
-                  <div>{rescueMessage}</div>
-                  {rescueMessageTone === "error" && (
+              {primaryState.checkLoading ? (
+                <RescueOverviewSkeleton progressLine={checkProgress?.line ?? null} />
+              ) : null}
+
+              {primaryState.checkError ? (
+                <div className="mt-3 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+                  <div>{primaryState.checkError}</div>
+                  {showGatewayLogsUi ? (
                     <div className="mt-2">
                       <Button variant="outline" size="sm" onClick={openLogs}>
-                        {t("doctor.viewGatewayLogs")}
+                        {t("doctor.viewGatewayLogs", {
+                          defaultValue: "View Gateway Logs",
+                        })}
                       </Button>
                     </div>
-                  )}
+                  ) : null}
                 </div>
-              )}
-              {rescueConfigured === true && (
-                <div className="border-t border-border/50 mt-4 pt-4">
-                  <h3 className="text-sm font-medium text-foreground/80 mb-2">{t("doctor.primaryRecoveryTitle")}</h3>
-                  <div className="flex items-center justify-between gap-3 flex-wrap">
-                    <p className="text-sm text-muted-foreground">{t("doctor.primaryRecoveryHint")}</p>
-                    <div className="flex items-center gap-2">
-                      <AsyncActionButton
-                        variant="default"
-                        size="sm"
-                        onClick={handleCheckPrimaryViaRescue}
-                        loadingText={t("doctor.primaryChecking")}
-                        disabled={primaryCheckLoading || primaryRepairing || (isRemote && !isConnected)}
-                      >
-                        {t("doctor.primaryCheckNow")}
-                      </AsyncActionButton>
-                      <AsyncActionButton
-                        variant="secondary"
-                        size="sm"
-                        onClick={handleRepairPrimaryViaRescue}
-                        loadingText={t("doctor.primaryRepairing")}
-                        disabled={
-                          primaryCheckLoading
-                          || primaryRepairing
-                          || !primaryCheckResult
-                          || (isRemote && !isConnected)
-                        }
-                      >
-                        {t("doctor.primaryRepairNow", { count: countSafeFixableIssues(primaryCheckResult) })}
-                      </AsyncActionButton>
-                    </div>
-                  </div>
-                </div>
-              )}
-              {primaryCheckError && (
-                <div className="mt-3 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
-                  <div>{primaryCheckError}</div>
-                  <div className="mt-2">
-                    <Button variant="outline" size="sm" onClick={openLogs}>
-                      {t("doctor.viewGatewayLogs")}
-                    </Button>
-                  </div>
-                </div>
-              )}
-              {primaryRepairError && (
-                <div className="mt-3 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
-                  <div>{primaryRepairError}</div>
-                  <div className="mt-2">
-                    <Button variant="outline" size="sm" onClick={openLogs}>
-                      {t("doctor.viewGatewayLogs")}
-                    </Button>
-                  </div>
-                </div>
-              )}
-              {primaryCheckResult && (
-                <div className="mt-3 rounded-md border border-border/60 bg-muted/20 px-3 py-3">
-                  <div className="flex items-center justify-between gap-2 flex-wrap">
-                    <div className="text-sm">
-                      {t("doctor.primaryCheckedAt", { time: formatCheckedAt(primaryCheckResult.checkedAt) })}
-                    </div>
-                    <Badge
-                      variant={primaryCheckResult.status === "healthy" ? "outline" : "destructive"}
-                      className={primaryCheckResult.status === "healthy" ? "border-emerald-500/40 text-emerald-700 dark:text-emerald-300" : undefined}
-                    >
-                      {primaryStatusLabel(primaryCheckResult.status)}
-                    </Badge>
-                  </div>
-                  <div className="mt-3 text-xs font-medium uppercase tracking-wide text-muted-foreground">
-                    {t("doctor.primaryChecks")}
-                  </div>
-                  <div className="mt-2 grid gap-2">
-                    {primaryCheckResult.checks.map((check) => (
-                      <div key={check.id} className="rounded-md border border-border/50 bg-background/60 p-2">
-                        <div className="flex items-center justify-between gap-2">
-                          <div className="flex items-center gap-2">
-                            <div className="text-sm">{check.title}</div>
-                            {!check.ok && check.id === "rescue.profile.configured" && (
-                              <Button
-                                variant="outline"
-                                size="sm"
-                                className="h-6 px-2 text-[11px]"
-                                onClick={handleActivateRescueBot}
-                                disabled={
-                                  rescueActivating
-                                  || rescueDeactivating
-                                  || rescueUnsetting
-                                  || rescueStatusChecking
-                                  || (isRemote && !isConnected)
-                                }
-                              >
-                                {rescueActivating ? t("doctor.activatingRescueBot") : t("doctor.activateRescueBot")}
-                              </Button>
-                            )}
-                            {!check.ok && check.id.startsWith("primary.") && countSafeFixableIssues(primaryCheckResult) > 0 && (
-                              <AsyncActionButton
-                                variant="outline"
-                                size="sm"
-                                className="h-6 px-2 text-[11px]"
-                                onClick={handleRepairPrimaryViaRescue}
-                                loadingText={t("doctor.primaryRepairing")}
-                                disabled={primaryCheckLoading || primaryRepairing || (isRemote && !isConnected)}
-                              >
-                                {t("doctor.primaryQuickFix")}
-                              </AsyncActionButton>
-                            )}
-                          </div>
-                          <Badge variant={check.ok ? "outline" : "destructive"} className="text-[10px]">
-                            {check.ok ? t("doctor.primaryCheckPass") : t("doctor.primaryCheckFail")}
-                          </Badge>
-                        </div>
-                        <div className="mt-1 text-xs text-muted-foreground">{check.detail}</div>
-                      </div>
-                    ))}
-                  </div>
-                  <div className="mt-3 text-xs font-medium uppercase tracking-wide text-muted-foreground">
-                    {t("doctor.primaryIssues")}
-                  </div>
-                  {primaryCheckResult.issues.length === 0 ? (
-                    <div className="mt-2 text-sm text-emerald-700 dark:text-emerald-300">
-                      {t("doctor.primaryNoIssues")}
-                    </div>
-                  ) : (
-                    <div className="mt-2 grid gap-2">
-                      {primaryCheckResult.issues.map((issue) => (
-                        <div key={issue.id} className="rounded-md border border-destructive/30 bg-destructive/5 p-2">
-                          <div className="flex items-center justify-between gap-2">
-                            <div className="flex items-center gap-2">
-                              <div className="text-sm">{issue.message}</div>
-                              {issue.source === "primary" && issue.autoFixable && (
-                                <AsyncActionButton
-                                  variant="outline"
-                                  size="sm"
-                                  className="h-6 px-2 text-[11px]"
-                                  onClick={() => handleRepairPrimaryIssue(issue)}
-                                  loadingText={t("doctor.primaryIssueFixing")}
-                                  disabled={primaryCheckLoading || primaryRepairing || (isRemote && !isConnected)}
-                                >
-                                  {t("doctor.primaryIssueFix")}
-                                </AsyncActionButton>
-                              )}
-                            </div>
-                            <div className="flex items-center gap-1">
-                              <Badge variant="outline" className="text-[10px]">
-                                {issue.source === "rescue"
-                                  ? t("doctor.primaryIssueSourceRescue")
-                                  : t("doctor.primaryIssueSourcePrimary")}
-                              </Badge>
-                              <Badge variant={issue.severity === "error" ? "destructive" : "outline"} className="text-[10px]">
-                                {issue.severity}
-                              </Badge>
-                            </div>
-                          </div>
-                          {issue.fixHint && (
-                            <div className="mt-1 text-xs text-muted-foreground">{issue.fixHint}</div>
-                          )}
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                  {primaryRepairResult && (
-                    <div className="mt-4 rounded-md border border-border/60 bg-background/70 p-3">
-                      <div className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-                        {t("doctor.primaryRepairSummary")}
-                      </div>
-                      <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
-                        <Badge variant="outline">
-                          {t("doctor.primaryRepairSelected", { count: primaryRepairResult.selectedIssueIds.length })}
-                        </Badge>
-                        <Badge variant="outline" className="border-emerald-500/40 text-emerald-700 dark:text-emerald-300">
-                          {t("doctor.primaryRepairApplied", { count: primaryRepairResult.appliedIssueIds.length })}
-                        </Badge>
-                        <Badge variant="outline">
-                          {t("doctor.primaryRepairSkipped", { count: primaryRepairResult.skippedIssueIds.length })}
-                        </Badge>
-                        <Badge variant={primaryRepairResult.failedIssueIds.length > 0 ? "destructive" : "outline"}>
-                          {t("doctor.primaryRepairFailedCount", { count: primaryRepairResult.failedIssueIds.length })}
-                        </Badge>
-                      </div>
-                      <div className="mt-2 text-xs text-muted-foreground">
-                        {t("doctor.primaryRecheckedAt", { time: formatCheckedAt(primaryRepairResult.after.checkedAt) })}
-                      </div>
-                      <div className="mt-3 grid gap-2">
-                        {primaryRepairResult.steps.map((step) => (
-                          <div key={step.id} className="rounded-md border border-border/50 bg-muted/20 p-2">
-                            <div className="flex items-center justify-between gap-2">
-                              <div className="text-sm">{step.title}</div>
-                              <Badge variant={step.ok ? "outline" : "destructive"} className="text-[10px]">
-                                {step.ok ? t("doctor.primaryCheckPass") : t("doctor.primaryCheckFail")}
-                              </Badge>
-                            </div>
-                            <div className="mt-1 text-xs text-muted-foreground">{step.detail}</div>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-                </div>
-              )}
-            </CardContent>
-          </Card>
-        )}
-      </div>
- 
-      {/* Full-Auto Confirmation */}
-      <Dialog open={fullAutoConfirmOpen} onOpenChange={setFullAutoConfirmOpen}>
-        <DialogContent className="sm:max-w-md">
-          <DialogHeader>
-            <DialogTitle>{t("doctor.fullAutoTitle")}</DialogTitle>
-          </DialogHeader>
-          <p className="text-sm text-muted-foreground">{t("doctor.fullAutoWarning")}</p>
-          <div className="flex justify-end gap-2 mt-4">
-            <Button variant="outline" size="sm" onClick={() => setFullAutoConfirmOpen(false)}>
-              {t("doctor.cancel")}
-            </Button>
-            <Button variant="destructive" size="sm" onClick={() => {
-              zeroclawDoctor.setFullAuto(true);
-              setFullAutoConfirmOpen(false);
-            }}>
-              {t("doctor.fullAutoConfirm")}
-            </Button>
-          </div>
-        </DialogContent>
-      </Dialog>
+              ) : null}
 
-      {/* Logs Dialog */}
+              {primaryState.checkResult ? (
+                <DoctorRecoveryOverview
+                  diagnosis={primaryState.checkResult}
+                  checkLoading={primaryState.checkLoading}
+                  repairing={primaryState.repairing}
+                  progressLine={fixProgress?.line ?? null}
+                  repairResult={primaryState.repairResult}
+                  repairError={primaryState.repairError}
+                  onRepairAll={() => void handleRepairPrimaryViaRescue()}
+                  onRepairIssue={(issueId) => void handleRepairPrimaryViaRescue([issueId])}
+                />
+              ) : null}
+            </div>
+          ) : (
+            <div className="rounded-md border border-border/50 bg-muted/20 px-3 py-3 text-sm text-muted-foreground">
+              {t("doctor.primaryRecoveryActivateHint", {
+                defaultValue: "Enable the helper to unlock the primary recovery check.",
+              })}
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
       <Dialog open={logsOpen} onOpenChange={setLogsOpen}>
         <DialogContent className="sm:max-w-2xl max-h-[80vh] flex flex-col">
           <DialogHeader>
             <DialogTitle>{t("doctor.gatewayLogs")}</DialogTitle>
           </DialogHeader>
-          <div className="flex items-center gap-2 flex-wrap mb-2">
+          <div className="mb-2 flex items-center gap-2 flex-wrap">
             <Button
               variant={logsTab === "app" ? "default" : "outline"}
               size="sm"
@@ -1354,15 +818,15 @@ export function Doctor({
               onClick={exportLogs}
               disabled={logsLoading}
             >
-              <DownloadIcon className="h-3.5 w-3.5 mr-1.5" />
+              <DownloadIcon className="mr-1.5 h-3.5 w-3.5" />
               {t("doctor.exportLogs")}
             </Button>
           </div>
-          {logsError && (
+          {logsError ? (
             <p className="mb-2 text-xs text-destructive">
               {t("doctor.logReadFailed", { error: logsError })}
             </p>
-          )}
+          ) : null}
           <pre
             ref={logsContentRef}
             className="flex-1 min-h-[300px] max-h-[60vh] overflow-auto rounded-md border bg-muted p-3 text-xs font-mono whitespace-pre-wrap break-all"
@@ -1371,7 +835,6 @@ export function Doctor({
           </pre>
         </DialogContent>
       </Dialog>
-
     </section>
   );
 }

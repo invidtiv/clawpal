@@ -1,7 +1,8 @@
+#[cfg(test)]
 use crate::json_util::extract_json_objects;
-use crate::runtime::zeroclaw::process::run_zeroclaw_message;
 use crate::ssh::SshConnectionPool;
 use serde::{Deserialize, Serialize};
+#[cfg(test)]
 use serde_json::Value;
 use tauri::State;
 
@@ -41,6 +42,7 @@ struct OpenclawProbe {
     probe_error: Option<String>,
 }
 
+#[cfg(test)]
 fn parse_guidance_json(raw: &str) -> Option<GuidanceBody> {
     for cand in extract_json_objects(raw) {
         let Ok(v) = serde_json::from_str::<Value>(&cand) else {
@@ -98,7 +100,7 @@ fn rules_fallback(
                     .to_string(),
             actions: vec![
                 "重新进入该实例并等待 1-2 秒后自动刷新。".to_string(),
-                "若仍失败，打开 Doctor 让 AI 继续帮你排查并给下一步建议。".to_string(),
+                "若仍失败，打开 Help 页面查看恢复建议并继续处理。".to_string(),
             ],
             structured_actions: vec![GuidanceAction {
                 label: "让 AI 继续排查".to_string(),
@@ -143,7 +145,7 @@ fn rules_fallback(
             summary: "实例对应的 Docker 容器已不存在，可能已被手动删除。".to_string(),
             actions: vec![
                 "重新安装该实例，或从实例列表中移除。".to_string(),
-                "打开 Doctor 页面让 AI 继续排查并修复。".to_string(),
+                "打开 Help 页面查看恢复建议并继续处理。".to_string(),
             ],
             structured_actions: vec![GuidanceAction {
                 label: "让 AI 继续排查".to_string(),
@@ -183,7 +185,7 @@ fn rules_fallback(
             actions.push("在目标实例执行 openclaw 安装/修复脚本，并重新登录 shell。".to_string());
             actions.push("确认 `command -v openclaw` 可返回路径后，再重试当前操作。".to_string());
         }
-        actions.push("进入 Doctor 页面点击“继续诊断”，让 AI 自动帮你继续排查。".to_string());
+        actions.push("进入 Help 页面查看恢复建议并继续排查。".to_string());
         return GuidanceBody {
             summary,
             actions,
@@ -204,7 +206,7 @@ fn rules_fallback(
                 "确认 ~/.ssh/config 里的 User 与目标实例实际登录用户一致（例如 root 账号通常被禁用）。".to_string(),
                 "确认对应 IdentityFile 的公钥已写入远端 ~/.ssh/authorized_keys。".to_string(),
                 "可先在终端运行 `ssh <alias>` 验证后再返回重试。".to_string(),
-                "若仍失败，请先打开 Doctor 页面执行自动诊断并按建议继续处理。".to_string(),
+                "若仍失败，请先打开 Help 页面查看恢复建议并继续处理。".to_string(),
             ],
             structured_actions: vec![GuidanceAction {
                 label: "让 AI 继续排查".to_string(),
@@ -241,7 +243,7 @@ fn rules_fallback(
             actions: vec![
                 format!("先在实例页重连 {target_hint} 的 SSH 并确认网络可达。"),
                 "执行一次健康检查，确认网关和配置目录可访问。".to_string(),
-                "若仍失败，请先打开 Doctor 页面执行自动诊断并按建议继续处理。".to_string(),
+                "若仍失败，请先打开 Help 页面查看恢复建议并继续处理。".to_string(),
             ],
             structured_actions: vec![
                 GuidanceAction {
@@ -267,7 +269,7 @@ fn rules_fallback(
     GuidanceBody {
         summary: format!("操作 `{operation}` 在 `{transport}` 环境执行失败，建议先做诊断再继续。"),
         actions: vec![
-            "打开 Doctor 页面运行诊断，获取可执行修复步骤。".to_string(),
+            "打开 Help 页面查看恢复建议，获取可执行修复步骤。".to_string(),
             "按诊断结果优先处理阻塞项后，再重试当前操作。".to_string(),
         ],
         structured_actions: vec![GuidanceAction {
@@ -282,7 +284,7 @@ fn rules_fallback(
 }
 
 /// Deterministic guidance for when openclaw is not installed locally.
-/// This avoids sending the error to zeroclaw (which itself requires the binary)
+/// This avoids cascading into extra runtime dependencies when local OpenClaw is absent.
 /// and prevents hallucinated diagnoses like REGISTRY_CORRUPT.
 fn local_openclaw_not_installed_guidance(operation: &str) -> GuidanceBody {
     GuidanceBody {
@@ -371,10 +373,8 @@ pub async fn explain_operation_error(
 ) -> Result<ErrorGuidance, String> {
     let lower_error = error.to_lowercase();
 
-    // Fast path: when openclaw is not installed locally, skip the LLM call
-    // entirely and return deterministic guidance. Without the binary, zeroclaw
-    // cannot run either, so the LLM would hallucinate a wrong diagnosis
-    // (e.g. REGISTRY_CORRUPT).
+    // Fast path: when openclaw is not installed locally, return deterministic
+    // guidance immediately instead of depending on any extra assistant runtime.
     if transport != "remote_ssh" && looks_like_openclaw_binary_missing(&lower_error) {
         let guidance = local_openclaw_not_installed_guidance(&operation);
         let message = compose_message(&guidance.summary, &guidance.actions);
@@ -394,41 +394,8 @@ pub async fn explain_operation_error(
     } else {
         None
     };
-    let language = language.unwrap_or_else(|| "en".to_string());
-    let prefer_zh = language.to_lowercase().starts_with("zh");
-    let language_rule = if prefer_zh {
-        "Simplified Chinese (简体中文)"
-    } else {
-        "English"
-    };
-    let template = crate::prompt_templates::error_guidance_operation_fallback();
-    let probe_json = serde_json::to_string(&probe).unwrap_or_else(|_| "null".to_string());
-    let prompt = crate::prompt_templates::render_template(
-        &template,
-        &[
-            ("{{language_rule}}", language_rule),
-            ("{{instance_id}}", &instance_id),
-            ("{{transport}}", &transport),
-            ("{{operation}}", &operation),
-            ("{{error}}", &error),
-            ("{{probe}}", &probe_json),
-            ("{{language}}", &language),
-        ],
-    );
-
-    let fallback_scope = format!("fallback-{}", uuid::Uuid::new_v4());
-    let from_agent = run_zeroclaw_message(&prompt, &instance_id, &fallback_scope)
-        .ok()
-        .and_then(|raw| parse_guidance_json(&raw));
-
-    let (guidance, source) = if let Some(parsed) = from_agent {
-        (parsed, "zeroclaw".to_string())
-    } else {
-        (
-            rules_fallback(&error, &transport, &operation, probe.as_ref()),
-            "rules".to_string(),
-        )
-    };
+    let _language = language.unwrap_or_else(|| "en".to_string());
+    let guidance = rules_fallback(&error, &transport, &operation, probe.as_ref());
 
     let message = compose_message(&guidance.summary, &guidance.actions);
     Ok(ErrorGuidance {
@@ -436,7 +403,7 @@ pub async fn explain_operation_error(
         summary: guidance.summary,
         actions: guidance.actions,
         structured_actions: guidance.structured_actions,
-        source,
+        source: "rules".to_string(),
     })
 }
 

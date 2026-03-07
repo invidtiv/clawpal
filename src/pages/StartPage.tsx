@@ -94,8 +94,6 @@ interface StartPageProps {
   discoveredInstances: DiscoveredInstance[];
   discoveringInstances: boolean;
   onConnectDiscovered: (instance: DiscoveredInstance) => void;
-  onQuickDiagnose?: (context: string, instanceId?: string) => void;
-  showQuickDiagnose?: boolean;
 }
 
 export function StartPage({
@@ -116,8 +114,6 @@ export function StartPage({
   discoveredInstances,
   discoveringInstances,
   onConnectDiscovered,
-  onQuickDiagnose,
-  showQuickDiagnose = false,
 }: StartPageProps) {
   const { t } = useTranslation();
   const fallbackLabelForId = useCallback((id: string): string => {
@@ -545,19 +541,6 @@ export function StartPage({
                     ? () => openSshDelete(sshHost)
                     : undefined
               }
-              onQuickDiagnose={
-                showQuickDiagnose && onQuickDiagnose
-                  ? () => onQuickDiagnose(
-                    [
-                      `Instance: ${inst.label}`,
-                      `Instance ID: ${inst.id}`,
-                      `Instance Type: ${inst.type}`,
-                      `Health: ${health?.healthy === true ? "healthy" : health?.healthy === false ? "unhealthy" : "unknown"}`,
-                    ].join("\n"),
-                    inst.id,
-                  )
-                  : null
-              }
             />
           );
         })}
@@ -691,15 +674,6 @@ export function StartPage({
             )}
           </div>
           <DialogFooter>
-            {showQuickDiagnose && dockerDeleteError && onQuickDiagnose && (
-              <Button
-                variant="outline"
-                onClick={() => onQuickDiagnose(dockerDeleteError, deletingDocker?.id)}
-                disabled={dockerDeleting}
-              >
-                {t("quickDiagnose.diagnoseWithZeroclaw")}
-              </Button>
-            )}
             <Button
               variant="outline"
               onClick={() => setDockerDeleteOpen(false)}

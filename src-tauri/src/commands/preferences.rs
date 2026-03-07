@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
 use serde::{Deserialize, Serialize};
@@ -12,12 +12,6 @@ use crate::models::{resolve_paths, OpenClawPaths};
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct AppPreferences {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub zeroclaw_model: Option<String>,
-    #[serde(default)]
-    pub show_zeroclaw_doctor_ui: bool,
-    #[serde(default)]
-    pub show_rescue_bot_ui: bool,
     #[serde(default)]
     pub show_ssh_transfer_speed_ui: bool,
     #[serde(default)]
@@ -31,12 +25,6 @@ pub struct AppPreferences {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 struct StoredAppPreferences {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    zeroclaw_model: Option<String>,
-    #[serde(default)]
-    show_zeroclaw_doctor_ui: bool,
-    #[serde(default)]
-    show_rescue_bot_ui: bool,
     #[serde(default)]
     show_ssh_transfer_speed_ui: bool,
     #[serde(default)]
@@ -53,45 +41,8 @@ fn app_preferences_path(paths: &OpenClawPaths) -> std::path::PathBuf {
     paths.clawpal_dir.join("app-preferences.json")
 }
 
-fn normalize_optional_string(value: Option<String>) -> Option<String> {
-    value
-        .map(|raw| raw.trim().to_string())
-        .filter(|raw| !raw.is_empty())
-}
-
-fn sanitize_zeroclaw_model_preference(value: Option<String>) -> Option<String> {
-    let normalized_value = normalize_optional_string(value)?;
-    let normalized_ref = super::normalize_model_ref(&normalized_value);
-    if normalized_ref.is_empty() {
-        return None;
-    }
-
-    let Ok(profiles) = crate::commands::list_model_profiles() else {
-        // If profiles cannot be loaded, keep the current preference to avoid
-        // dropping user intent due to transient IO issues.
-        return Some(normalized_value);
-    };
-
-    let mut valid_models = HashSet::<String>::new();
-    for profile in profiles.into_iter().filter(|p| p.enabled) {
-        let key = super::normalize_model_ref(&super::profile_to_model_value(&profile));
-        if !key.is_empty() {
-            valid_models.insert(key);
-        }
-    }
-
-    if valid_models.contains(&normalized_ref) {
-        Some(normalized_value)
-    } else {
-        None
-    }
-}
-
 fn app_preferences_from_stored(stored: &StoredAppPreferences) -> AppPreferences {
     AppPreferences {
-        zeroclaw_model: stored.zeroclaw_model.clone(),
-        show_zeroclaw_doctor_ui: stored.show_zeroclaw_doctor_ui,
-        show_rescue_bot_ui: stored.show_rescue_bot_ui,
         show_ssh_transfer_speed_ui: stored.show_ssh_transfer_speed_ui,
         show_clawpal_logs_ui: stored.show_clawpal_logs_ui,
         show_gateway_logs_ui: stored.show_gateway_logs_ui,
@@ -102,7 +53,6 @@ fn app_preferences_from_stored(stored: &StoredAppPreferences) -> AppPreferences 
 fn load_stored_preferences_from_paths(paths: &OpenClawPaths) -> StoredAppPreferences {
     let path = app_preferences_path(paths);
     let mut prefs = read_json::<StoredAppPreferences>(&path).unwrap_or_default();
-    prefs.zeroclaw_model = sanitize_zeroclaw_model_preference(prefs.zeroclaw_model);
     prefs.bug_report = normalize_bug_report_settings(prefs.bug_report);
     prefs
 }
@@ -125,9 +75,6 @@ fn save_app_preferences_from_paths(
     prefs: &AppPreferences,
 ) -> Result<(), String> {
     let mut stored = load_stored_preferences_from_paths(paths);
-    stored.zeroclaw_model = prefs.zeroclaw_model.clone();
-    stored.show_zeroclaw_doctor_ui = prefs.show_zeroclaw_doctor_ui;
-    stored.show_rescue_bot_ui = prefs.show_rescue_bot_ui;
     stored.show_ssh_transfer_speed_ui = prefs.show_ssh_transfer_speed_ui;
     stored.show_clawpal_logs_ui = prefs.show_clawpal_logs_ui;
     stored.show_gateway_logs_ui = prefs.show_gateway_logs_ui;
@@ -150,11 +97,6 @@ pub fn save_bug_report_settings_from_paths(
     Ok(saved)
 }
 
-pub fn load_zeroclaw_model_preference() -> Option<String> {
-    let paths = resolve_paths();
-    load_app_preferences_from_paths(&paths).zeroclaw_model
-}
-
 #[tauri::command]
 pub fn get_app_preferences() -> Result<AppPreferences, String> {
     let paths = resolve_paths();
@@ -168,36 +110,9 @@ pub fn get_bug_report_settings() -> Result<BugReportSettings, String> {
 }
 
 #[tauri::command]
-pub fn set_zeroclaw_model_preference(model: Option<String>) -> Result<AppPreferences, String> {
-    let paths = resolve_paths();
-    let mut prefs = load_app_preferences_from_paths(&paths);
-    prefs.zeroclaw_model = normalize_optional_string(model);
-    save_app_preferences_from_paths(&paths, &prefs)?;
-    Ok(prefs)
-}
-
-#[tauri::command]
 pub fn set_bug_report_settings(settings: BugReportSettings) -> Result<BugReportSettings, String> {
     let paths = resolve_paths();
     save_bug_report_settings_from_paths(&paths, settings)
-}
-
-#[tauri::command]
-pub fn set_zeroclaw_doctor_ui_preference(show_ui: bool) -> Result<AppPreferences, String> {
-    let paths = resolve_paths();
-    let mut prefs = load_app_preferences_from_paths(&paths);
-    prefs.show_zeroclaw_doctor_ui = show_ui;
-    save_app_preferences_from_paths(&paths, &prefs)?;
-    Ok(prefs)
-}
-
-#[tauri::command]
-pub fn set_rescue_bot_ui_preference(show_ui: bool) -> Result<AppPreferences, String> {
-    let paths = resolve_paths();
-    let mut prefs = load_app_preferences_from_paths(&paths);
-    prefs.show_rescue_bot_ui = show_ui;
-    save_app_preferences_from_paths(&paths, &prefs)?;
-    Ok(prefs)
 }
 
 #[tauri::command]
@@ -234,65 +149,6 @@ pub fn set_openclaw_context_ui_preference(show_ui: bool) -> Result<AppPreference
     prefs.show_openclaw_context_ui = show_ui;
     save_app_preferences_from_paths(&paths, &prefs)?;
     Ok(prefs)
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(rename_all = "camelCase")]
-pub struct ZeroclawUsageStatsResponse {
-    pub total_calls: u64,
-    pub usage_calls: u64,
-    pub prompt_tokens: u64,
-    pub completion_tokens: u64,
-    pub total_tokens: u64,
-    pub last_updated_ms: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(rename_all = "camelCase")]
-pub struct ZeroclawRuntimeTargetResponse {
-    pub provider: Option<String>,
-    pub model: Option<String>,
-    pub source: String,
-    pub preferred_model: Option<String>,
-    pub provider_order: Vec<String>,
-}
-
-#[tauri::command]
-pub fn get_zeroclaw_usage_stats() -> Result<ZeroclawUsageStatsResponse, String> {
-    let stats = crate::runtime::zeroclaw::process::get_zeroclaw_usage_stats();
-    Ok(ZeroclawUsageStatsResponse {
-        total_calls: stats.total_calls,
-        usage_calls: stats.usage_calls,
-        prompt_tokens: stats.prompt_tokens,
-        completion_tokens: stats.completion_tokens,
-        total_tokens: stats.total_tokens,
-        last_updated_ms: stats.last_updated_ms,
-    })
-}
-
-#[tauri::command]
-pub fn get_session_usage_stats(session_id: String) -> Result<ZeroclawUsageStatsResponse, String> {
-    let stats = crate::runtime::zeroclaw::process::get_session_usage(&session_id);
-    Ok(ZeroclawUsageStatsResponse {
-        total_calls: stats.total_calls,
-        usage_calls: stats.usage_calls,
-        prompt_tokens: stats.prompt_tokens,
-        completion_tokens: stats.completion_tokens,
-        total_tokens: stats.total_tokens,
-        last_updated_ms: stats.last_updated_ms,
-    })
-}
-
-#[tauri::command]
-pub fn get_zeroclaw_runtime_target() -> Result<ZeroclawRuntimeTargetResponse, String> {
-    let target = crate::runtime::zeroclaw::process::get_zeroclaw_runtime_target();
-    Ok(ZeroclawRuntimeTargetResponse {
-        provider: target.provider,
-        model: target.model,
-        source: target.source,
-        preferred_model: target.preferred_model,
-        provider_order: target.provider_order,
-    })
 }
 
 // ---------------------------------------------------------------------------
@@ -347,16 +203,6 @@ mod tests {
     use crate::bug_report::settings::{BugReportBackend, BugReportSeverity};
     use crate::models::OpenClawPaths;
 
-    #[test]
-    fn normalize_optional_string_trims_and_drops_empty_values() {
-        assert_eq!(
-            normalize_optional_string(Some("  openai/gpt-4.1  ".into())),
-            Some("openai/gpt-4.1".into())
-        );
-        assert_eq!(normalize_optional_string(Some("   ".into())), None);
-        assert_eq!(normalize_optional_string(None), None);
-    }
-
     fn test_paths() -> (OpenClawPaths, std::path::PathBuf) {
         let root =
             std::env::temp_dir().join(format!("clawpal-pref-tests-{}", uuid::Uuid::new_v4()));
@@ -392,9 +238,6 @@ mod tests {
         save_app_preferences_from_paths(
             &paths,
             &AppPreferences {
-                zeroclaw_model: Some("anthropic/claude-sonnet-4-5".into()),
-                show_zeroclaw_doctor_ui: true,
-                show_rescue_bot_ui: true,
                 show_ssh_transfer_speed_ui: false,
                 show_clawpal_logs_ui: true,
                 show_gateway_logs_ui: false,
@@ -421,9 +264,6 @@ mod tests {
         save_app_preferences_from_paths(
             &paths,
             &AppPreferences {
-                zeroclaw_model: None,
-                show_zeroclaw_doctor_ui: true,
-                show_rescue_bot_ui: false,
                 show_ssh_transfer_speed_ui: true,
                 show_clawpal_logs_ui: true,
                 show_gateway_logs_ui: true,
@@ -445,9 +285,6 @@ mod tests {
         .unwrap();
 
         let app_prefs = load_app_preferences_from_paths(&paths);
-        assert_eq!(app_prefs.zeroclaw_model, None);
-        assert!(app_prefs.show_zeroclaw_doctor_ui);
-        assert!(!app_prefs.show_rescue_bot_ui);
         assert!(app_prefs.show_ssh_transfer_speed_ui);
         assert!(app_prefs.show_clawpal_logs_ui);
         assert!(app_prefs.show_gateway_logs_ui);
@@ -465,6 +302,29 @@ mod tests {
         assert!(app_prefs.show_ssh_transfer_speed_ui);
         assert!(!app_prefs.show_clawpal_logs_ui);
         assert!(!app_prefs.show_gateway_logs_ui);
+        assert!(!app_prefs.show_openclaw_context_ui);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn legacy_zeroclaw_preference_fields_are_ignored() {
+        let (paths, root) = test_paths();
+        let prefs_path = app_preferences_path(&paths);
+        std::fs::write(
+            &prefs_path,
+            r#"{
+                "zeroclawModel":"anthropic/claude-sonnet-4-5",
+                "showZeroclawDoctorUi":true,
+                "showRescueBotUi":true,
+                "showGatewayLogsUi":true
+            }"#,
+        )
+        .unwrap();
+
+        let app_prefs = load_app_preferences_from_paths(&paths);
+        assert!(!app_prefs.show_ssh_transfer_speed_ui);
+        assert!(!app_prefs.show_clawpal_logs_ui);
+        assert!(app_prefs.show_gateway_logs_ui);
         assert!(!app_prefs.show_openclaw_context_ui);
         let _ = std::fs::remove_dir_all(root);
     }

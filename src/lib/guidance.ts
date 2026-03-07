@@ -179,7 +179,7 @@ export async function explainAndBuildGuidanceError({
 // ── withGuidance wrapper for App-level lifecycle calls ──
 
 /**
- * Wraps an async operation with zeroclaw guidance emission on failure.
+ * Wraps an async operation with built-in guidance emission on failure.
  * Use this for App-level lifecycle calls (SSH connect, instance listing, etc.)
  * that bypass the useApi() dispatch() wrapper.
  *

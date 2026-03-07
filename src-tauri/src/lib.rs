@@ -10,15 +10,13 @@ use crate::cli_runner::{
 use crate::commands::{
     analyze_sessions, apply_config_patch, backup_before_upgrade, chat_via_openclaw,
     check_openclaw_update, clear_all_sessions, clear_session_model_override,
-    complete_zeroclaw_oauth_login, connect_docker_instance, connect_local_instance,
-    connect_ssh_instance, create_agent, delete_agent, delete_backup, delete_cron_job,
-    delete_local_instance_home, delete_model_profile, delete_registered_instance,
-    delete_sessions_by_ids, delete_ssh_host, deploy_watchdog, diagnose_primary_via_rescue,
-    diagnose_ssh, discover_local_instances, ensure_access_profile,
+    connect_docker_instance, connect_local_instance, connect_ssh_instance, create_agent,
+    delete_agent, delete_backup, delete_cron_job, delete_local_instance_home, delete_model_profile,
+    delete_registered_instance, delete_sessions_by_ids, delete_ssh_host, deploy_watchdog,
+    diagnose_primary_via_rescue, diagnose_ssh, discover_local_instances, ensure_access_profile,
     extract_model_profiles_from_config, fix_issues, get_app_preferences, get_bug_report_settings,
-    get_cached_model_catalog, get_cron_runs, get_session_model_override, get_session_usage_stats,
-    get_ssh_transfer_stats, get_status_extra, get_status_light, get_system_status,
-    get_watchdog_status, get_zeroclaw_runtime_target, get_zeroclaw_usage_stats,
+    get_cached_model_catalog, get_cron_runs, get_session_model_override, get_ssh_transfer_stats,
+    get_status_extra, get_status_light, get_system_status, get_watchdog_status,
     list_agents_overview, list_backups, list_bindings, list_channels_minimal, list_cron_jobs,
     list_discord_guild_channels, list_history, list_model_profiles, list_recipes,
     list_registered_instances, list_session_files, list_ssh_config_hosts, list_ssh_hosts,
@@ -49,26 +47,18 @@ use crate::commands::{
     restart_gateway, restore_from_backup, rollback, run_doctor_command, run_openclaw_upgrade,
     set_active_clawpal_data_dir, set_active_openclaw_home, set_agent_model,
     set_bug_report_settings, set_clawpal_logs_ui_preference, set_gateway_logs_ui_preference,
-    set_global_model, set_openclaw_context_ui_preference, set_rescue_bot_ui_preference,
-    set_session_model_override, set_ssh_transfer_speed_ui_preference,
-    set_zeroclaw_doctor_ui_preference, set_zeroclaw_model_preference, setup_agent_identity,
-    sftp_list_dir, sftp_read_file, sftp_remove_file, sftp_write_file, ssh_connect,
-    ssh_connect_with_passphrase, ssh_disconnect, ssh_exec, ssh_status, start_watchdog,
-    start_zeroclaw_oauth_login, stop_watchdog, test_model_profile, trigger_cron_job,
+    set_global_model, set_openclaw_context_ui_preference, set_session_model_override,
+    set_ssh_transfer_speed_ui_preference, setup_agent_identity, sftp_list_dir, sftp_read_file,
+    sftp_remove_file, sftp_write_file, ssh_connect, ssh_connect_with_passphrase, ssh_disconnect,
+    ssh_exec, ssh_status, start_watchdog, stop_watchdog, test_model_profile, trigger_cron_job,
     uninstall_watchdog, upsert_model_profile, upsert_ssh_host,
-};
-use crate::doctor_commands::{
-    collect_doctor_context, collect_doctor_context_remote, doctor_approve_invoke, doctor_connect,
-    doctor_disconnect, doctor_reject_invoke, doctor_send_message, doctor_start_diagnosis,
 };
 use crate::install::commands::{
     install_create_session, install_decide_target, install_get_session, install_list_methods,
     install_orchestrator_next, install_run_step,
 };
 use crate::install::session_store::InstallSessionStore;
-use crate::install_commands::{install_send_message, install_start_session};
 use crate::node_client::NodeClient;
-use crate::runtime::zeroclaw::cost::estimate_query_cost;
 use crate::ssh::SshConnectionPool;
 
 pub mod access_discovery;
@@ -79,11 +69,8 @@ pub mod cli_runner;
 pub mod commands;
 pub mod config_io;
 pub mod doctor;
-pub mod doctor_commands;
-pub mod doctor_runtime_bridge;
 pub mod history;
 pub mod install;
-pub mod install_commands;
 pub mod json_util;
 pub mod logging;
 pub mod models;
@@ -92,7 +79,6 @@ pub mod openclaw_doc_resolver;
 pub mod path_fix;
 pub mod prompt_templates;
 pub mod recipe;
-pub mod runtime;
 pub mod ssh;
 
 pub fn run() {
@@ -135,20 +121,14 @@ pub fn run() {
             get_bug_report_stats,
             test_bug_report_connection,
             capture_frontend_error,
-            get_zeroclaw_usage_stats,
-            get_session_usage_stats,
-            get_zeroclaw_runtime_target,
             set_session_model_override,
             get_session_model_override,
             clear_session_model_override,
-            estimate_query_cost,
             list_recipes,
             list_model_profiles,
             get_cached_model_catalog,
             refresh_model_catalog,
             upsert_model_profile,
-            start_zeroclaw_oauth_login,
-            complete_zeroclaw_oauth_login,
             delete_model_profile,
             test_model_profile,
             resolve_provider_auth,
@@ -186,13 +166,10 @@ pub fn run() {
             repair_primary_via_rescue,
             set_global_model,
             set_agent_model,
-            set_zeroclaw_doctor_ui_preference,
-            set_rescue_bot_ui_preference,
             set_ssh_transfer_speed_ui_preference,
             set_clawpal_logs_ui_preference,
             set_gateway_logs_ui_preference,
             set_openclaw_context_ui_preference,
-            set_zeroclaw_model_preference,
             list_bindings,
             list_ssh_hosts,
             list_ssh_config_hosts,
@@ -294,16 +271,6 @@ pub fn run() {
             remote_queued_commands_count,
             remote_preview_queued_commands,
             remote_apply_queued_commands,
-            doctor_connect,
-            doctor_disconnect,
-            doctor_start_diagnosis,
-            doctor_send_message,
-            doctor_approve_invoke,
-            doctor_reject_invoke,
-            collect_doctor_context,
-            collect_doctor_context_remote,
-            install_start_session,
-            install_send_message,
             precheck_registry,
             precheck_instance,
             precheck_transport,

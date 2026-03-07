@@ -180,21 +180,6 @@ export interface ProviderAuthSuggestion {
   source: string;
 }
 
-export interface ZeroclawOauthLoginStartResult {
-  provider: string;
-  profile: string;
-  authRef: string;
-  authorizeUrl: string;
-  details: string;
-}
-
-export interface ZeroclawOauthCompleteResult {
-  provider: string;
-  profile: string;
-  authRef: string;
-  details: string;
-}
-
 export interface ResolvedApiKey {
   profileId: string;
   maskedKey: string;
@@ -230,9 +215,6 @@ export interface RelatedSecretPushResult {
 }
 
 export interface AppPreferences {
-  zeroclawModel: string | null;
-  showZeroclawDoctorUi: boolean;
-  showRescueBotUi: boolean;
   showSshTransferSpeedUi: boolean;
   showClawpalLogsUi: boolean;
   showGatewayLogsUi: boolean;
@@ -268,23 +250,6 @@ export interface BugReportStats {
   lastSentAt: string | null;
   persistedPending: number;
   deadLetterCount: number;
-}
-
-export interface ZeroclawUsageStats {
-  totalCalls: number;
-  usageCalls: number;
-  promptTokens: number;
-  completionTokens: number;
-  totalTokens: number;
-  lastUpdatedMs: number;
-}
-
-export interface ZeroclawRuntimeTarget {
-  provider: string | null;
-  model: string | null;
-  source: "preferred" | "auto" | "provider_only" | "unavailable" | string;
-  preferredModel: string | null;
-  providerOrder: string[];
 }
 
 export interface HistoryItem {
@@ -505,6 +470,12 @@ export interface SftpEntry {
 }
 
 export type RescueBotAction = "set" | "activate" | "status" | "deactivate" | "unset";
+export type RescueBotRuntimeState =
+  | "unconfigured"
+  | "configured_inactive"
+  | "active"
+  | "checking"
+  | "error";
 
 export interface RescueBotCommandResult {
   command: string[];
@@ -521,6 +492,9 @@ export interface RescueBotManageResult {
   mainPort: number;
   rescuePort: number;
   minRecommendedPort: number;
+  configured: boolean;
+  active: boolean;
+  runtimeState: RescueBotRuntimeState;
   wasAlreadyConfigured: boolean;
   commands: RescueBotCommandResult[];
 }
@@ -542,13 +516,41 @@ export interface RescuePrimaryIssue {
   source: "rescue" | "primary";
 }
 
+export interface RescuePrimarySummary {
+  status: "healthy" | "degraded" | "broken" | "inactive";
+  headline: string;
+  recommendedAction: string;
+  fixableIssueCount: number;
+  selectedFixIssueIds: string[];
+}
+
+export interface RescuePrimarySectionItem {
+  id: string;
+  label: string;
+  status: "ok" | "warn" | "error" | "info" | "inactive";
+  detail: string;
+  autoFixable: boolean;
+  issueId?: string | null;
+}
+
+export interface RescuePrimarySectionResult {
+  key: "gateway" | "models" | "tools" | "agents" | "channels";
+  title: string;
+  status: "healthy" | "degraded" | "broken" | "inactive";
+  summary: string;
+  docsUrl: string;
+  items: RescuePrimarySectionItem[];
+}
+
 export interface RescuePrimaryDiagnosisResult {
-  status: "healthy" | "degraded" | "broken";
+  status: "healthy" | "degraded" | "broken" | "inactive";
   checkedAt: string;
   targetProfile: string;
   rescueProfile: string;
   rescueConfigured: boolean;
   rescuePort?: number;
+  summary: RescuePrimarySummary;
+  sections: RescuePrimarySectionResult[];
   checks: RescuePrimaryCheckItem[];
   issues: RescuePrimaryIssue[];
 }

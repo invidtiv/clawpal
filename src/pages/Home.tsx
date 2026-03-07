@@ -172,7 +172,7 @@ export function Home({
   }, [statusExtra?.duplicateInstalls, t, ua.instanceId, ua.isDocker, ua.isRemote]);
 
   // Post-install onboarding guidance: when status settles and instance needs setup,
-  // emit guidance so Doctor Claw can walk the user through remaining configuration.
+  // emit guidance so the Help surface can walk the user through remaining configuration.
   useEffect(() => {
     if (!statusSettled || !status) return;
     const remote = ua.isRemote;

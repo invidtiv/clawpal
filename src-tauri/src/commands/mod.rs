@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::{
@@ -154,6 +154,9 @@ pub struct RescueBotManageResult {
     pub main_port: u16,
     pub rescue_port: u16,
     pub min_recommended_port: u16,
+    pub configured: bool,
+    pub active: bool,
+    pub runtime_state: String,
     pub was_already_configured: bool,
     pub commands: Vec<RescueBotCommandResult>,
 }
@@ -188,8 +191,42 @@ pub struct RescuePrimaryDiagnosisResult {
     pub rescue_profile: String,
     pub rescue_configured: bool,
     pub rescue_port: Option<u16>,
+    pub summary: RescuePrimarySummary,
+    pub sections: Vec<RescuePrimarySectionResult>,
     pub checks: Vec<RescuePrimaryCheckItem>,
     pub issues: Vec<RescuePrimaryIssue>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RescuePrimarySummary {
+    pub status: String,
+    pub headline: String,
+    pub recommended_action: String,
+    pub fixable_issue_count: usize,
+    pub selected_fix_issue_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RescuePrimarySectionResult {
+    pub key: String,
+    pub title: String,
+    pub status: String,
+    pub summary: String,
+    pub docs_url: String,
+    pub items: Vec<RescuePrimarySectionItem>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RescuePrimarySectionItem {
+    pub id: String,
+    pub label: String,
+    pub status: String,
+    pub detail: String,
+    pub auto_fixable: bool,
+    pub issue_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1109,12 +1146,16 @@ pub async fn manage_rescue_bot(
         }
 
         if action == RescueBotAction::Status && !already_configured {
+            let runtime_state = infer_rescue_bot_runtime_state(false, None, None);
             return Ok(RescueBotManageResult {
                 action: action.as_str().into(),
                 profile,
                 main_port,
                 rescue_port,
                 min_recommended_port,
+                configured: false,
+                active: false,
+                runtime_state,
                 was_already_configured: false,
                 commands: Vec::new(),
             });
@@ -1147,12 +1188,33 @@ pub async fn manage_rescue_bot(
             commands.push(result);
         }
 
+        let configured = match action {
+            RescueBotAction::Unset => false,
+            RescueBotAction::Activate | RescueBotAction::Set | RescueBotAction::Deactivate => true,
+            RescueBotAction::Status => already_configured,
+        };
+        let status_output = commands
+            .iter()
+            .rev()
+            .find(|result| {
+                result
+                    .command
+                    .windows(2)
+                    .any(|window| window[0] == "gateway" && window[1] == "status")
+            })
+            .map(|result| &result.output);
+        let runtime_state = infer_rescue_bot_runtime_state(configured, status_output, None);
+        let active = runtime_state == "active";
+
         Ok(RescueBotManageResult {
             action: action.as_str().into(),
             profile,
             main_port,
             rescue_port,
             min_recommended_port,
+            configured,
+            active,
+            runtime_state,
             was_already_configured: already_configured,
             commands,
         })
@@ -1283,16 +1345,620 @@ fn gateway_output_detail(output: &OpenclawCommandOutput) -> String {
         .unwrap_or_else(|| command_detail(output))
 }
 
+fn infer_rescue_bot_runtime_state(
+    configured: bool,
+    status_output: Option<&OpenclawCommandOutput>,
+    status_error: Option<&str>,
+) -> String {
+    if status_error.is_some() {
+        return "error".into();
+    }
+    if !configured {
+        return "unconfigured".into();
+    }
+    let Some(output) = status_output else {
+        return "configured_inactive".into();
+    };
+    if gateway_output_ok(output) {
+        return "active".into();
+    }
+    if let Some(value) = clawpal_core::doctor::parse_json_loose(&output.stdout)
+        .or_else(|| clawpal_core::doctor::parse_json_loose(&output.stderr))
+    {
+        let running = value
+            .get("running")
+            .and_then(Value::as_bool)
+            .or_else(|| value.pointer("/gateway/running").and_then(Value::as_bool));
+        let healthy = value
+            .get("healthy")
+            .and_then(Value::as_bool)
+            .or_else(|| value.pointer("/health/ok").and_then(Value::as_bool))
+            .or_else(|| value.pointer("/health/healthy").and_then(Value::as_bool));
+        if matches!(running, Some(false)) || matches!(healthy, Some(false)) {
+            return "configured_inactive".into();
+        }
+    }
+    let details = format!("{}\n{}", output.stderr, output.stdout).to_ascii_lowercase();
+    if details.contains("not running")
+        || details.contains("already stopped")
+        || details.contains("not installed")
+        || details.contains("not found")
+        || details.contains("is not running")
+        || details.contains("isn't running")
+        || details.contains("\"running\":false")
+        || details.contains("\"healthy\":false")
+        || details.contains("\"ok\":false")
+        || details.contains("inactive")
+        || details.contains("stopped")
+    {
+        return "configured_inactive".into();
+    }
+    "error".into()
+}
+
+fn rescue_section_order() -> [&'static str; 5] {
+    ["gateway", "models", "tools", "agents", "channels"]
+}
+
+fn rescue_section_title(key: &str) -> &'static str {
+    match key {
+        "gateway" => "Gateway",
+        "models" => "Models",
+        "tools" => "Tools",
+        "agents" => "Agents",
+        "channels" => "Channels",
+        _ => "Recovery",
+    }
+}
+
+fn rescue_section_docs_url(key: &str) -> &'static str {
+    match key {
+        "gateway" => "https://docs.openclaw.ai/gateway/security/index",
+        "models" => "https://docs.openclaw.ai/models",
+        "tools" => "https://docs.openclaw.ai/tools",
+        "agents" => "https://docs.openclaw.ai/agents",
+        "channels" => "https://docs.openclaw.ai/channels",
+        _ => "https://docs.openclaw.ai/",
+    }
+}
+
+fn section_item_status_from_issue(issue: &RescuePrimaryIssue) -> String {
+    match issue.severity.as_str() {
+        "error" => "error".into(),
+        "warn" => "warn".into(),
+        "info" => "info".into(),
+        _ => "warn".into(),
+    }
+}
+
+fn classify_rescue_check_section(check: &RescuePrimaryCheckItem) -> Option<&'static str> {
+    let id = check.id.to_ascii_lowercase();
+    if id.contains("gateway") || id.contains("rescue.profile") || id == "field.port" {
+        return Some("gateway");
+    }
+    if id.contains("model") || id.contains("provider") || id.contains("auth") {
+        return Some("models");
+    }
+    if id.contains("tool") || id.contains("allowlist") || id.contains("sandbox") {
+        return Some("tools");
+    }
+    if id.contains("agent") || id.contains("workspace") {
+        return Some("agents");
+    }
+    if id.contains("channel") || id.contains("discord") || id.contains("group") {
+        return Some("channels");
+    }
+    None
+}
+
+fn classify_rescue_issue_section(issue: &RescuePrimaryIssue) -> &'static str {
+    let haystack = format!(
+        "{} {} {} {} {}",
+        issue.id,
+        issue.code,
+        issue.message,
+        issue.fix_hint.clone().unwrap_or_default(),
+        issue.source
+    )
+    .to_ascii_lowercase();
+    if issue.source == "rescue"
+        || haystack.contains("gateway")
+        || haystack.contains("port")
+        || haystack.contains("proxy")
+        || haystack.contains("security")
+    {
+        return "gateway";
+    }
+    if haystack.contains("tool")
+        || haystack.contains("allowlist")
+        || haystack.contains("sandbox")
+        || haystack.contains("approval")
+        || haystack.contains("permission")
+        || haystack.contains("policy")
+    {
+        return "tools";
+    }
+    if haystack.contains("channel")
+        || haystack.contains("discord")
+        || haystack.contains("guild")
+        || haystack.contains("allowfrom")
+        || haystack.contains("groupallowfrom")
+        || haystack.contains("grouppolicy")
+        || haystack.contains("mention")
+    {
+        return "channels";
+    }
+    if haystack.contains("agent") || haystack.contains("workspace") || haystack.contains("session")
+    {
+        return "agents";
+    }
+    if haystack.contains("model")
+        || haystack.contains("provider")
+        || haystack.contains("auth")
+        || haystack.contains("token")
+        || haystack.contains("api key")
+        || haystack.contains("apikey")
+        || haystack.contains("oauth")
+        || haystack.contains("base url")
+    {
+        return "models";
+    }
+    "gateway"
+}
+
+fn config_item(id: &str, label: &str, status: &str, detail: String) -> RescuePrimarySectionItem {
+    RescuePrimarySectionItem {
+        id: id.to_string(),
+        label: label.to_string(),
+        status: status.to_string(),
+        detail,
+        auto_fixable: false,
+        issue_id: None,
+    }
+}
+
+fn build_rescue_primary_sections(
+    config: Option<&Value>,
+    checks: &[RescuePrimaryCheckItem],
+    issues: &[RescuePrimaryIssue],
+) -> Vec<RescuePrimarySectionResult> {
+    let mut grouped_items = BTreeMap::<String, Vec<RescuePrimarySectionItem>>::new();
+    for key in rescue_section_order() {
+        grouped_items.insert(key.to_string(), Vec::new());
+    }
+
+    if let Some(cfg) = config {
+        let gateway_port = cfg
+            .pointer("/gateway/port")
+            .and_then(Value::as_u64)
+            .map(|port| port.to_string());
+        grouped_items
+            .get_mut("gateway")
+            .expect("gateway section must exist")
+            .push(config_item(
+                "gateway.config.port",
+                "Gateway port",
+                if gateway_port.is_some() { "ok" } else { "warn" },
+                gateway_port
+                    .map(|port| format!("Configured primary gateway port: {port}"))
+                    .unwrap_or_else(|| "Gateway port is not explicitly configured".into()),
+            ));
+
+        let providers = cfg
+            .pointer("/models/providers")
+            .and_then(Value::as_object)
+            .map(|providers| providers.keys().cloned().collect::<Vec<_>>())
+            .unwrap_or_default();
+        grouped_items
+            .get_mut("models")
+            .expect("models section must exist")
+            .push(config_item(
+                "models.providers",
+                "Provider configuration",
+                if providers.is_empty() { "warn" } else { "ok" },
+                if providers.is_empty() {
+                    "No model providers are configured".into()
+                } else {
+                    format!("Configured providers: {}", providers.join(", "))
+                },
+            ));
+        let default_model = cfg
+            .pointer("/agents/defaults/model")
+            .or_else(|| cfg.pointer("/agents/default/model"))
+            .and_then(read_model_value);
+        grouped_items
+            .get_mut("models")
+            .expect("models section must exist")
+            .push(config_item(
+                "models.defaults.primary",
+                "Primary model binding",
+                if default_model.is_some() {
+                    "ok"
+                } else {
+                    "warn"
+                },
+                default_model
+                    .map(|model| format!("Primary model resolves to {model}"))
+                    .unwrap_or_else(|| "No default model binding is configured".into()),
+            ));
+
+        let tools = cfg.pointer("/tools").and_then(Value::as_object);
+        grouped_items
+            .get_mut("tools")
+            .expect("tools section must exist")
+            .push(config_item(
+                "tools.config.surface",
+                "Tooling surface",
+                if tools.is_some() { "ok" } else { "inactive" },
+                tools
+                    .map(|tool_cfg| {
+                        let keys = tool_cfg.keys().cloned().collect::<Vec<_>>();
+                        if keys.is_empty() {
+                            "Tools config exists but has no explicit controls".into()
+                        } else {
+                            format!("Configured tool controls: {}", keys.join(", "))
+                        }
+                    })
+                    .unwrap_or_else(|| "No explicit tools configuration found".into()),
+            ));
+
+        let agent_count = cfg
+            .pointer("/agents/list")
+            .and_then(Value::as_array)
+            .map(|agents| agents.len())
+            .unwrap_or(0);
+        grouped_items
+            .get_mut("agents")
+            .expect("agents section must exist")
+            .push(config_item(
+                "agents.config.count",
+                "Agent definitions",
+                if agent_count > 0 { "ok" } else { "warn" },
+                if agent_count > 0 {
+                    format!("Configured agents: {agent_count}")
+                } else {
+                    "No explicit agents.list entries were found".into()
+                },
+            ));
+
+        let channel_nodes = collect_channel_nodes(cfg);
+        let channel_kinds = channel_nodes
+            .iter()
+            .filter_map(|node| node.channel_type.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        grouped_items
+            .get_mut("channels")
+            .expect("channels section must exist")
+            .push(config_item(
+                "channels.config.count",
+                "Configured channel surfaces",
+                if channel_nodes.is_empty() {
+                    "inactive"
+                } else {
+                    "ok"
+                },
+                if channel_nodes.is_empty() {
+                    "No channels are configured".into()
+                } else {
+                    format!(
+                        "Configured channel nodes: {} ({})",
+                        channel_nodes.len(),
+                        channel_kinds.join(", ")
+                    )
+                },
+            ));
+    } else {
+        for key in rescue_section_order() {
+            grouped_items
+                .get_mut(key)
+                .expect("section must exist")
+                .push(config_item(
+                    &format!("{key}.config.unavailable"),
+                    "Configuration unavailable",
+                    "inactive",
+                    "Configuration could not be read for this target".into(),
+                ));
+        }
+    }
+
+    for check in checks {
+        let Some(section_key) = classify_rescue_check_section(check) else {
+            continue;
+        };
+        grouped_items
+            .get_mut(section_key)
+            .expect("section must exist")
+            .push(RescuePrimarySectionItem {
+                id: check.id.clone(),
+                label: check.title.clone(),
+                status: if check.ok { "ok".into() } else { "warn".into() },
+                detail: check.detail.clone(),
+                auto_fixable: false,
+                issue_id: None,
+            });
+    }
+
+    for issue in issues {
+        let section_key = classify_rescue_issue_section(issue);
+        grouped_items
+            .get_mut(section_key)
+            .expect("section must exist")
+            .push(RescuePrimarySectionItem {
+                id: issue.id.clone(),
+                label: issue.message.clone(),
+                status: section_item_status_from_issue(issue),
+                detail: issue.fix_hint.clone().unwrap_or_default(),
+                auto_fixable: issue.auto_fixable && issue.source == "primary",
+                issue_id: Some(issue.id.clone()),
+            });
+    }
+
+    rescue_section_order()
+        .into_iter()
+        .map(|key| {
+            let items = grouped_items.remove(key).unwrap_or_default();
+            let has_error = items.iter().any(|item| item.status == "error");
+            let has_warn = items.iter().any(|item| item.status == "warn");
+            let has_active_signal = items
+                .iter()
+                .any(|item| item.status != "inactive" && !item.detail.is_empty());
+            let status = if has_error {
+                "broken"
+            } else if has_warn {
+                "degraded"
+            } else if has_active_signal {
+                "healthy"
+            } else {
+                "inactive"
+            };
+            let issue_count = items.iter().filter(|item| item.issue_id.is_some()).count();
+            let summary = match status {
+                "broken" => format!(
+                    "{} has {} blocking finding(s)",
+                    rescue_section_title(key),
+                    issue_count.max(1)
+                ),
+                "degraded" => format!(
+                    "{} has {} recommended change(s)",
+                    rescue_section_title(key),
+                    issue_count.max(1)
+                ),
+                "healthy" => format!("{} checks look healthy", rescue_section_title(key)),
+                _ => format!("{} is not configured yet", rescue_section_title(key)),
+            };
+            RescuePrimarySectionResult {
+                key: key.to_string(),
+                title: rescue_section_title(key).to_string(),
+                status: status.to_string(),
+                summary,
+                docs_url: rescue_section_docs_url(key).to_string(),
+                items,
+            }
+        })
+        .collect()
+}
+
+fn build_rescue_primary_summary(
+    sections: &[RescuePrimarySectionResult],
+    issues: &[RescuePrimaryIssue],
+) -> RescuePrimarySummary {
+    let selected_fix_issue_ids = issues
+        .iter()
+        .filter(|issue| issue.source == "primary" && issue.auto_fixable)
+        .map(|issue| issue.id.clone())
+        .collect::<Vec<_>>();
+    let fixable_issue_count = selected_fix_issue_ids.len();
+    let status = if sections.iter().any(|section| section.status == "broken") {
+        "broken"
+    } else if sections.iter().any(|section| section.status == "degraded") {
+        "degraded"
+    } else if sections.iter().any(|section| section.status == "healthy") {
+        "healthy"
+    } else {
+        "inactive"
+    };
+    let priority_section = sections
+        .iter()
+        .find(|section| section.status == "broken")
+        .or_else(|| sections.iter().find(|section| section.status == "degraded"))
+        .or_else(|| sections.iter().find(|section| section.status == "healthy"));
+    let (headline, recommended_action) = match priority_section {
+        Some(section) if section.status == "broken" => (
+            format!("{} needs attention first", section.title),
+            if fixable_issue_count > 0 {
+                format!(
+                    "Apply {} safe fix(es) and re-run recovery",
+                    fixable_issue_count
+                )
+            } else {
+                format!("Review {} findings and fix them manually", section.title)
+            },
+        ),
+        Some(section) if section.status == "degraded" => (
+            format!("{} has recommended improvements", section.title),
+            if fixable_issue_count > 0 {
+                format!(
+                    "Apply {} safe fix(es) to stabilize the target",
+                    fixable_issue_count
+                )
+            } else {
+                format!(
+                    "Review {} recommendations before the next check",
+                    section.title
+                )
+            },
+        ),
+        Some(section) => (
+            "Primary recovery checks look healthy".into(),
+            format!(
+                "Keep monitoring {} and re-run checks after changes",
+                section.title
+            ),
+        ),
+        None => (
+            "No recovery checks are available yet".into(),
+            "Configure and activate Rescue Bot before running recovery".into(),
+        ),
+    };
+
+    RescuePrimarySummary {
+        status: status.to_string(),
+        headline,
+        recommended_action,
+        fixable_issue_count,
+        selected_fix_issue_ids,
+    }
+}
+
+fn parse_json_from_openclaw_output(output: &OpenclawCommandOutput) -> Option<Value> {
+    clawpal_core::doctor::extract_json_from_output(&output.stdout)
+        .and_then(|json| serde_json::from_str::<Value>(json).ok())
+        .or_else(|| {
+            clawpal_core::doctor::extract_json_from_output(&output.stderr)
+                .and_then(|json| serde_json::from_str::<Value>(json).ok())
+        })
+}
+
+fn collect_local_rescue_runtime_checks(config: Option<&Value>) -> Vec<RescuePrimaryCheckItem> {
+    let mut checks = Vec::new();
+    if let Ok(output) = run_openclaw_raw(&["agents", "list", "--json"]) {
+        if let Some(json) = parse_json_from_openclaw_output(&output) {
+            let count = count_agent_entries_from_cli_json(&json).unwrap_or(0);
+            checks.push(RescuePrimaryCheckItem {
+                id: "agents.runtime.count".into(),
+                title: "Runtime agent inventory".into(),
+                ok: count > 0,
+                detail: if count > 0 {
+                    format!("Detected {count} agent(s) from openclaw agents list")
+                } else {
+                    "No agents were detected from openclaw agents list".into()
+                },
+            });
+        }
+    }
+
+    let paths = resolve_paths();
+    if let Some(catalog) = extract_model_catalog_from_cli(&paths) {
+        let provider_count = catalog.len();
+        let model_count = catalog
+            .iter()
+            .map(|provider| provider.models.len())
+            .sum::<usize>();
+        checks.push(RescuePrimaryCheckItem {
+            id: "models.catalog.runtime".into(),
+            title: "Runtime model catalog".into(),
+            ok: provider_count > 0 && model_count > 0,
+            detail: format!("Discovered {provider_count} provider(s) and {model_count} model(s)"),
+        });
+    }
+
+    if let Some(cfg) = config {
+        let channel_nodes = collect_channel_nodes(cfg);
+        checks.push(RescuePrimaryCheckItem {
+            id: "channels.runtime.nodes".into(),
+            title: "Configured channel nodes".into(),
+            ok: !channel_nodes.is_empty(),
+            detail: if channel_nodes.is_empty() {
+                "No channel nodes were discovered in config".into()
+            } else {
+                format!("Discovered {} channel node(s)", channel_nodes.len())
+            },
+        });
+    }
+
+    checks
+}
+
+async fn collect_remote_rescue_runtime_checks(
+    pool: &SshConnectionPool,
+    host_id: &str,
+    config: Option<&Value>,
+) -> Vec<RescuePrimaryCheckItem> {
+    let mut checks = Vec::new();
+    if let Ok(output) = run_remote_openclaw_dynamic(
+        pool,
+        host_id,
+        vec!["agents".into(), "list".into(), "--json".into()],
+    )
+    .await
+    {
+        if let Some(json) = parse_json_from_openclaw_output(&output) {
+            let count = count_agent_entries_from_cli_json(&json).unwrap_or(0);
+            checks.push(RescuePrimaryCheckItem {
+                id: "agents.runtime.count".into(),
+                title: "Runtime agent inventory".into(),
+                ok: count > 0,
+                detail: if count > 0 {
+                    format!("Detected {count} agent(s) from remote openclaw agents list")
+                } else {
+                    "No agents were detected from remote openclaw agents list".into()
+                },
+            });
+        }
+    }
+
+    if let Ok(output) = run_remote_openclaw_dynamic(
+        pool,
+        host_id,
+        vec![
+            "models".into(),
+            "list".into(),
+            "--all".into(),
+            "--json".into(),
+            "--no-color".into(),
+        ],
+    )
+    .await
+    {
+        if let Some(catalog) = parse_model_catalog_from_cli_output(&output.stdout) {
+            let provider_count = catalog.len();
+            let model_count = catalog
+                .iter()
+                .map(|provider| provider.models.len())
+                .sum::<usize>();
+            checks.push(RescuePrimaryCheckItem {
+                id: "models.catalog.runtime".into(),
+                title: "Runtime model catalog".into(),
+                ok: provider_count > 0 && model_count > 0,
+                detail: format!(
+                    "Discovered {provider_count} provider(s) and {model_count} model(s)"
+                ),
+            });
+        }
+    }
+
+    if let Some(cfg) = config {
+        let channel_nodes = collect_channel_nodes(cfg);
+        checks.push(RescuePrimaryCheckItem {
+            id: "channels.runtime.nodes".into(),
+            title: "Configured channel nodes".into(),
+            ok: !channel_nodes.is_empty(),
+            detail: if channel_nodes.is_empty() {
+                "No channel nodes were discovered in config".into()
+            } else {
+                format!("Discovered {} channel node(s)", channel_nodes.len())
+            },
+        });
+    }
+
+    checks
+}
+
 fn build_rescue_primary_diagnosis(
     target_profile: &str,
     rescue_profile: &str,
     rescue_configured: bool,
     rescue_port: Option<u16>,
+    config: Option<&Value>,
+    mut runtime_checks: Vec<RescuePrimaryCheckItem>,
     rescue_gateway_status: Option<&OpenclawCommandOutput>,
     primary_doctor_output: &OpenclawCommandOutput,
     primary_gateway_status: &OpenclawCommandOutput,
 ) -> RescuePrimaryDiagnosisResult {
     let mut checks = Vec::new();
+    checks.append(&mut runtime_checks);
     let mut issues: Vec<clawpal_core::doctor::DoctorIssue> = Vec::new();
 
     checks.push(RescuePrimaryCheckItem {
@@ -1420,6 +2086,8 @@ fn build_rescue_primary_diagnosis(
             source: issue.source,
         })
         .collect();
+    let sections = build_rescue_primary_sections(config, &checks, &issues);
+    let summary = build_rescue_primary_summary(&sections, &issues);
 
     RescuePrimaryDiagnosisResult {
         status,
@@ -1428,6 +2096,8 @@ fn build_rescue_primary_diagnosis(
         rescue_profile: rescue_profile.to_string(),
         rescue_configured,
         rescue_port,
+        summary,
+        sections,
         checks,
         issues,
     }
@@ -1437,6 +2107,7 @@ fn diagnose_primary_via_rescue_local(
     target_profile: &str,
     rescue_profile: &str,
 ) -> Result<RescuePrimaryDiagnosisResult, String> {
+    let config = read_openclaw_config(&resolve_paths()).ok();
     let (rescue_configured, rescue_port) = resolve_local_rescue_profile_state(rescue_profile)?;
     let rescue_gateway_status = if rescue_configured {
         let command = build_profile_command(
@@ -1453,12 +2124,15 @@ fn diagnose_primary_via_rescue_local(
         &["gateway", "status", "--no-probe", "--json"],
     );
     let primary_gateway_output = run_openclaw_dynamic(&primary_gateway_command)?;
+    let runtime_checks = collect_local_rescue_runtime_checks(config.as_ref());
 
     Ok(build_rescue_primary_diagnosis(
         target_profile,
         rescue_profile,
         rescue_configured,
         rescue_port,
+        config.as_ref(),
+        runtime_checks,
         rescue_gateway_status.as_ref(),
         &primary_doctor_output,
         &primary_gateway_output,
@@ -1471,6 +2145,10 @@ async fn diagnose_primary_via_rescue_remote(
     target_profile: &str,
     rescue_profile: &str,
 ) -> Result<RescuePrimaryDiagnosisResult, String> {
+    let config = remote_read_openclaw_config_text_and_json(pool, host_id)
+        .await
+        .ok()
+        .map(|(_, _, cfg)| cfg);
     let (rescue_configured, rescue_port) =
         resolve_remote_rescue_profile_state(pool, host_id, rescue_profile).await?;
     let rescue_gateway_status = if rescue_configured {
@@ -1490,12 +2168,15 @@ async fn diagnose_primary_via_rescue_remote(
     );
     let primary_gateway_output =
         run_remote_openclaw_dynamic(pool, host_id, primary_gateway_command).await?;
+    let runtime_checks = collect_remote_rescue_runtime_checks(pool, host_id, config.as_ref()).await;
 
     Ok(build_rescue_primary_diagnosis(
         target_profile,
         rescue_profile,
         rescue_configured,
         rescue_port,
+        config.as_ref(),
+        runtime_checks,
         rescue_gateway_status.as_ref(),
         &primary_doctor_output,
         &primary_gateway_output,
@@ -5335,6 +6016,14 @@ mod rescue_bot_tests {
             rescue_profile: "rescue".into(),
             rescue_configured: true,
             rescue_port: Some(19789),
+            summary: RescuePrimarySummary {
+                status: "degraded".into(),
+                headline: "Primary configuration needs attention".into(),
+                recommended_action: "Review fixable issues".into(),
+                fixable_issue_count: 1,
+                selected_fix_issue_ids: vec!["field.agents".into()],
+            },
+            sections: Vec::new(),
             checks: Vec::new(),
             issues: vec![
                 RescuePrimaryIssue {
@@ -5398,6 +6087,140 @@ mod rescue_bot_tests {
             .map(String::from)
             .collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn test_infer_rescue_bot_runtime_state_distinguishes_profile_states() {
+        let active_output = OpenclawCommandOutput {
+            stdout: "{\"running\":true,\"healthy\":true}".into(),
+            stderr: String::new(),
+            exit_code: 0,
+        };
+        let inactive_output = OpenclawCommandOutput {
+            stdout: String::new(),
+            stderr: "Gateway is not running".into(),
+            exit_code: 1,
+        };
+        let inactive_json_output = OpenclawCommandOutput {
+            stdout: "{\"running\":false,\"healthy\":false}".into(),
+            stderr: String::new(),
+            exit_code: 0,
+        };
+
+        assert_eq!(
+            infer_rescue_bot_runtime_state(false, None, None),
+            "unconfigured"
+        );
+        assert_eq!(
+            infer_rescue_bot_runtime_state(true, Some(&inactive_output), None),
+            "configured_inactive"
+        );
+        assert_eq!(
+            infer_rescue_bot_runtime_state(true, Some(&active_output), None),
+            "active"
+        );
+        assert_eq!(
+            infer_rescue_bot_runtime_state(true, Some(&inactive_json_output), None),
+            "configured_inactive"
+        );
+        assert_eq!(
+            infer_rescue_bot_runtime_state(true, None, Some("probe failed")),
+            "error"
+        );
+    }
+
+    #[test]
+    fn test_build_rescue_primary_sections_and_summary_returns_global_fix_shape() {
+        let cfg = serde_json::json!({
+            "gateway": { "port": 18789 },
+            "models": {
+                "providers": {
+                    "openai": { "apiKey": "sk-test" }
+                }
+            },
+            "tools": {
+                "allowlist": ["git status", "git diff"],
+                "execution": { "mode": "manual" }
+            },
+            "agents": {
+                "defaults": { "model": "openai/gpt-5" },
+                "list": [{ "id": "writer", "model": "openai/gpt-5" }]
+            },
+            "channels": {
+                "discord": {
+                    "botToken": "discord-token",
+                    "guilds": {
+                        "guild-1": {
+                            "channels": {
+                                "general": { "model": "openai/gpt-5" }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        let checks = vec![
+            RescuePrimaryCheckItem {
+                id: "rescue.profile.configured".into(),
+                title: "Rescue profile configured".into(),
+                ok: true,
+                detail: "profile=rescue, port=19789".into(),
+            },
+            RescuePrimaryCheckItem {
+                id: "primary.gateway.status".into(),
+                title: "Primary gateway status".into(),
+                ok: false,
+                detail: "gateway not healthy".into(),
+            },
+        ];
+        let issues = vec![
+            RescuePrimaryIssue {
+                id: "primary.gateway.unhealthy".into(),
+                code: "primary.gateway.unhealthy".into(),
+                severity: "error".into(),
+                message: "Primary gateway is not healthy".into(),
+                auto_fixable: false,
+                fix_hint: Some("Restart primary gateway".into()),
+                source: "primary".into(),
+            },
+            RescuePrimaryIssue {
+                id: "field.agents".into(),
+                code: "required.field".into(),
+                severity: "warn".into(),
+                message: "missing agents".into(),
+                auto_fixable: true,
+                fix_hint: Some("Initialize agents.defaults.model".into()),
+                source: "primary".into(),
+            },
+            RescuePrimaryIssue {
+                id: "tools.allowlist.review".into(),
+                code: "tools.allowlist.review".into(),
+                severity: "warn".into(),
+                message: "Review tool allowlist".into(),
+                auto_fixable: false,
+                fix_hint: Some("Narrow tool scope".into()),
+                source: "primary".into(),
+            },
+        ];
+
+        let sections = build_rescue_primary_sections(Some(&cfg), &checks, &issues);
+        let summary = build_rescue_primary_summary(&sections, &issues);
+
+        let keys = sections
+            .iter()
+            .map(|section| section.key.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            keys,
+            vec!["gateway", "models", "tools", "agents", "channels"]
+        );
+        assert_eq!(sections[0].status, "broken");
+        assert_eq!(sections[2].status, "degraded");
+        assert_eq!(sections[3].status, "degraded");
+        assert_eq!(summary.status, "broken");
+        assert_eq!(summary.fixable_issue_count, 1);
+        assert_eq!(summary.selected_fix_issue_ids, vec!["field.agents"]);
+        assert!(summary.headline.contains("Gateway"));
     }
 }
 

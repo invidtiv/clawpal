@@ -29,13 +29,9 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { cn, formatBytes } from "@/lib/utils";
 import { toast, Toaster } from "sonner";
-import type { ChannelNode, DiscordGuildChannel, DiscoveredInstance, DockerInstance, GuidanceAction, InstallSession, PrecheckIssue, RegisteredInstance, SshHost, SshTransferStats } from "./lib/types";
-import { GuidanceCard } from "./components/GuidanceCard";
+import type { ChannelNode, DiscordGuildChannel, DiscoveredInstance, DockerInstance, InstallSession, PrecheckIssue, RegisteredInstance, SshHost, SshTransferStats } from "./lib/types";
 import { SshFormWidget } from "./components/SshFormWidget";
-import { QuickDiagnoseDialog } from "./components/QuickDiagnoseDialog";
-import type { AgentGuidanceItem } from "./components/GuidanceCard";
-import { closeWorkspaceTab, shouldRenderGuidanceCard } from "@/lib/tabWorkspace";
-import { resolveDoctorOverlayVisibility } from "@/lib/doctor-overlay";
+import { closeWorkspaceTab } from "@/lib/tabWorkspace";
 import {
   SSH_PASSPHRASE_RETRY_HINT,
   buildSshPassphraseCancelMessage,
@@ -80,8 +76,6 @@ type Route = "home" | "recipes" | "cook" | "history" | "channels" | "cron" | "do
 const INSTANCE_ROUTES: Route[] = ["home", "channels", "recipes", "cron", "doctor", "context", "history"];
 const OPEN_TABS_STORAGE_KEY = "clawpal_open_tabs";
 const APP_PREFERENCES_CACHE_KEY = buildCacheKey("__global__", "getAppPreferences", []);
-const CHAT_PANEL_WIDTH = 380;
-
 interface ProfileSyncStatus {
   phase: "idle" | "syncing" | "success" | "error";
   message: string;
@@ -97,8 +91,6 @@ function logDevIgnoredError(context: string, detail: unknown): void {
   if (!import.meta.env.DEV) return;
   console.warn(`[dev ignored error] ${context}`, detail);
 }
-
-// AgentGuidanceItem is imported from ./components/GuidanceCard
 
 function sanitizeDockerPathSuffix(raw: string): string {
   const lowered = raw.toLowerCase().replace(/[^a-z0-9_-]/g, "");
@@ -134,16 +126,6 @@ function deriveDockerLabel(instanceId: string): string {
   return suffix.startsWith("docker-") ? suffix : `docker-${suffix}`;
 }
 
-function fallbackInstanceLabel(instanceId: string, t: (key: string) => string): string {
-  if (instanceId === "local") return t("instance.local");
-  if (instanceId.startsWith("docker:")) return deriveDockerLabel(instanceId);
-  if (instanceId.startsWith("ssh:")) {
-    const suffix = instanceId.slice("ssh:".length);
-    return suffix || instanceId;
-  }
-  return instanceId;
-}
-
 function hashInstanceToken(raw: string): number {
   let hash = 2166136261;
   for (let i = 0; i < raw.length; i += 1) {
@@ -174,10 +156,8 @@ export function App() {
   const [channelsLoading, setChannelsLoading] = useState(false);
   const [discordChannelsLoading, setDiscordChannelsLoading] = useState(false);
   const [chatOpen, setChatOpen] = useState(false);
-  const [lastInstanceRoute, setLastInstanceRoute] = useState<Route>("home");
   const [startSection, setStartSection] = useState<"overview" | "profiles" | "settings">("overview");
   const [inStart, setInStart] = useState(true);
-  const chatPanelRightOffset = chatOpen && !inStart ? `${CHAT_PANEL_WIDTH + 20}px` : "1.25rem";
 
   // Workspace tabs — persisted to localStorage
   const [openTabIds, setOpenTabIds] = useState<string[]>(() => {
@@ -376,19 +356,12 @@ export function App() {
     message: "",
     instanceId: null,
   });
-  const [agentGuidanceByInstance, setAgentGuidanceByInstance] = useState<Record<string, AgentGuidanceItem>>({});
-  const [doctorLaunchByInstance, setDoctorLaunchByInstance] = useState<Record<string, AgentGuidanceItem | null>>({});
-  const [agentGuidanceOpen, setAgentGuidanceOpen] = useState(false);
-  const [unreadGuidance, setUnreadGuidance] = useState(false);
   const [showSshTransferSpeedUi, setShowSshTransferSpeedUi] = useState(false);
   const [showClawpalLogsUi, setShowClawpalLogsUi] = useState(false);
   const [showGatewayLogsUi, setShowGatewayLogsUi] = useState(false);
   const [showOpenclawContextUi, setShowOpenclawContextUi] = useState(false);
-  const showZeroclawDoctorFab = true;
   const [sshTransferStats, setSshTransferStats] = useState<SshTransferStats | null>(null);
   const [doctorNavPulse, setDoctorNavPulse] = useState(false);
-  const [quickDiagnoseOpen, setQuickDiagnoseOpen] = useState(false);
-  const [quickDiagnoseContext, setQuickDiagnoseContext] = useState<string | null>(null);
   const sshHealthFailStreakRef = useRef<Record<string, number>>({});
   const legacyMigrationDoneRef = useRef(false);
   const passphraseResolveRef = useRef<((value: string | null) => void) | null>(null);
@@ -398,7 +371,6 @@ export function App() {
   const remoteAuthSyncAtRef = useRef<Record<string, number>>({});
   const accessProbeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastAccessProbeAtRef = useRef<Record<string, number>>({});
-  const profileBootstrapGuidanceSigRef = useRef("");
 
   // Persist open tabs
   useEffect(() => {
@@ -464,111 +436,6 @@ export function App() {
       logDevIgnoredError("precheckRegistry", error);
     });
   }, [showToast, t]);
-
-  useEffect(() => {
-    const onGuidance = (event: Event) => {
-      const custom = event as CustomEvent<AgentGuidanceItem>;
-      if (!custom.detail) return;
-      setAgentGuidanceByInstance((prev) => ({
-        ...prev,
-        [custom.detail.instanceId]: custom.detail,
-      }));
-      setAgentGuidanceOpen(true);
-      setUnreadGuidance(true);
-    };
-    window.addEventListener("clawpal:agent-guidance", onGuidance as EventListener);
-    return () => {
-      window.removeEventListener("clawpal:agent-guidance", onGuidance as EventListener);
-    };
-  }, []);
-
-  useEffect(() => {
-    let cancelled = false;
-    const timer = window.setTimeout(() => {
-      void (async () => {
-        try {
-          const before = await api.listModelProfiles();
-          if (cancelled || before.some((p) => p.enabled)) return;
-
-          await api.extractModelProfilesFromConfig().catch((error) => {
-            logDevIgnoredError("bootstrap extractModelProfilesFromConfig", error);
-            return null;
-          });
-          const after = await api.listModelProfiles();
-          if (cancelled || after.some((p) => p.enabled)) return;
-
-          const hasConnectableInstance =
-            registeredInstances.some((inst) => inst.id !== "local")
-            || discoveredInstances.length > 0;
-          const signature = hasConnectableInstance ? "with-instance" : "no-instance";
-          if (profileBootstrapGuidanceSigRef.current === signature) return;
-          profileBootstrapGuidanceSigRef.current = signature;
-
-          const actions = hasConnectableInstance
-            ? [
-              t("onboarding.actionSyncProfiles"),
-              t("onboarding.actionAddProfile"),
-            ]
-            : [
-              t("onboarding.actionConnectInstanceFirst"),
-              t("onboarding.actionOpenConnectEntry"),
-            ];
-          window.dispatchEvent(new CustomEvent("clawpal:agent-guidance", {
-            detail: {
-              message: t("onboarding.noProfilesSummary"),
-              summary: t("onboarding.noProfilesSummary"),
-              actions,
-              source: "onboarding",
-              operation: "profiles.bootstrap.missing",
-              instanceId: "local",
-              transport: "local",
-              rawError: hasConnectableInstance
-                ? "No model profiles detected after auto extraction"
-                : "No model profiles detected and no connectable instances found",
-              createdAt: Date.now(),
-            },
-          }));
-        } catch {
-          // ignore bootstrap guidance failures
-        }
-      })();
-    }, 1200);
-    return () => {
-      cancelled = true;
-      window.clearTimeout(timer);
-    };
-  }, [discoveredInstances.length, registeredInstances, t]);
-
-  const agentGuidance = agentGuidanceByInstance[activeInstance] || null;
-  const doctorOverlayVisibility = resolveDoctorOverlayVisibility({
-    showDoctorUi: showZeroclawDoctorFab,
-    guidanceOpen: shouldRenderGuidanceCard(agentGuidanceOpen, agentGuidance),
-    hasGuidance: Boolean(agentGuidance),
-  });
-  const resolveGuidanceForInstance = useCallback((instanceId: string) => {
-    setAgentGuidanceByInstance((prev) => {
-      if (!prev[instanceId]) return prev;
-      const next = { ...prev };
-      delete next[instanceId];
-      return next;
-    });
-    setDoctorLaunchByInstance((prev) => {
-      if (!(instanceId in prev)) return prev;
-      const next = { ...prev };
-      delete next[instanceId];
-      return next;
-    });
-    if (instanceId === activeInstance) {
-      setAgentGuidanceOpen(false);
-      setUnreadGuidance(false);
-    }
-  }, [activeInstance]);
-
-  useEffect(() => {
-    if (!agentGuidance) {
-      setAgentGuidanceOpen(false);
-    }
-  }, [activeInstance, agentGuidance]);
 
   const resolveInstanceTransport = useCallback((instanceId: string) => {
     if (instanceId === "local") return "local";
@@ -779,17 +646,6 @@ export function App() {
       });
   }, [readLegacyDockerInstances, readLegacyOpenTabs, refreshRegisteredInstances, refreshHosts]);
 
-  const openQuickDiagnose = useCallback((context?: string | null, instanceId?: string) => {
-    if (!showZeroclawDoctorFab) return;
-    const nextContext = (context || "").trim();
-    if (instanceId) {
-      setOpenTabIds((prev) => prev.includes(instanceId) ? prev : [...prev, instanceId]);
-      setActiveInstance(instanceId);
-    }
-    setQuickDiagnoseContext(nextContext || null);
-    setQuickDiagnoseOpen(true);
-  }, [showZeroclawDoctorFab]);
-
   const requestPassphrase = useCallback((hostLabel: string): Promise<string | null> => {
     setPassphraseHostLabel(hostLabel);
     setPassphraseInput("");
@@ -805,20 +661,6 @@ export function App() {
     passphraseResolveRef.current = null;
     if (resolve) resolve(value);
   }, []);
-
-  useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (!showZeroclawDoctorFab) return;
-      if ((event.metaKey || event.ctrlKey) && event.shiftKey && event.key.toLowerCase() === "d") {
-        event.preventDefault();
-        openQuickDiagnose(null);
-      }
-    };
-    window.addEventListener("keydown", onKeyDown);
-    return () => {
-      window.removeEventListener("keydown", onKeyDown);
-    };
-  }, [openQuickDiagnose, showZeroclawDoctorFab]);
 
   const connectWithPassphraseFallback = useCallback(async (hostId: string) => {
     const host = sshHosts.find((h) => h.id === hostId);
@@ -1286,12 +1128,6 @@ export function App() {
     }, 1400);
   }, [navigateRoute]);
 
-  useEffect(() => {
-    if (INSTANCE_ROUTES.includes(route)) {
-      setLastInstanceRoute(route);
-    }
-  }, [route]);
-
   const showSidebar = true;
 
   // Derive openTabs array for InstanceTabBar
@@ -1675,12 +1511,6 @@ export function App() {
               discoveredInstances={discoveredInstances}
               discoveringInstances={discoveringInstances}
               onConnectDiscovered={handleConnectDiscovered}
-              showQuickDiagnose={doctorOverlayVisibility.showQuickDiagnose}
-              onQuickDiagnose={
-                doctorOverlayVisibility.showQuickDiagnose
-                  ? (context, instanceId) => openQuickDiagnose(context, instanceId)
-                  : undefined
-              }
             />
           )}
           {inStart && startSection === "profiles" && (
@@ -1701,7 +1531,6 @@ export function App() {
               onDataChange={bumpConfigVersion}
               hasAppUpdate={appUpdateAvailable}
               onAppUpdateSeen={() => setAppUpdateAvailable(false)}
-              onNavigateToProfiles={() => setStartSection("profiles")}
             />
           )}
 
@@ -1744,16 +1573,7 @@ export function App() {
           {!inStart && route === "doctor" && (
             <Doctor
               key={activeInstance}
-              active
               showGatewayLogsUi={showGatewayLogsUi}
-              connectRemoteHost={connectWithPassphraseFallback}
-              launchGuidance={doctorLaunchByInstance[activeInstance] || null}
-              onLaunchGuidanceConsumed={(instanceId) => {
-                setDoctorLaunchByInstance((prev) => ({
-                  ...prev,
-                  [instanceId]: null,
-                }));
-              }}
             />
           )}
           {!inStart && route === "logs" && <ClawpalLogs />}
@@ -1762,14 +1582,6 @@ export function App() {
           </Suspense>
         </div>
       </main>
-
-      {doctorOverlayVisibility.showQuickDiagnose && (
-        <QuickDiagnoseDialog
-          open={quickDiagnoseOpen}
-          onOpenChange={setQuickDiagnoseOpen}
-          context={quickDiagnoseContext}
-        />
-      )}
 
       {/* ── Chat Panel (instance mode only) ── */}
       {!inStart && chatOpen && (
@@ -1794,92 +1606,6 @@ export function App() {
       </div>
       </InstanceContext.Provider>
     </div>
-    {doctorOverlayVisibility.showGuidanceOverlay && (
-      <div
-        className="fixed bottom-5 z-[60] flex flex-col items-end gap-2"
-        style={{ right: chatPanelRightOffset }}
-      >
-        {doctorOverlayVisibility.showGuidanceCard && (
-          <GuidanceCard
-            guidance={agentGuidance}
-            instanceLabel={
-              openTabs.find((tab) => tab.id === agentGuidance.instanceId)?.label
-              || fallbackInstanceLabel(agentGuidance.instanceId, t)
-            }
-            onClose={() => setAgentGuidanceOpen(false)}
-            onDismiss={() => { setAgentGuidanceOpen(false); setUnreadGuidance(false); }}
-            onResolve={() => resolveGuidanceForInstance(agentGuidance.instanceId)}
-            onDoctorHandoff={(context) => {
-              setAgentGuidanceOpen(false);
-              setDoctorLaunchByInstance((prev) => ({
-                ...prev,
-                [agentGuidance.instanceId]: {
-                  ...agentGuidance,
-                  preferredEngine: "openclaw",
-                  rawError: context || agentGuidance.rawError,
-                },
-              }));
-              // Ensure the correct instance tab is active so Doctor
-              // runs commands against the right target.
-              const gid = agentGuidance.instanceId;
-              setOpenTabIds((prev) => prev.includes(gid) ? prev : [...prev, gid]);
-              setActiveInstance(gid);
-              setInStart(false);
-              navigateRoute("doctor");
-            }}
-            onInlineFix={async (sa) => {
-              try {
-                if (sa.tool === "clawpal" && sa.args?.includes("ssh connect")) {
-                  const hostId = agentGuidance.instanceId;
-                  showToast(t("doctor.reconnectSsh"), "success");
-                  await connectWithPassphraseFallback(hostId);
-                  showToast(t("doctor.reconnectSshSuccess"), "success");
-                  resolveGuidanceForInstance(hostId);
-                } else {
-                  setAgentGuidanceOpen(false);
-                  setDoctorLaunchByInstance((prev) => ({
-                    ...prev,
-                    [agentGuidance.instanceId]: {
-                      ...agentGuidance,
-                      preferredEngine: "openclaw",
-                      rawError: sa.context || agentGuidance.rawError,
-                    },
-                  }));
-                  const gid = agentGuidance.instanceId;
-                  setOpenTabIds((prev) => prev.includes(gid) ? prev : [...prev, gid]);
-                  setActiveInstance(gid);
-                  setInStart(false);
-                  navigateRoute("doctor");
-                }
-              } catch (e) {
-                showToast(t("doctor.guidanceActionFailed", {
-                  action: sa.label,
-                  error: String(e),
-                }), "error");
-              }
-            }}
-          />
-        )}
-        {doctorOverlayVisibility.showAssistantPill && (
-          <Button
-            className="rounded-full shadow-md relative"
-            size="sm"
-            variant={agentGuidanceOpen ? "secondary" : "default"}
-            onClick={() => {
-              if (!agentGuidance) return;
-              setAgentGuidanceOpen((v) => !v);
-              setUnreadGuidance(false);
-            }}
-          >
-            {t("doctor.agentSource")}
-            {unreadGuidance && !agentGuidanceOpen && (
-              <span className="absolute -top-1 -right-1 size-2.5 rounded-full bg-destructive" />
-            )}
-          </Button>
-        )}
-      </div>
-    )}
-
     <Dialog
       open={passphraseOpen}
       onOpenChange={(open) => {
