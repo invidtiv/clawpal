@@ -39,6 +39,7 @@ jobs:
       current_version: ${{ steps.version.outputs.current }}
       new_version: ${{ steps.version.outputs.new }}
       is_prerelease: ${{ steps.version.outputs.is_prerelease }}
+      source_ref: ${{ steps.version.outputs.source_ref }}
       ref_name: ${{ steps.version.outputs.ref_name }}
     steps:
       - name: Checkout
@@ -76,11 +77,12 @@ jobs:
 
           EVENT_NAME="${{ github.event_name }}"
           if [ "$EVENT_NAME" = "create" ]; then
-            REF_NAME="${{ github.event.ref }}"
+            SOURCE_REF="${{ github.event.ref }}"
           else
-            REF_NAME="${{ github.ref_name }}"
+            SOURCE_REF="${{ github.ref_name }}"
           fi
-          echo "ref_name=$REF_NAME" >> "$GITHUB_OUTPUT"
+          REF_NAME="$SOURCE_REF"
+          echo "source_ref=$SOURCE_REF" >> "$GITHUB_OUTPUT"
 
           BUMP_TYPE="${{ inputs.bump_type }}"
           SEMVER_REGEX='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-((0|[1-9][0-9]*|[0-9A-Za-z-][0-9A-Za-z-]*)(\.(0|[1-9][0-9]*|[0-9A-Za-z-][0-9A-Za-z-]*))*))?(\+([0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*))?$'
@@ -199,6 +201,7 @@ jobs:
 
           if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
             if [[ "$NEW" == *-* ]]; then
+              REF_NAME="rc/v$NEW"
               echo "is_prerelease=true" >> "$GITHUB_OUTPUT"
               echo "### Tag type: prerelease" >> "$GITHUB_STEP_SUMMARY"
             else
@@ -237,6 +240,9 @@ jobs:
             echo "### Source branch: $SOURCE_BRANCH" >> "$GITHUB_STEP_SUMMARY"
             echo "### Trigger mode: $EVENT_NAME" >> "$GITHUB_STEP_SUMMARY"
           fi
+          echo "ref_name=$REF_NAME" >> "$GITHUB_OUTPUT"
+          echo "### Checkout ref: $SOURCE_REF" >> "$GITHUB_STEP_SUMMARY"
+          echo "### Publish ref: $REF_NAME" >> "$GITHUB_STEP_SUMMARY"
           echo "### Version bump: $CURRENT → $NEW" >> "$GITHUB_STEP_SUMMARY"
 
   test_ci:
@@ -547,7 +553,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          ref: ${{ needs.prepare.outputs.ref_name }}
+          ref: ${{ needs.prepare.outputs.source_ref }}
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
