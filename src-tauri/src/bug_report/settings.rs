@@ -3,6 +3,9 @@ use serde::{Deserialize, Serialize};
 const DEFAULT_MAX_REPORTS_PER_HOUR: u32 = 20;
 const MIN_MAX_REPORTS_PER_HOUR: u32 = 1;
 const MAX_MAX_REPORTS_PER_HOUR: u32 = 1_000;
+// This is ClawPal's public bug-report intake for sanitized crash/error metadata.
+// Builders can override it with CLAWPAL_SENTRY_DSN at compile time to route
+// reports to their own Sentry project instead.
 const DEFAULT_SENTRY_DSN: &str = "https://0181564e407dbd5b571190741e763b27@o4510996590886912.ingest.de.sentry.io/4510996607467600";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]

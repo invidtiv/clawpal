@@ -44,6 +44,7 @@ import { SshFormWidget } from "./components/SshFormWidget";
 import { QuickDiagnoseDialog } from "./components/QuickDiagnoseDialog";
 import type { AgentGuidanceItem } from "./components/GuidanceCard";
 import { closeWorkspaceTab, shouldRenderGuidanceCard } from "@/lib/tabWorkspace";
+import { resolveDoctorOverlayVisibility } from "@/lib/doctor-overlay";
 import {
   SSH_PASSPHRASE_RETRY_HINT,
   buildSshPassphraseCancelMessage,
@@ -564,6 +565,11 @@ export function App() {
   }, [discoveredInstances.length, registeredInstances, t]);
 
   const agentGuidance = agentGuidanceByInstance[activeInstance] || null;
+  const doctorOverlayVisibility = resolveDoctorOverlayVisibility({
+    showDoctorUi: showZeroclawDoctorFab,
+    guidanceOpen: shouldRenderGuidanceCard(agentGuidanceOpen, agentGuidance),
+    hasGuidance: Boolean(agentGuidance),
+  });
   const resolveGuidanceForInstance = useCallback((instanceId: string) => {
     setAgentGuidanceByInstance((prev) => {
       if (!prev[instanceId]) return prev;
@@ -1745,9 +1751,9 @@ export function App() {
               discoveredInstances={discoveredInstances}
               discoveringInstances={discoveringInstances}
               onConnectDiscovered={handleConnectDiscovered}
-              showQuickDiagnose={showZeroclawDoctorFab}
+              showQuickDiagnose={doctorOverlayVisibility.showQuickDiagnose}
               onQuickDiagnose={
-                showZeroclawDoctorFab
+                doctorOverlayVisibility.showQuickDiagnose
                   ? (context, instanceId) => openQuickDiagnose(context, instanceId)
                   : undefined
               }
@@ -1830,7 +1836,7 @@ export function App() {
         </div>
       </main>
 
-      {showZeroclawDoctorFab && (
+      {doctorOverlayVisibility.showQuickDiagnose && (
         <QuickDiagnoseDialog
           open={quickDiagnoseOpen}
           onOpenChange={setQuickDiagnoseOpen}
@@ -1887,12 +1893,12 @@ export function App() {
       </div>
     )}
 
-    {showZeroclawDoctorFab && (
+    {doctorOverlayVisibility.showGuidanceOverlay && (
       <div
         className="fixed bottom-5 z-[60] flex flex-col items-end gap-2"
         style={{ right: chatPanelRightOffset }}
       >
-        {shouldRenderGuidanceCard(agentGuidanceOpen, agentGuidance) && (
+        {doctorOverlayVisibility.showGuidanceCard && (
           <GuidanceCard
             guidance={agentGuidance}
             instanceLabel={
@@ -1953,21 +1959,23 @@ export function App() {
             }}
           />
         )}
-        <Button
-          className="rounded-full shadow-md relative"
-          size="sm"
-          variant={agentGuidanceOpen ? "secondary" : "default"}
-          onClick={() => {
-            if (!agentGuidance) return;
-            setAgentGuidanceOpen((v) => !v);
-            setUnreadGuidance(false);
-          }}
-        >
-          {t("doctor.agentSource")}
-          {unreadGuidance && !agentGuidanceOpen && (
-            <span className="absolute -top-1 -right-1 size-2.5 rounded-full bg-destructive" />
-          )}
-        </Button>
+        {doctorOverlayVisibility.showAssistantPill && (
+          <Button
+            className="rounded-full shadow-md relative"
+            size="sm"
+            variant={agentGuidanceOpen ? "secondary" : "default"}
+            onClick={() => {
+              if (!agentGuidance) return;
+              setAgentGuidanceOpen((v) => !v);
+              setUnreadGuidance(false);
+            }}
+          >
+            {t("doctor.agentSource")}
+            {unreadGuidance && !agentGuidanceOpen && (
+              <span className="absolute -top-1 -right-1 size-2.5 rounded-full bg-destructive" />
+            )}
+          </Button>
+        )}
       </div>
     )}
 

@@ -8,6 +8,11 @@ import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import type { SshConnectionProfile, SshConnectionBottleneckStage } from "@/lib/types";
 import {
+  getConnectionQualityLabel,
+  getConnectionStageLabel,
+  getSshDotClass,
+} from "./instance-card-helpers";
+import {
   formatSshConnectionLatency,
 } from "@/lib/sshConnectionProfile";
 
@@ -55,51 +60,6 @@ function HealthDot({ healthy, offline }: { healthy: boolean | null; offline: boo
   );
 }
 
-function getConnectionQualityLabel(quality: string, t: TFunction): string {
-  switch (quality) {
-    case "excellent":
-      return t("start.sshQualityExcellent");
-    case "good":
-      return t("start.sshQualityGood");
-    case "fair":
-      return t("start.sshQualityFair");
-    case "poor":
-      return t("start.sshQualityPoor");
-    default:
-      return t("start.sshQualityUnknown");
-  }
-}
-
-function getConnectionStageLabel(stage: SshConnectionBottleneckStage, t: TFunction): string {
-  switch (stage) {
-    case "connect":
-      return t("start.sshStage.connect");
-    case "gateway":
-      return t("start.sshStage.gateway");
-    case "config":
-      return t("start.sshStage.config");
-    case "version":
-      return t("start.sshStage.version");
-    default:
-      return t("start.sshStage.other");
-  }
-}
-
-function getSshDotClass(quality: string): string {
-  switch (quality) {
-    case "excellent":
-      return "bg-emerald-500 shadow-[0_0_12px_rgba(16,185,129,0.45)]";
-    case "good":
-      return "bg-lime-500 shadow-[0_0_12px_rgba(132,204,22,0.45)]";
-    case "fair":
-      return "bg-amber-500 shadow-[0_0_12px_rgba(217,119,6,0.45)]";
-    case "poor":
-      return "bg-red-500 shadow-[0_0_12px_rgba(220,38,38,0.45)]";
-    default:
-      return "bg-muted-foreground/40";
-  }
-}
-
 function SshConnectionDot({ profile, t }: { profile: SshConnectionProfile; t: TFunction }) {
   const qualityText = getConnectionQualityLabel(profile.quality, t);
   const qualityClass = getSshDotClass(profile.quality);
@@ -112,7 +72,7 @@ function SshConnectionDot({ profile, t }: { profile: SshConnectionProfile; t: TF
       <PopoverTrigger asChild>
         <button
           type="button"
-          className="inline-flex items-center justify-center rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+          className="-m-2 inline-flex items-center gap-1.5 rounded-md p-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
           aria-label={qualityText}
           onClick={(e) => e.stopPropagation()}
         >
@@ -122,6 +82,7 @@ function SshConnectionDot({ profile, t }: { profile: SshConnectionProfile; t: TF
               qualityClass,
             )}
           />
+          <span className="leading-none text-muted-foreground">{qualityText}</span>
         </button>
       </PopoverTrigger>
       <PopoverContent
@@ -180,10 +141,6 @@ export function InstanceCard({
   // SSH instances that haven't been checked yet: no status to show
   const needsCheck = type === "ssh" && !checked && !checking;
   const showSshConnectionProfile = type === "ssh" && checked === true && !!sshConnectionProfile;
-  const sshConnectionQualityText = sshConnectionProfile
-    ? getConnectionQualityLabel(sshConnectionProfile.quality, t)
-    : undefined;
-
   return (
     <Card
       className={cn(
@@ -292,22 +249,20 @@ export function InstanceCard({
               </span>
             ) : (
               <>
-                <span className="flex items-center gap-1.5">
-                  {type === "ssh" && showSshConnectionProfile && sshConnectionProfile ? (
-                    <SshConnectionDot profile={sshConnectionProfile} t={t} />
-                  ) : (
+                {type === "ssh" && showSshConnectionProfile && sshConnectionProfile ? (
+                  <SshConnectionDot profile={sshConnectionProfile} t={t} />
+                ) : (
+                  <span className="flex items-center gap-1.5">
                     <HealthDot healthy={healthy} offline={checked === true && healthy === null} />
-                  )}
-                  {checked === true && healthy === null
-                    ? t("start.unreachable")
-                    : showSshConnectionProfile && sshConnectionProfile
-                      ? sshConnectionQualityText
+                    {checked === true && healthy === null
+                      ? t("start.unreachable")
                       : healthy === true
                         ? t("start.healthy")
                         : healthy === false
                           ? t("start.unhealthy")
                           : t("start.checking")}
-                </span>
+                  </span>
+                )}
                 <Badge variant="secondary" className="text-xs">
                   {t("start.agents", { count: agentCount })}
                 </Badge>

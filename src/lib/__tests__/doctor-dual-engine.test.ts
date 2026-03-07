@@ -1,9 +1,11 @@
 import { describe, expect, test } from "bun:test";
 
 import {
+  buildDoctorLaunchGuidanceKey,
   hasZeroclawSession,
   resolveDoctorChatConnected,
   resolveEngineConnectionState,
+  resolvePendingDoctorLaunch,
   shouldDisableOpenclawStart,
   shouldDisableZeroclawStart,
   shouldShowDoctorDisconnectUi,
@@ -77,5 +79,73 @@ describe("embedded zeroclaw UI", () => {
   test("does not surface transport disconnect errors for zeroclaw", () => {
     expect(shouldSurfaceDisconnectError({ engine: "zeroclaw" })).toBe(false);
     expect(shouldSurfaceDisconnectError({ engine: "openclaw" })).toBe(true);
+  });
+});
+
+describe("launch guidance handoff", () => {
+  test("keeps the previous key and does not queue when handoff is inactive", () => {
+    const result = resolvePendingDoctorLaunch({
+      active: false,
+      doctorUiLoaded: true,
+      lastLaunchKey: "ssh:hetzner:status.extra.duplicate_installs:123",
+      launchGuidance: {
+        instanceId: "ssh:hetzner",
+        operation: "status.extra.duplicate_installs",
+        createdAt: 123,
+      },
+    });
+
+    expect(result).toEqual({
+      shouldQueue: false,
+      nextLaunchKey: "ssh:hetzner:status.extra.duplicate_installs:123",
+      engine: null,
+    });
+  });
+
+  test("queues a new handoff instead of auto-starting it", () => {
+    const result = resolvePendingDoctorLaunch({
+      active: true,
+      doctorUiLoaded: true,
+      lastLaunchKey: null,
+      launchGuidance: {
+        instanceId: "ssh:hetzner",
+        operation: "status.extra.duplicate_installs",
+        createdAt: 123,
+      },
+    });
+
+    expect(result.shouldQueue).toBe(true);
+    expect(result.engine).toBe("openclaw");
+    expect(result.nextLaunchKey).toBe(
+      buildDoctorLaunchGuidanceKey({
+        instanceId: "ssh:hetzner",
+        operation: "status.extra.duplicate_installs",
+        createdAt: 123,
+      }),
+    );
+  });
+
+  test("does not re-queue the same handoff twice", () => {
+    const existingKey = buildDoctorLaunchGuidanceKey({
+      instanceId: "ssh:hetzner",
+      operation: "status.extra.duplicate_installs",
+      createdAt: 123,
+    });
+
+    const result = resolvePendingDoctorLaunch({
+      active: true,
+      doctorUiLoaded: true,
+      lastLaunchKey: existingKey,
+      launchGuidance: {
+        instanceId: "ssh:hetzner",
+        operation: "status.extra.duplicate_installs",
+        createdAt: 123,
+        preferredEngine: "zeroclaw",
+      },
+    });
+
+    expect(result.shouldQueue).toBe(false);
+    expect(result.engine).toBe("zeroclaw");
+    expect(result.nextLaunchKey).toBe(existingKey);
   });
 });

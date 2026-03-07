@@ -48,9 +48,11 @@ import { AsyncActionButton } from "@/components/ui/AsyncActionButton";
 import type { BackupInfo } from "@/lib/types";
 import { formatTime, formatBytes } from "@/lib/utils";
 import {
+  buildDoctorLaunchGuidanceKey,
   hasZeroclawSession as hasZeroclawSessionState,
   resolveDoctorChatConnected,
   resolveEngineConnectionState,
+  resolvePendingDoctorLaunch,
   shouldDisableOpenclawStart,
   shouldShowDoctorDisconnectUi,
   shouldDisableZeroclawStart,
@@ -90,6 +92,14 @@ interface DoctorLaunchGuidance {
   transport: string;
   rawError: string;
   createdAt: number;
+}
+
+interface PendingDoctorLaunch {
+  key: string;
+  engine: "openclaw" | "zeroclaw";
+  extraContext: string;
+  summary: string;
+  instanceId: string;
 }
 
 interface DoctorProps {
@@ -180,10 +190,11 @@ export function Doctor({
   const [showZeroclawDiagnosis, setShowZeroclawDiagnosis] = useState(false);
   const [showRescueBotUi, setShowRescueBotUi] = useState(false);
   const [zeroclawDoctorUiLoaded, setZeroclawDoctorUiLoaded] = useState(false);
+  const [pendingDoctorLaunch, setPendingDoctorLaunch] = useState<PendingDoctorLaunch | null>(null);
   const logsContentRef = useRef<HTMLPreElement>(null);
   const [rescueState, setRescueState] = useState<RescueUiState>(createInitialRescueUiState);
   const [primaryState, setPrimaryState] = useState<PrimaryRecoveryState>(createInitialPrimaryRecoveryState);
-  const lastAutoLaunchKeyRef = useRef<string | null>(null);
+  const lastQueuedLaunchKeyRef = useRef<string | null>(null);
   const lastDoctorTargetKeyRef = useRef<string | null>(null);
   const letAiConnectionState = resolveEngineConnectionState({
     diagnosing: openclawDiagnosing,
@@ -258,6 +269,8 @@ export function Doctor({
       setOpenclawStartError(null);
       setRescueState(createInitialRescueUiState());
       setPrimaryState(createInitialPrimaryRecoveryState());
+      setPendingDoctorLaunch(null);
+      lastQueuedLaunchKeyRef.current = null;
     }
     lastDoctorTargetKeyRef.current = targetKey;
 
@@ -454,6 +467,26 @@ export function Doctor({
       setOpenclawDiagnosing(false);
       setOpenclawStartError(null);
     }
+  };
+
+  const pendingOpenclawLaunch = pendingDoctorLaunch?.engine === "openclaw"
+    ? pendingDoctorLaunch
+    : null;
+  const pendingZeroclawLaunch = pendingDoctorLaunch?.engine === "zeroclaw"
+    ? pendingDoctorLaunch
+    : null;
+
+  const handleStartQueuedOrManualDiagnosis = async (engine: "zeroclaw" | "openclaw") => {
+    const pending = pendingDoctorLaunch?.engine === engine
+      ? pendingDoctorLaunch
+      : null;
+
+    if (pending) {
+      onLaunchGuidanceConsumed?.(pending.instanceId);
+      setPendingDoctorLaunch(null);
+    }
+
+    await handleStartDiagnosis(pending?.extraContext, engine);
   };
 
   // Logs helpers
@@ -811,13 +844,21 @@ export function Doctor({
   }, [instanceId, isRemote, isConnected, showRescueBotUi]);
 
   useEffect(() => {
-    if (!active || !launchGuidance || !zeroclawDoctorUiLoaded) return;
-    const launchKey = `${launchGuidance.instanceId}:${launchGuidance.operation}:${launchGuidance.createdAt}`;
-    if (lastAutoLaunchKeyRef.current === launchKey) return;
-    lastAutoLaunchKeyRef.current = launchKey;
-    const launchEngine = launchGuidance.preferredEngine ?? "openclaw";
-    onLaunchGuidanceConsumed?.(launchGuidance.instanceId);
-    void handleStartDiagnosis(buildLaunchGuidanceContext(launchGuidance), launchEngine);
+    const resolved = resolvePendingDoctorLaunch({
+      active,
+      doctorUiLoaded: zeroclawDoctorUiLoaded,
+      launchGuidance,
+      lastLaunchKey: lastQueuedLaunchKeyRef.current,
+    });
+    if (!resolved.shouldQueue || !launchGuidance || !resolved.engine) return;
+    lastQueuedLaunchKeyRef.current = resolved.nextLaunchKey;
+    setPendingDoctorLaunch({
+      key: buildDoctorLaunchGuidanceKey(launchGuidance),
+      engine: resolved.engine,
+      extraContext: buildLaunchGuidanceContext(launchGuidance),
+      summary: (launchGuidance.summary || launchGuidance.message || "").trim(),
+      instanceId: launchGuidance.instanceId,
+    });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active, launchGuidance, onLaunchGuidanceConsumed, zeroclawDoctorUiLoaded]);
 
@@ -922,9 +963,19 @@ export function Doctor({
                       {startupHint}
                     </div>
                   )}
+                  {pendingZeroclawLaunch && (
+                    <div className="mb-3 rounded-md border border-primary/20 bg-primary/5 px-3 py-2">
+                      <div className="text-sm font-medium">
+                        {pendingZeroclawLaunch.summary || t("doctor.startDiagnosis")}
+                      </div>
+                      <div className="text-xs text-muted-foreground mt-1">
+                        {t("doctor.pendingHandoffReady")}
+                      </div>
+                    </div>
+                  )}
                   <Button
                     onClick={() => {
-                      void handleStartDiagnosis(undefined, "zeroclaw");
+                      void handleStartQueuedOrManualDiagnosis("zeroclaw");
                     }}
                     disabled={shouldDisableZeroclawStart({
                       diagnosing: isZeroclawStarting,
@@ -1051,9 +1102,19 @@ export function Doctor({
             {openclawDoctor.error && (
               <div className="mb-3 text-sm text-destructive">{openclawDoctor.error}</div>
             )}
+            {pendingOpenclawLaunch && (
+              <div className="mb-3 rounded-md border border-primary/20 bg-primary/5 px-3 py-2">
+                <div className="text-sm font-medium">
+                  {pendingOpenclawLaunch.summary || t("installChat.letAiHelp")}
+                </div>
+                <div className="text-xs text-muted-foreground mt-1">
+                  {t("doctor.pendingHandoffReady")}
+                </div>
+              </div>
+            )}
             <Button
               onClick={() => {
-                void handleStartDiagnosis(undefined, "openclaw");
+                void handleStartQueuedOrManualDiagnosis("openclaw");
               }}
               disabled={shouldDisableOpenclawStart({ diagnosing: isOpenclawStarting })}
               variant={showZeroclawDiagnosis ? "outline" : "default"}

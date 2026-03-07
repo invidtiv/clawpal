@@ -1,4 +1,12 @@
 export type DoctorConnectionState = "checking" | "connected" | "disconnected";
+export type DoctorHandoffEngine = "zeroclaw" | "openclaw";
+
+interface DoctorLaunchGuidanceLike {
+  instanceId: string;
+  operation: string;
+  createdAt: number;
+  preferredEngine?: DoctorHandoffEngine;
+}
 
 export function resolveEngineConnectionState(params: {
   diagnosing: boolean;
@@ -49,4 +57,36 @@ export function hasZeroclawSession(params: {
   messageCount: number;
 }): boolean {
   return params.connected || params.messageCount > 0;
+}
+
+export function buildDoctorLaunchGuidanceKey(
+  guidance: Pick<DoctorLaunchGuidanceLike, "instanceId" | "operation" | "createdAt">,
+): string {
+  return `${guidance.instanceId}:${guidance.operation}:${guidance.createdAt}`;
+}
+
+export function resolvePendingDoctorLaunch(params: {
+  active: boolean;
+  doctorUiLoaded: boolean;
+  launchGuidance: DoctorLaunchGuidanceLike | null;
+  lastLaunchKey: string | null;
+}): {
+  shouldQueue: boolean;
+  nextLaunchKey: string | null;
+  engine: DoctorHandoffEngine | null;
+} {
+  if (!params.active || !params.doctorUiLoaded || !params.launchGuidance) {
+    return {
+      shouldQueue: false,
+      nextLaunchKey: params.lastLaunchKey,
+      engine: null,
+    };
+  }
+
+  const nextLaunchKey = buildDoctorLaunchGuidanceKey(params.launchGuidance);
+  return {
+    shouldQueue: nextLaunchKey !== params.lastLaunchKey,
+    nextLaunchKey,
+    engine: params.launchGuidance.preferredEngine ?? "openclaw",
+  };
 }

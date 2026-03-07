@@ -16,9 +16,9 @@ import { SshFormWidget } from "@/components/SshFormWidget";
 import { useDoctorAgent } from "@/lib/use-doctor-agent";
 import { hasGuidanceEmitted } from "@/lib/use-api";
 import { isAlreadyExplainedGuidanceError } from "@/lib/guidance";
+import { resolveInstallHubToastError } from "@/lib/install-hub-toast";
 import { api } from "@/lib/api";
 import { withGuidance } from "@/lib/guidance";
-import { installHubFallbackPromptTemplate, renderPromptTemplate } from "@/lib/prompt-templates";
 import type {
   DoctorChatMessage,
   InstallMethod,
@@ -26,75 +26,13 @@ import type {
   SshConfigHostSuggestion,
   SshHost,
 } from "@/lib/types";
-import i18n from "../i18n";
-
-/**
- * Detect assistant messages that describe tool-call actions rather than user-facing content.
- * These are the agent "narrating" what it's doing (e.g. "建议执行诊断命令：docker ...").
- */
-function isToolNarration(text: string): boolean {
-  const t = text.trim();
-  return /^建议执行.*命令[：:]/.test(t)
-    || /^原因[：:]/.test(t)
-    || /^(Running|Executing|Checking)[：: ]/i.test(t)
-    || /^正在(执行|检查|运行)/.test(t);
-}
-
-/**
- * Parse numbered/bulleted choice lists from assistant text.
- * Matches many patterns the agent uses:
- *   1. Option text        |  1) Option text
- *   - Option text         |  • Option text
- *   选项 1: Option text   |  Option 1: text
- *   **Option text**       (bold list items)
- */
-function extractChoices(text: string): { prose: string; options: Array<{ label: string; value: string }> } | null {
-  const lines = text.split("\n");
-  const optionLines: Array<{ idx: number; label: string }> = [];
-  // Broad pattern: numbered (1. / 1) / 选项1: / Option 1:) or bulleted (- / •)
-  const listPattern = /^\s*(?:(?:选项|option)\s*\d+\s*[:：]\s*|(?:\*{1,2})?\d+[.)：:]\s*(?:\*{1,2})?\s*|[-•]\s+)\*{0,2}(.+?)\*{0,2}\s*$/i;
-
-  for (let i = 0; i < lines.length; i++) {
-    const match = lines[i].match(listPattern);
-    if (match) {
-      optionLines.push({ idx: i, label: match[1].trim() });
-    }
-  }
-
-  if (optionLines.length < 2) return null;
-
-  const firstIdx = optionLines[0].idx;
-  const lastIdx = optionLines[optionLines.length - 1].idx;
-  const blockSize = lastIdx - firstIdx + 1;
-  if (blockSize > optionLines.length + 2) return null;
-
-  // Prose = lines before the list, excluding "请选择" / "你想要" type headers and trailing "请告诉我" lines
-  const isHeaderLine = (l: string) => {
-    const t = l.trim();
-    return t.length === 0
-      || /[：:]$/.test(t)
-      || /^请/.test(t)
-      || /choose|select/i.test(t);
-  };
-  const proseLines = lines.slice(0, firstIdx).filter((l) => !isHeaderLine(l));
-  // Also skip trailing "请告诉我你的选择" / "Please tell me" after the list
-  const afterLines = lines.slice(lastIdx + 1).filter((l) => {
-    const t = l.trim();
-    return t.length > 0 && !/^请/.test(t) && !/please/i.test(t);
-  });
-  const prose = [...proseLines, ...afterLines].join("\n").trim();
-
-  const options = optionLines.map((o) => {
-    // Split "label — description" for cleaner buttons
-    const dashMatch = o.label.match(/^(.+?)\s*[-—–]+\s+(.+)$/);
-    return {
-      label: dashMatch ? dashMatch[1].trim() : o.label,
-      value: o.label,
-    };
-  });
-
-  return { prose, options };
-}
+import {
+  buildDefaultSshHostId,
+  buildInstallPrompt,
+  extractChoices,
+  isToolNarration,
+  sanitizeLocalIdSegment,
+} from "./install-hub-helpers";
 
 function ToolResultCollapsible({ content }: { content: string }) {
   const [expanded, setExpanded] = useState(false);
@@ -139,35 +77,10 @@ const EMPTY_DIAGNOSTIC_LOGS: InstallHubDiagnosticLogs = {
   gatewayErrorLog: "",
 };
 
-function sanitizeSshIdSegment(raw: string): string {
-  const lowered = raw.toLowerCase().trim();
-  const replaced = lowered.replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "");
-  return replaced || "remote";
-}
-
-function buildDefaultSshHostId(host: SshHost): string {
-  const base = host.host || host.label || "remote";
-  return `ssh:${sanitizeSshIdSegment(base)}`;
-}
-
-function sanitizeLocalIdSegment(raw: string): string {
-  const lowered = raw.toLowerCase().trim();
-  const replaced = lowered.replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "");
-  return replaced || "default";
-}
-
-function buildInstallPrompt(userIntent: string): string {
-  const language = i18n.language?.startsWith("zh") ? "Chinese (简体中文)" : "English";
-  return renderPromptTemplate(installHubFallbackPromptTemplate(), {
-    "{{LANGUAGE}}": language,
-    "{{USER_INTENT}}": userIntent,
-  });
-}
-
 export function InstallHub({
   open,
   onOpenChange,
-  showToast: _showToast,
+  showToast,
   onNavigate,
   onReady,
   onOpenDoctor,
@@ -208,6 +121,8 @@ export function InstallHub({
   const [diagnosticsVisible, setDiagnosticsVisible] = useState(false);
   const [diagnosticsError, setDiagnosticsError] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const lastAgentToastErrorRef = useRef<string | null>(null);
+  const lastSshConfigToastErrorRef = useRef<string | null>(null);
 
   // Auto-scroll on new messages
   useEffect(() => {
@@ -405,6 +320,35 @@ export function InstallHub({
       void loadSshConfigSuggestions();
     }
   }, [loadSshConfigSuggestions, mode, open]);
+
+  useEffect(() => {
+    if (!showToast) {
+      return;
+    }
+    const { nextError, toastMessage } = resolveInstallHubToastError({
+      error: agent.error,
+      previousError: lastAgentToastErrorRef.current,
+      ignoredSubstrings: ["Auto-approve"],
+    });
+    lastAgentToastErrorRef.current = nextError;
+    if (toastMessage) {
+      showToast(toastMessage, "error");
+    }
+  }, [agent.error, showToast]);
+
+  useEffect(() => {
+    if (!showToast) {
+      return;
+    }
+    const { nextError, toastMessage } = resolveInstallHubToastError({
+      error: sshConfigSuggestionsError,
+      previousError: lastSshConfigToastErrorRef.current,
+    });
+    lastSshConfigToastErrorRef.current = nextError;
+    if (toastMessage) {
+      showToast(toastMessage, "error");
+    }
+  }, [showToast, sshConfigSuggestionsError]);
 
   // Start agent session with the user's first message baked into the system prompt
   const startSession = useCallback((userIntent: string) => {
@@ -850,7 +794,7 @@ export function InstallHub({
   return (
     <>
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-2xl max-h-[80vh] flex flex-col">
+      <DialogContent className="max-w-2xl max-h-[80vh] flex flex-col overflow-hidden">
         <DialogHeader>
           <DialogTitle>
             {(mode === "connect_ssh" || mode === "connect_docker" || mode === "connect_wsl2")
@@ -866,7 +810,7 @@ export function InstallHub({
 
         {mode === "connect_ssh" ? (
           /* ── Connect Remote SSH form ── */
-          <div className="space-y-4 py-2">
+          <div className="min-h-0 flex-1 overflow-y-auto space-y-4 py-2 pr-1">
             <div className="text-sm text-muted-foreground">
               {t("installChat.connectRemoteDescription")}
             </div>
@@ -884,14 +828,9 @@ export function InstallHub({
                 {t("installChat.sshConfigPresetLoading")}
               </div>
             )}
-            {sshConfigSuggestionsError && !sshConfigSuggestionsLoading && (
-              <div className="text-sm text-destructive border border-destructive/30 rounded-md px-3 py-2 bg-destructive/5">
-                {sshConfigSuggestionsError}
-              </div>
-            )}
           </div>
         ) : mode === "connect_docker" ? (
-          <div className="space-y-4 py-2">
+          <div className="min-h-0 flex-1 overflow-y-auto space-y-4 py-2 pr-1">
             <div className="text-sm text-muted-foreground">{t("installChat.connectDockerDescription")}</div>
             <div className="space-y-1.5">
               <Label>{t("installChat.dockerHomeLabel")}</Label>
@@ -926,7 +865,7 @@ export function InstallHub({
             </DialogFooter>
           </div>
         ) : mode === "connect_wsl2" ? (
-          <div className="space-y-4 py-2">
+          <div className="min-h-0 flex-1 overflow-y-auto space-y-4 py-2 pr-1">
             <div className="text-sm text-muted-foreground">{t("installChat.connectWsl2Description")}</div>
             <div className="space-y-1.5">
               <Label>{t("installChat.wsl2HomeLabel")}</Label>
@@ -1002,11 +941,6 @@ export function InstallHub({
               className="flex-1 min-h-[300px] max-h-[50vh] border rounded-md p-3 bg-muted/30 overflow-y-auto"
             >
               <div className="space-y-3">
-                {agent.error && !agent.error.includes("Auto-approve") && (
-                  <div className="text-sm text-destructive border border-destructive/30 rounded-md px-3 py-2 bg-destructive/5">
-                    {agent.error}
-                  </div>
-                )}
                 {!agent.bridgeConnected && !agent.error && (
                   <div className="text-sm text-muted-foreground animate-pulse">
                     {t("installChat.connecting")}
