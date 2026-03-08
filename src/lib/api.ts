@@ -209,6 +209,8 @@ export const api = {
     invoke("diagnose_ssh", { hostId, intent }),
   getSshTransferStats: (hostId: string): Promise<SshTransferStats> =>
     invoke("get_ssh_transfer_stats", { hostId }),
+  probeSshConnectionProfile: (hostId: string, requestId: string): Promise<SshConnectionProfile> =>
+    invoke("probe_ssh_connection_profile", { hostId, requestId }),
 
   // Remote business commands
   remoteReadRawConfig: (hostId: string): Promise<string> =>

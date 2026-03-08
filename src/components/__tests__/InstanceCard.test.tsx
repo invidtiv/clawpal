@@ -118,6 +118,119 @@ describe("InstanceCard SSH connection profile", () => {
     expect(html).toContain("p-2");
   });
 
+  test("renders unreachable SSH capability details for failed probes", async () => {
+    await i18n.changeLanguage("en");
+
+    const html = renderToStaticMarkup(
+      React.createElement(I18nextProvider, {
+        i18n,
+        children: React.createElement(InstanceCard, {
+          id: "ssh:offline",
+          label: "offline",
+          type: "ssh",
+          healthy: null,
+          agentCount: 0,
+          opened: false,
+          checked: true,
+          checking: false,
+          onClick: () => {},
+          sshConnectionProfile: {
+            probeStatus: "failed",
+            reusedExistingConnection: false,
+            status: {
+              healthy: false,
+              activeAgents: 0,
+              sshDiagnostic: {
+                stage: "remoteExec",
+                intent: "health_check",
+                status: "failed",
+                errorCode: "SSH_TIMEOUT",
+                summary: "Gateway check timed out",
+                evidence: [],
+                repairPlan: ["retryWithBackoff"],
+                confidence: 0.8,
+              },
+            },
+            connectLatencyMs: 130,
+            gatewayLatencyMs: 0,
+            configLatencyMs: 0,
+            agentsLatencyMs: 0,
+            versionLatencyMs: 0,
+            totalLatencyMs: 130,
+            quality: "unknown",
+            qualityScore: 0,
+            bottleneck: {
+              stage: "connect",
+              latencyMs: 130,
+            },
+            stages: [
+              { key: "connect", latencyMs: 130, status: "ok" },
+              { key: "gateway", latencyMs: 0, status: "failed", note: "Gateway check timed out" },
+              { key: "config", latencyMs: 0, status: "not_run" },
+              { key: "agents", latencyMs: 0, status: "not_run" },
+              { key: "version", latencyMs: 0, status: "not_run" },
+            ],
+          },
+        }),
+      }),
+    );
+
+    expect(html).toContain('aria-label="Unreachable"');
+    expect(html).toContain(">Unreachable<");
+  });
+
+  test("shows detailed SSH stage timings including agents", async () => {
+    await i18n.changeLanguage("en");
+
+    const html = renderToStaticMarkup(
+      React.createElement(I18nextProvider, {
+        i18n,
+        children: React.createElement(InstanceCard, {
+          id: "ssh:hetzner",
+          label: "hetzner",
+          type: "ssh",
+          healthy: true,
+          agentCount: 4,
+          opened: false,
+          checked: true,
+          checking: false,
+          onClick: () => {},
+          sshConnectionProfile: {
+            probeStatus: "success",
+            reusedExistingConnection: true,
+            status: {
+              healthy: true,
+              activeAgents: 4,
+              sshDiagnostic: null,
+            },
+            connectLatencyMs: 0,
+            gatewayLatencyMs: 62,
+            configLatencyMs: 145,
+            agentsLatencyMs: 420,
+            versionLatencyMs: 58,
+            totalLatencyMs: 685,
+            quality: "fair",
+            qualityScore: 66,
+            bottleneck: {
+              stage: "agents",
+              latencyMs: 420,
+            },
+            stages: [
+              { key: "connect", latencyMs: 0, status: "reused", note: "Session reused" },
+              { key: "gateway", latencyMs: 62, status: "ok" },
+              { key: "config", latencyMs: 145, status: "ok" },
+              { key: "agents", latencyMs: 420, status: "ok" },
+              { key: "version", latencyMs: 58, status: "ok" },
+            ],
+          },
+        }),
+      }),
+    );
+
+    expect(html).toContain('aria-label="Fair"');
+    expect(html).toContain(">Fair<");
+  });
+
   test("makes the ssh capability label part of the popover trigger", async () => {
     await i18n.changeLanguage("en");
 
@@ -200,12 +313,13 @@ describe("InstanceCard SSH connection profile", () => {
           opened: true,
           checked: false,
           checking: true,
+          checkingLabel: "Fetching agents",
           onClick: () => {},
         }),
       }),
     );
 
-    expect(html).toContain(">Checking...</span>");
+    expect(html).toContain(">Fetching agents</span>");
     expect(html).not.toContain(">Open<");
     expect(html).toContain("animate-spin");
   });

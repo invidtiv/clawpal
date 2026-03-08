@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { listen } from "@tauri-apps/api/event";
 import { PlusIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -19,14 +20,30 @@ import { api } from "@/lib/api";
 import { withGuidance } from "@/lib/guidance";
 import { extractErrorText } from "@/lib/sshDiagnostic";
 import {
+  buildFailedSshConnectionProfileFromProgress,
+  buildSshProbeProgressLine,
+  getSshConnectionProbeStatus,
+  mergeSshProbeStageMetric,
   shouldAutoProbeSshConnectionProfile,
   shouldDeferInteractiveSshAutoProbe,
+  shouldMarkSshProbeAsChecked,
 } from "@/lib/sshConnectionProfile";
-import type { DockerInstance, SshHost, InstallSession, RegisteredInstance, DiscoveredInstance, SshConnectionProfile } from "@/lib/types";
+import type {
+  DockerInstance,
+  SshHost,
+  InstallSession,
+  RegisteredInstance,
+  DiscoveredInstance,
+  SshConnectionProfile,
+  SshConnectionStageKey,
+  SshConnectionStageMetric,
+  SshProbeProgressEvent,
+} from "@/lib/types";
 import { shouldShowLocalNotInstalled } from "./start-page-instance-health";
 
 const DEFAULT_DOCKER_OPENCLAW_HOME = "~/.clawpal/docker-local";
 const DEFAULT_DOCKER_CLAWPAL_DATA_DIR = "~/.clawpal/docker-local/data";
+const SSH_PROBE_WATCHDOG_MS = 48_000;
 
 function deriveDockerPaths(instanceId: string): { openclawHome: string; clawpalDataDir: string } {
   if (instanceId === "docker:local") {
@@ -141,11 +158,17 @@ export function StartPage({
   const [sshChecking, setSshChecking] = useState<Record<string, boolean>>({});
   const [sshDeferredInteractiveProbe, setSshDeferredInteractiveProbe] = useState<Record<string, boolean>>({});
   const [sshConnectionProfiles, setSshConnectionProfiles] = useState<Record<string, SshConnectionProfile>>({});
+  const [sshCheckingLabels, setSshCheckingLabels] = useState<Record<string, string>>({});
   const sshHostIdsKey = sshHosts
     .map((host) => host.id)
     .sort()
     .join("|");
   const sshProbeInFlightRef = useRef(false);
+  const sshProbeRequestSeqRef = useRef<Record<string, number>>({});
+  const sshProbeActiveRequestIdRef = useRef<Record<string, string>>({});
+  const sshProbeStageMetricsRef = useRef<Record<string, SshConnectionStageMetric[]>>({});
+  const sshProbeLastStageRef = useRef<Record<string, SshConnectionStageKey>>({});
+  const sshProbeWatchdogRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
   const healthPollInFlightRef = useRef(false);
   const localHealthCursorRef = useRef(0);
   const dockerHealthCursorRef = useRef(0);
@@ -285,11 +308,84 @@ export function StartPage({
     };
   }, [dockerInstances, registeredInstances]);
 
+  const nextSshProbeRequestSeq = useCallback((hostId: string) => {
+    const next = (sshProbeRequestSeqRef.current[hostId] ?? 0) + 1;
+    sshProbeRequestSeqRef.current[hostId] = next;
+    return next;
+  }, []);
+
+  const isLatestSshProbeRequest = useCallback((hostId: string, seq: number) => {
+    return (sshProbeRequestSeqRef.current[hostId] ?? 0) === seq;
+  }, []);
+
+  const clearSshProbeWatchdog = useCallback((hostId: string) => {
+    const timer = sshProbeWatchdogRef.current[hostId];
+    if (timer) {
+      clearTimeout(timer);
+      delete sshProbeWatchdogRef.current[hostId];
+    }
+  }, []);
+
+  const beginSshProbeTracking = useCallback((hostId: string, requestId: string) => {
+    sshProbeActiveRequestIdRef.current[hostId] = requestId;
+    sshProbeStageMetricsRef.current[hostId] = [];
+    sshProbeLastStageRef.current[hostId] = "connect";
+    setSshCheckingLabels((prev) => ({
+      ...prev,
+      [hostId]: buildSshProbeProgressLine(
+        {
+          hostId,
+          requestId,
+          stage: "connect",
+          phase: "start",
+        },
+        t,
+      ),
+    }));
+  }, [t]);
+
+  const finishSshProbeTracking = useCallback((hostId: string, requestId?: string) => {
+    const activeRequestId = sshProbeActiveRequestIdRef.current[hostId];
+    if (requestId && activeRequestId && activeRequestId !== requestId) {
+      return;
+    }
+    clearSshProbeWatchdog(hostId);
+    delete sshProbeActiveRequestIdRef.current[hostId];
+    delete sshProbeStageMetricsRef.current[hostId];
+    delete sshProbeLastStageRef.current[hostId];
+    setSshCheckingLabels((prev) => {
+      const { [hostId]: _removed, ...rest } = prev;
+      return rest;
+    });
+  }, [clearSshProbeWatchdog]);
+
+  const buildSshProbeTimeoutSummary = useCallback((hostId: string) => {
+    const failingStage = sshProbeLastStageRef.current[hostId] ?? "connect";
+    return t("start.sshProbe.timeout", {
+      stage: t(`start.sshStage.${failingStage}`),
+    });
+  }, [t]);
+
   const applySshConnectionProfile = useCallback((hostId: string, profile: SshConnectionProfile) => {
+    const probeStatus = getSshConnectionProbeStatus(profile);
+    if (probeStatus === "interactive_required") {
+      setHealthMap((prev) => ({
+        ...prev,
+        [hostId]: { healthy: null, agentCount: 0 },
+      }));
+      setSshConnectionProfiles((prev) => {
+        const { [hostId]: _removed, ...rest } = prev;
+        return rest;
+      });
+      setSshChecked((prev) => ({ ...prev, [hostId]: false }));
+      setSshDeferredInteractiveProbe((prev) => ({ ...prev, [hostId]: true }));
+      return;
+    }
+
     setHealthMap((prev) => ({
       ...prev,
       [hostId]: {
-        healthy: profile.status.healthy,
+        healthy: probeStatus === "failed" ? null : profile.status.healthy,
         agentCount: profile.status.activeAgents,
       },
     }));
@@ -297,7 +393,7 @@ export function StartPage({
       ...prev,
       [hostId]: profile,
     }));
-    setSshChecked((prev) => ({ ...prev, [hostId]: true }));
+    setSshChecked((prev) => ({ ...prev, [hostId]: shouldMarkSshProbeAsChecked(profile) }));
     setSshDeferredInteractiveProbe((prev) => ({ ...prev, [hostId]: false }));
   }, []);
 
@@ -312,7 +408,99 @@ export function StartPage({
     });
   }, []);
 
+  useEffect(() => {
+    let disposed = false;
+    const unlistenPromise = listen<SshProbeProgressEvent>("ssh:probe-progress", (event) => {
+      if (disposed) return;
+      const progress = event.payload;
+      if (sshProbeActiveRequestIdRef.current[progress.hostId] !== progress.requestId) return;
+
+      sshProbeLastStageRef.current[progress.hostId] = progress.stage;
+      sshProbeStageMetricsRef.current[progress.hostId] = mergeSshProbeStageMetric(
+        sshProbeStageMetricsRef.current[progress.hostId] ?? [],
+        progress,
+      );
+      setSshCheckingLabels((prev) => ({
+        ...prev,
+        [progress.hostId]: buildSshProbeProgressLine(progress, t),
+      }));
+    });
+
+    return () => {
+      disposed = true;
+      void unlistenPromise.then((unlisten) => unlisten());
+      Object.keys(sshProbeWatchdogRef.current).forEach((hostId) => {
+        clearSshProbeWatchdog(hostId);
+      });
+    };
+  }, [clearSshProbeWatchdog, t]);
+
+  const runSshProbe = useCallback(async (hostId: string, requestSeq: number) => {
+    const requestId = `${hostId}:${requestSeq}:${Date.now()}`;
+    beginSshProbeTracking(hostId, requestId);
+
+    let watchdogTimer: ReturnType<typeof setTimeout> | null = null;
+    const watchdogPromise = new Promise<never>((_, reject) => {
+      watchdogTimer = setTimeout(() => {
+        reject(new Error(`SSH probe watchdog timeout:${hostId}:${requestId}`));
+      }, SSH_PROBE_WATCHDOG_MS);
+      sshProbeWatchdogRef.current[hostId] = watchdogTimer;
+    });
+
+    try {
+      const profile = await Promise.race([
+        withGuidance(
+          () => api.probeSshConnectionProfile(hostId, requestId),
+          "probeSshConnectionProfile",
+          hostId,
+          "remote_ssh",
+        ),
+        watchdogPromise,
+      ]);
+      if (!isLatestSshProbeRequest(hostId, requestSeq)) return;
+      applySshConnectionProfile(hostId, profile);
+    } catch (error) {
+      if (!isLatestSshProbeRequest(hostId, requestSeq)) return;
+      const rawError = extractErrorText(error);
+      if (shouldDeferInteractiveSshAutoProbe(rawError)) {
+        clearSshConnectionProfile(hostId);
+        setSshDeferredInteractiveProbe((prev) => ({ ...prev, [hostId]: true }));
+        setSshChecked((prev) => ({ ...prev, [hostId]: false }));
+        return;
+      }
+
+      const failingStage = sshProbeLastStageRef.current[hostId] ?? "connect";
+      const errorSummary = rawError.includes("SSH probe watchdog timeout")
+        ? buildSshProbeTimeoutSummary(hostId)
+        : rawError || buildSshProbeTimeoutSummary(hostId);
+      const profile = buildFailedSshConnectionProfileFromProgress({
+        errorSummary,
+        progressStages: sshProbeStageMetricsRef.current[hostId] ?? [],
+        failingStage,
+      });
+      applySshConnectionProfile(hostId, profile);
+    } finally {
+      if (watchdogTimer) {
+        clearTimeout(watchdogTimer);
+      }
+      clearSshProbeWatchdog(hostId);
+      finishSshProbeTracking(hostId, requestId);
+      if (isLatestSshProbeRequest(hostId, requestSeq)) {
+        setSshChecking((prev) => ({ ...prev, [hostId]: false }));
+      }
+    }
+  }, [
+    applySshConnectionProfile,
+    beginSshProbeTracking,
+    buildSshProbeTimeoutSummary,
+    clearSshConnectionProfile,
+    clearSshProbeWatchdog,
+    finishSshProbeTracking,
+    isLatestSshProbeRequest,
+  ]);
+
   const handleSshCheck = useCallback(async (hostId: string) => {
+    const requestSeq = nextSshProbeRequestSeq(hostId);
     setSshChecking((prev) => ({ ...prev, [hostId]: true }));
     setSshDeferredInteractiveProbe((prev) => ({ ...prev, [hostId]: false }));
     try {
@@ -326,20 +514,30 @@ export function StartPage({
           "remote_ssh",
         );
       }
-      const profile = await withGuidance(
-        () => api.remoteGetSshConnectionProfile(hostId),
-        "remoteGetSshConnectionProfile",
-        hostId,
-        "remote_ssh",
-      );
-      applySshConnectionProfile(hostId, profile);
-    } catch {
+      await runSshProbe(hostId, requestSeq);
+    } catch (error) {
+      if (!isLatestSshProbeRequest(hostId, requestSeq)) return;
       clearSshConnectionProfile(hostId);
-      setSshChecked((prev) => ({ ...prev, [hostId]: true }));
+      const rawError = extractErrorText(error);
+      if (shouldDeferInteractiveSshAutoProbe(rawError)) {
+        setSshDeferredInteractiveProbe((prev) => ({ ...prev, [hostId]: true }));
+        setSshChecked((prev) => ({ ...prev, [hostId]: false }));
+      } else {
+        setSshChecked((prev) => ({ ...prev, [hostId]: true }));
+      }
     } finally {
-      setSshChecking((prev) => ({ ...prev, [hostId]: false }));
+      if (isLatestSshProbeRequest(hostId, requestSeq)) {
+        sshProbeInFlightRef.current = false;
+        setSshChecking((prev) => ({ ...prev, [hostId]: false }));
+      }
     }
-  }, [applySshConnectionProfile, clearSshConnectionProfile, connectRemoteHost]);
+  }, [
+    clearSshConnectionProfile,
+    connectRemoteHost,
+    isLatestSshProbeRequest,
+    nextSshProbeRequestSeq,
+    runSshProbe,
+  ]);
 
   useEffect(() => {
     let cancelled = false;
@@ -361,21 +559,13 @@ export function StartPage({
       if (!nextHostId) return;
 
       sshProbeInFlightRef.current = true;
+      const requestSeq = nextSshProbeRequestSeq(nextHostId);
       setSshChecking((prev) => ({ ...prev, [nextHostId]: true }));
 
       try {
-        const status = await api.sshStatus(nextHostId);
-        if (cancelled) return;
-        if (status !== "connected") {
-          await api.sshConnect(nextHostId);
-        }
-        if (cancelled) return;
-
-        const profile = await api.remoteGetSshConnectionProfile(nextHostId);
-        if (cancelled) return;
-        applySshConnectionProfile(nextHostId, profile);
+        await runSshProbe(nextHostId, requestSeq);
       } catch (error) {
-        if (cancelled) return;
+        if (cancelled || !isLatestSshProbeRequest(nextHostId, requestSeq)) return;
         clearSshConnectionProfile(nextHostId);
         const rawError = extractErrorText(error);
         if (shouldDeferInteractiveSshAutoProbe(rawError)) {
@@ -386,7 +576,7 @@ export function StartPage({
         }
       } finally {
         sshProbeInFlightRef.current = false;
-        if (!cancelled) {
+        if (!cancelled && isLatestSshProbeRequest(nextHostId, requestSeq)) {
           setSshChecking((prev) => ({ ...prev, [nextHostId]: false }));
         }
       }
@@ -399,6 +589,9 @@ export function StartPage({
   }, [
     applySshConnectionProfile,
     clearSshConnectionProfile,
+    isLatestSshProbeRequest,
+    nextSshProbeRequestSeq,
+    runSshProbe,
     sshChecked,
     sshChecking,
     sshConnectionProfiles,
@@ -521,6 +714,7 @@ export function StartPage({
               notInstalled={localNotInstalled}
               checked={inst.type === "ssh" ? sshChecked[inst.id] ?? false : undefined}
               checking={inst.type === "ssh" ? sshChecking[inst.id] ?? false : undefined}
+              checkingLabel={inst.type === "ssh" ? sshCheckingLabels[inst.id] : undefined}
               onCheck={inst.type === "ssh" ? () => handleSshCheck(inst.id) : undefined}
               onClick={() => onOpenInstance(inst.id)}
               sshConnectionProfile={inst.type === "ssh" ? sshConnectionProfiles[inst.id] : undefined}

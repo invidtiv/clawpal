@@ -24,6 +24,8 @@ export function getConnectionStageLabel(stage: SshConnectionBottleneckStage, t: 
       return t("start.sshStage.gateway");
     case "config":
       return t("start.sshStage.config");
+    case "agents":
+      return t("start.sshStage.agents");
     case "version":
       return t("start.sshStage.version");
     default:

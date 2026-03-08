@@ -496,16 +496,29 @@ pub struct SshBottleneck {
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct SshConnectionStage {
+    pub key: String,
+    pub latency_ms: u64,
+    pub status: String,
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SshConnectionProfile {
+    pub probe_status: String,
+    pub reused_existing_connection: bool,
     pub status: StatusLight,
     pub connect_latency_ms: u64,
     pub gateway_latency_ms: u64,
     pub config_latency_ms: u64,
+    pub agents_latency_ms: u64,
     pub version_latency_ms: u64,
     pub total_latency_ms: u64,
     pub quality: String,
     pub quality_score: u8,
     pub bottleneck: SshBottleneck,
+    pub stages: Vec<SshConnectionStage>,
 }
 
 /// Clear cached openclaw version — call after upgrade so status shows new version.

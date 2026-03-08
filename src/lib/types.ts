@@ -311,13 +311,36 @@ export interface InstanceStatus {
 }
 
 export type SshConnectionQuality = "excellent" | "good" | "fair" | "poor" | "unknown";
-export type SshConnectionBottleneckStage = "connect" | "gateway" | "config" | "version" | "other";
+export type SshConnectionBottleneckStage = "connect" | "gateway" | "config" | "agents" | "version" | "other";
+export type SshConnectionProbeStatus = "success" | "failed" | "interactive_required";
+export type SshConnectionStageKey = "connect" | "gateway" | "config" | "agents" | "version";
+export type SshConnectionStageStatus = "ok" | "failed" | "not_run" | "reused" | "interactive_required";
+export type SshConnectionProbePhase = "start" | "success" | "failed" | "reused" | "interactive_required" | "completed";
+
+export interface SshConnectionStageMetric {
+  key: SshConnectionStageKey;
+  latencyMs: number;
+  status: SshConnectionStageStatus;
+  note?: string | null;
+}
+
+export interface SshProbeProgressEvent {
+  hostId: string;
+  requestId: string;
+  stage: SshConnectionStageKey;
+  phase: SshConnectionProbePhase;
+  latencyMs?: number | null;
+  note?: string | null;
+}
 
 export interface SshConnectionProfile {
+  probeStatus?: SshConnectionProbeStatus;
+  reusedExistingConnection?: boolean;
   status: InstanceStatus;
   connectLatencyMs: number;
   gatewayLatencyMs: number;
   configLatencyMs: number;
+  agentsLatencyMs?: number;
   versionLatencyMs: number;
   totalLatencyMs: number;
   quality: SshConnectionQuality;
@@ -326,6 +349,7 @@ export interface SshConnectionProfile {
     stage: SshConnectionBottleneckStage;
     latencyMs: number;
   };
+  stages?: SshConnectionStageMetric[];
 }
 
 export interface StatusExtra {

@@ -14,6 +14,9 @@ import {
 } from "./instance-card-helpers";
 import {
   formatSshConnectionLatency,
+  getSshConnectionFailureSummary,
+  getSshConnectionProbeStatus,
+  getSshConnectionStageMetrics,
 } from "@/lib/sshConnectionProfile";
 
 type InstanceType = "local" | "docker" | "ssh" | "wsl2";
@@ -28,6 +31,7 @@ interface InstanceCardProps {
   notInstalled?: boolean;
   checked?: boolean; // whether health has been checked (SSH only)
   checking?: boolean; // whether a check is in progress (SSH only)
+  checkingLabel?: string;
   onCheck?: () => void; // trigger manual health check (SSH only)
   onClick: () => void;
   onRename?: () => void;
@@ -62,11 +66,15 @@ function HealthDot({ healthy, offline }: { healthy: boolean | null; offline: boo
 }
 
 function SshConnectionDot({ profile, t }: { profile: SshConnectionProfile; t: TFunction }) {
+  const probeStatus = getSshConnectionProbeStatus(profile);
   const qualityText = getConnectionQualityLabel(profile.quality, t);
-  const qualityClass = getSshDotClass(profile.quality);
+  const qualityClass = probeStatus === "failed" ? getSshDotClass("poor") : getSshDotClass(profile.quality);
+  const triggerLabel = probeStatus === "failed" ? t("start.unreachable") : qualityText;
   const bottleneckStageLabel = getConnectionStageLabel(profile.bottleneck.stage, t);
   const bottleneckLatencyText = formatSshConnectionLatency(profile.bottleneck.latencyMs);
   const totalLatencyText = formatSshConnectionLatency(profile.totalLatencyMs);
+  const stages = getSshConnectionStageMetrics(profile);
+  const failureSummary = getSshConnectionFailureSummary(profile);
 
   return (
     <Popover>
@@ -74,7 +82,7 @@ function SshConnectionDot({ profile, t }: { profile: SshConnectionProfile; t: TF
         <button
           type="button"
           className="-m-2 inline-flex items-center gap-1.5 rounded-md p-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
-          aria-label={qualityText}
+          aria-label={triggerLabel}
           onClick={(e) => e.stopPropagation()}
         >
           <span
@@ -83,10 +91,11 @@ function SshConnectionDot({ profile, t }: { profile: SshConnectionProfile; t: TF
               qualityClass,
             )}
           />
-          <span className="leading-none text-muted-foreground">{qualityText}</span>
+          <span className="leading-none text-muted-foreground">{triggerLabel}</span>
         </button>
       </PopoverTrigger>
       <PopoverContent
+        forceMount
         align="start"
         side="bottom"
         sideOffset={8}
@@ -95,15 +104,42 @@ function SshConnectionDot({ profile, t }: { profile: SshConnectionProfile; t: TF
         onOpenAutoFocus={(e) => e.preventDefault()}
       >
         <p className="font-semibold text-[12px] mb-1">{t("start.sshConnectionMetrics")}</p>
-        <p>
-          {t("start.sshSpeed")}: {totalLatencyText}
-        </p>
-        <p>
-          {t("start.sshQualityLabel")}: {qualityText} ({profile.qualityScore})
-        </p>
-        <p>
-          {t("start.sshBottleneck")}: {bottleneckStageLabel} ({bottleneckLatencyText})
-        </p>
+        {probeStatus === "failed" ? (
+          <p className="mb-2 text-destructive">{failureSummary ?? t("start.unreachable")}</p>
+        ) : (
+          <>
+            <p>
+              {t("start.sshSpeed")}: {totalLatencyText}
+            </p>
+            <p>
+              {t("start.sshQualityLabel")}: {qualityText} ({profile.qualityScore})
+            </p>
+            <p>
+              {t("start.sshBottleneck")}: {bottleneckStageLabel} ({bottleneckLatencyText})
+            </p>
+          </>
+        )}
+        <div className="mt-2 space-y-1">
+          {stages.map((stage) => {
+            const label = getConnectionStageLabel(stage.key, t);
+            const timing = stage.status === "reused"
+              ? stage.note ?? t("start.sshStageReused")
+              : stage.status === "not_run"
+                ? t("start.sshStageNotRun")
+                : formatSshConnectionLatency(stage.latencyMs);
+            return (
+              <div key={stage.key} className="flex items-start justify-between gap-3">
+                <span className="text-muted-foreground">{label}</span>
+                <span className="text-right">
+                  {timing}
+                  {stage.status === "failed" && stage.note ? (
+                    <span className="block text-[11px] text-destructive">{stage.note}</span>
+                  ) : null}
+                </span>
+              </div>
+            );
+          })}
+        </div>
       </PopoverContent>
     </Popover>
   );
@@ -118,6 +154,7 @@ export function InstanceCard({
   notInstalled = false,
   checked,
   checking,
+  checkingLabel,
   onCheck,
   onClick,
   onRename,
@@ -247,9 +284,9 @@ export function InstanceCard({
                 {t("start.check")}
               </Button>
             ) : checking ? (
-              <span className="flex items-center gap-1.5">
-                <RefreshCwIcon className="size-3 animate-spin" />
-                {t("start.checking")}
+              <span className="flex min-w-0 items-center gap-1.5">
+                <RefreshCwIcon className="size-3 shrink-0 animate-spin" />
+                <span className="truncate">{checkingLabel ?? t("start.checking")}</span>
               </span>
             ) : (
               <>

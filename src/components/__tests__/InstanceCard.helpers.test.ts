@@ -24,6 +24,7 @@ describe("InstanceCard helpers", () => {
     expect(getConnectionStageLabel("connect", i18n.t.bind(i18n))).toBe("TCP connect");
     expect(getConnectionStageLabel("gateway", i18n.t.bind(i18n))).toBe("Gateway check");
     expect(getConnectionStageLabel("config", i18n.t.bind(i18n))).toBe("Config fetch");
+    expect(getConnectionStageLabel("agents", i18n.t.bind(i18n))).toBe("Agents fetch");
     expect(getConnectionStageLabel("version", i18n.t.bind(i18n))).toBe("Version check");
     expect(getConnectionStageLabel("other", i18n.t.bind(i18n))).toBe("Other");
   });

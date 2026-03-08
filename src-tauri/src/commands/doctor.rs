@@ -1,30 +1,69 @@
 use super::*;
 use clawpal_core::ssh::diagnostic::{from_any_error, SshIntent, SshStage};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
+use tokio::time::{timeout, Duration};
 
 const SSH_QUALITY_EXCELLENT_MAX_MS: u64 = 250;
 const SSH_QUALITY_GOOD_MAX_MS: u64 = 550;
 const SSH_QUALITY_FAIR_MAX_MS: u64 = 1100;
 const SSH_QUALITY_POOR_MAX_MS: u64 = 1900;
+const SSH_PROBE_CONNECT_TIMEOUT_SECS: u64 = 18;
+const SSH_PROBE_STAGE_TIMEOUT_SECS: u64 = 15;
+const SSH_PROBE_TOTAL_TIMEOUT_SECS: u64 = 45;
 
-async fn timed_exec_login(
-    pool: &SshConnectionPool,
-    host_id: &str,
-    command: &str,
-) -> Result<(crate::ssh::SshExecResult, u64), String> {
-    let start = Instant::now();
-    let output = pool.exec_login(host_id, command).await?;
-    Ok((output, start.elapsed().as_millis() as u64))
+#[derive(Clone)]
+struct ProbeEmitter {
+    app: AppHandle,
+    host_id: String,
+    request_id: String,
+    current_stage: Arc<Mutex<String>>,
 }
 
-async fn timed_openclaw_remote_with_autofix(
-    pool: &SshConnectionPool,
-    host_id: &str,
-    args: &[&str],
-) -> Result<(crate::cli_runner::CliOutput, u64), String> {
-    let start = Instant::now();
-    let output = run_openclaw_remote_with_autofix(pool, host_id, args).await?;
-    Ok((output, start.elapsed().as_millis() as u64))
+impl ProbeEmitter {
+    fn set_stage(&self, stage: &str) {
+        if let Ok(mut guard) = self.current_stage.lock() {
+            *guard = stage.to_string();
+        }
+    }
+
+    fn current_stage(&self) -> String {
+        self.current_stage
+            .lock()
+            .map(|guard| guard.clone())
+            .unwrap_or_else(|_| "connect".to_string())
+    }
+
+    fn emit(&self, stage: &str, phase: &str, latency_ms: Option<u64>, note: Option<String>) {
+        let payload = serde_json::json!({
+            "hostId": self.host_id,
+            "requestId": self.request_id,
+            "stage": stage,
+            "phase": phase,
+            "latencyMs": latency_ms,
+            "note": note,
+        });
+        let _ = self.app.emit("ssh:probe-progress", payload);
+    }
+}
+
+fn emit_probe_progress(
+    emitter: Option<&ProbeEmitter>,
+    stage: &str,
+    phase: &str,
+    latency_ms: Option<u64>,
+    note: Option<String>,
+) {
+    if let Some(emitter) = emitter {
+        emitter.emit(stage, phase, latency_ms, note);
+    }
+}
+
+fn start_probe_stage(emitter: Option<&ProbeEmitter>, stage: &str) {
+    if let Some(emitter) = emitter {
+        emitter.set_stage(stage);
+        emitter.emit(stage, "start", None, None);
+    }
 }
 
 fn classify_connection_quality(total_ms: u64) -> (&'static str, u8) {
@@ -42,11 +81,13 @@ fn pick_bottleneck_stage(
     gateway_ms: u64,
     config_ms: u64,
     version_ms: u64,
+    agents_ms: u64,
 ) -> (&'static str, u64) {
     let samples = [
         ("connect", connect_ms),
         ("gateway", gateway_ms),
         ("config", config_ms),
+        ("agents", agents_ms),
         ("version", version_ms),
     ];
     let mut bottleneck = ("other", 0_u64);
@@ -56,6 +97,585 @@ fn pick_bottleneck_stage(
         }
     }
     bottleneck
+}
+
+struct ProbeStageError {
+    message: String,
+    latency_ms: u64,
+}
+
+async fn time_probe_stage<T, F>(
+    timeout_secs: u64,
+    timeout_message: &'static str,
+    future: F,
+) -> Result<(T, u64), ProbeStageError>
+where
+    F: std::future::Future<Output = Result<T, String>>,
+{
+    let start = Instant::now();
+    let output = timeout(Duration::from_secs(timeout_secs), future)
+        .await
+        .map_err(|_| ProbeStageError {
+            message: timeout_message.to_string(),
+            latency_ms: start.elapsed().as_millis() as u64,
+        })?
+        .map_err(|message| ProbeStageError {
+            message,
+            latency_ms: start.elapsed().as_millis() as u64,
+        })?;
+    Ok((output, start.elapsed().as_millis() as u64))
+}
+
+fn stage_row(key: &str, latency_ms: u64, status: &str, note: Option<String>) -> SshConnectionStage {
+    SshConnectionStage {
+        key: key.to_string(),
+        latency_ms,
+        status: status.to_string(),
+        note,
+    }
+}
+
+fn append_not_run_stages(stages: &mut Vec<SshConnectionStage>, after_key: &str) {
+    let ordered = ["connect", "gateway", "config", "agents", "version"];
+    let Some(idx) = ordered.iter().position(|key| *key == after_key) else {
+        return;
+    };
+    for key in ordered.iter().skip(idx + 1) {
+        stages.push(stage_row(key, 0, "not_run", None));
+    }
+}
+
+fn stage_to_diagnostic_stage(stage_key: &str) -> SshStage {
+    match stage_key {
+        "connect" => SshStage::SessionOpen,
+        "config" => SshStage::SftpRead,
+        _ => SshStage::RemoteExec,
+    }
+}
+
+fn build_probe_profile(
+    probe_status: &str,
+    reused_existing_connection: bool,
+    status: StatusLight,
+    connect_latency_ms: u64,
+    gateway_latency_ms: u64,
+    config_latency_ms: u64,
+    agents_latency_ms: u64,
+    version_latency_ms: u64,
+    total_latency_ms: u64,
+    bottleneck_stage: &str,
+    bottleneck_latency_ms: u64,
+    stages: Vec<SshConnectionStage>,
+) -> SshConnectionProfile {
+    let (quality, quality_score) = if probe_status == "success" {
+        let (quality, quality_score) = classify_connection_quality(total_latency_ms);
+        (quality.to_string(), quality_score)
+    } else {
+        ("unknown".to_string(), 0)
+    };
+
+    SshConnectionProfile {
+        probe_status: probe_status.to_string(),
+        reused_existing_connection,
+        status,
+        connect_latency_ms,
+        gateway_latency_ms,
+        config_latency_ms,
+        agents_latency_ms,
+        version_latency_ms,
+        total_latency_ms,
+        quality,
+        quality_score,
+        bottleneck: SshBottleneck {
+            stage: bottleneck_stage.to_string(),
+            latency_ms: bottleneck_latency_ms,
+        },
+        stages,
+    }
+}
+
+fn build_failed_probe_profile(
+    reused_existing_connection: bool,
+    failing_stage_key: &str,
+    connect_latency_ms: u64,
+    gateway_latency_ms: u64,
+    config_latency_ms: u64,
+    agents_latency_ms: u64,
+    version_latency_ms: u64,
+    total_latency_ms: u64,
+    stages: Vec<SshConnectionStage>,
+    diagnostic: SshDiagnosticReport,
+) -> SshConnectionProfile {
+    build_probe_profile(
+        "failed",
+        reused_existing_connection,
+        StatusLight {
+            healthy: false,
+            active_agents: 0,
+            global_default_model: None,
+            fallback_models: Vec::new(),
+            ssh_diagnostic: Some(diagnostic),
+        },
+        connect_latency_ms,
+        gateway_latency_ms,
+        config_latency_ms,
+        agents_latency_ms,
+        version_latency_ms,
+        total_latency_ms,
+        failing_stage_key,
+        match failing_stage_key {
+            "connect" => connect_latency_ms,
+            "gateway" => gateway_latency_ms,
+            "config" => config_latency_ms,
+            "agents" => agents_latency_ms,
+            "version" => version_latency_ms,
+            _ => 0,
+        },
+        stages,
+    )
+}
+
+fn build_interactive_probe_profile(
+    connect_latency_ms: u64,
+    total_latency_ms: u64,
+    stages: Vec<SshConnectionStage>,
+    diagnostic: SshDiagnosticReport,
+) -> SshConnectionProfile {
+    build_probe_profile(
+        "interactive_required",
+        false,
+        StatusLight {
+            healthy: false,
+            active_agents: 0,
+            global_default_model: None,
+            fallback_models: Vec::new(),
+            ssh_diagnostic: Some(diagnostic),
+        },
+        connect_latency_ms,
+        0,
+        0,
+        0,
+        0,
+        total_latency_ms,
+        "connect",
+        connect_latency_ms,
+        stages,
+    )
+}
+
+async fn connect_host_for_probe(
+    pool: &SshConnectionPool,
+    host: &SshHostConfig,
+) -> Result<(bool, u64), ProbeStageError> {
+    if pool.is_connected(&host.id).await {
+        return Ok((true, 0));
+    }
+
+    let ((), latency_ms) = time_probe_stage(
+        SSH_PROBE_CONNECT_TIMEOUT_SECS,
+        "ssh connect timed out during probe",
+        async {
+            if let Some(passphrase) = host.passphrase.as_deref().filter(|value| !value.is_empty()) {
+                pool.connect_with_passphrase(host, Some(passphrase)).await
+            } else {
+                pool.connect(host).await
+            }
+        },
+    )
+    .await?;
+
+    Ok((false, latency_ms))
+}
+
+async fn probe_ssh_connection_profile_impl(
+    pool: &SshConnectionPool,
+    host_id: &str,
+    emitter: Option<ProbeEmitter>,
+) -> Result<SshConnectionProfile, String> {
+    let host = read_hosts_from_registry()?
+        .into_iter()
+        .find(|candidate| candidate.id == host_id)
+        .ok_or_else(|| format!("No SSH host config with id: {host_id}"))?;
+
+    let total_start = Instant::now();
+    let mut stages = Vec::new();
+    let emitter_ref = emitter.as_ref();
+
+    start_probe_stage(emitter_ref, "connect");
+    let (reused_existing_connection, connect_latency_ms) =
+        match connect_host_for_probe(pool, &host).await {
+            Ok(result) => result,
+            Err(error) => {
+                let diagnostic = from_any_error(
+                    SshStage::SessionOpen,
+                    SshIntent::Connect,
+                    error.message.clone(),
+                );
+                let connect_latency_ms = error.latency_ms;
+                if matches!(
+                    diagnostic.error_code,
+                    Some(clawpal_core::ssh::diagnostic::SshErrorCode::PassphraseRequired)
+                ) {
+                    emit_probe_progress(
+                        emitter_ref,
+                        "connect",
+                        "interactive_required",
+                        Some(connect_latency_ms),
+                        Some(diagnostic.summary.clone()),
+                    );
+                    stages.push(stage_row(
+                        "connect",
+                        connect_latency_ms,
+                        "interactive_required",
+                        Some(diagnostic.summary.clone()),
+                    ));
+                    append_not_run_stages(&mut stages, "connect");
+                    return Ok(build_interactive_probe_profile(
+                        connect_latency_ms,
+                        total_start.elapsed().as_millis() as u64,
+                        stages,
+                        diagnostic,
+                    ));
+                }
+                emit_probe_progress(
+                    emitter_ref,
+                    "connect",
+                    "failed",
+                    Some(connect_latency_ms),
+                    Some(diagnostic.summary.clone()),
+                );
+                stages.push(stage_row(
+                    "connect",
+                    connect_latency_ms,
+                    "failed",
+                    Some(diagnostic.summary.clone()),
+                ));
+                append_not_run_stages(&mut stages, "connect");
+                return Ok(build_failed_probe_profile(
+                    false,
+                    "connect",
+                    connect_latency_ms,
+                    0,
+                    0,
+                    0,
+                    0,
+                    total_start.elapsed().as_millis() as u64,
+                    stages,
+                    diagnostic,
+                ));
+            }
+        };
+
+    if reused_existing_connection {
+        emit_probe_progress(
+            emitter_ref,
+            "connect",
+            "reused",
+            Some(0),
+            Some("Session reused".to_string()),
+        );
+        stages.push(stage_row(
+            "connect",
+            0,
+            "reused",
+            Some("Session reused".to_string()),
+        ));
+    } else {
+        emit_probe_progress(
+            emitter_ref,
+            "connect",
+            "success",
+            Some(connect_latency_ms),
+            None,
+        );
+        stages.push(stage_row("connect", connect_latency_ms, "ok", None));
+    }
+
+    start_probe_stage(emitter_ref, "gateway");
+    let (gateway_res, gateway_latency_ms) = match time_probe_stage(
+        SSH_PROBE_STAGE_TIMEOUT_SECS,
+        "gateway probe timed out",
+        async {
+            pool.exec_login(host_id, "pgrep -f '[o]penclaw-gateway' >/dev/null 2>&1")
+                .await
+        },
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(error) => {
+            let diagnostic = from_any_error(
+                stage_to_diagnostic_stage("gateway"),
+                SshIntent::HealthCheck,
+                error.message,
+            );
+            emit_probe_progress(
+                emitter_ref,
+                "gateway",
+                "failed",
+                Some(error.latency_ms),
+                Some(diagnostic.summary.clone()),
+            );
+            stages.push(stage_row(
+                "gateway",
+                error.latency_ms,
+                "failed",
+                Some(diagnostic.summary.clone()),
+            ));
+            append_not_run_stages(&mut stages, "gateway");
+            return Ok(build_failed_probe_profile(
+                reused_existing_connection,
+                "gateway",
+                connect_latency_ms,
+                error.latency_ms,
+                0,
+                0,
+                0,
+                total_start.elapsed().as_millis() as u64,
+                stages,
+                diagnostic,
+            ));
+        }
+    };
+    emit_probe_progress(
+        emitter_ref,
+        "gateway",
+        "success",
+        Some(gateway_latency_ms),
+        None,
+    );
+    stages.push(stage_row("gateway", gateway_latency_ms, "ok", None));
+
+    start_probe_stage(emitter_ref, "config");
+    let ((_, _normalized_raw, config_json), config_latency_ms) = match time_probe_stage(
+        SSH_PROBE_STAGE_TIMEOUT_SECS,
+        "config probe timed out",
+        async { remote_read_openclaw_config_text_and_json(pool, host_id).await },
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(error) => {
+            let diagnostic = from_any_error(
+                stage_to_diagnostic_stage("config"),
+                SshIntent::HealthCheck,
+                error.message,
+            );
+            emit_probe_progress(
+                emitter_ref,
+                "config",
+                "failed",
+                Some(error.latency_ms),
+                Some(diagnostic.summary.clone()),
+            );
+            stages.push(stage_row(
+                "config",
+                error.latency_ms,
+                "failed",
+                Some(diagnostic.summary.clone()),
+            ));
+            append_not_run_stages(&mut stages, "config");
+            return Ok(build_failed_probe_profile(
+                reused_existing_connection,
+                "config",
+                connect_latency_ms,
+                gateway_latency_ms,
+                error.latency_ms,
+                0,
+                0,
+                total_start.elapsed().as_millis() as u64,
+                stages,
+                diagnostic,
+            ));
+        }
+    };
+    emit_probe_progress(
+        emitter_ref,
+        "config",
+        "success",
+        Some(config_latency_ms),
+        None,
+    );
+    stages.push(stage_row("config", config_latency_ms, "ok", None));
+
+    start_probe_stage(emitter_ref, "agents");
+    let (agents_res, agents_latency_ms) = match time_probe_stage(
+        SSH_PROBE_STAGE_TIMEOUT_SECS,
+        "agents probe timed out",
+        async {
+            pool.exec_login(host_id, "openclaw agents list --json")
+                .await
+        },
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(error) => {
+            let diagnostic = from_any_error(
+                stage_to_diagnostic_stage("agents"),
+                SshIntent::HealthCheck,
+                error.message,
+            );
+            emit_probe_progress(
+                emitter_ref,
+                "agents",
+                "failed",
+                Some(error.latency_ms),
+                Some(diagnostic.summary.clone()),
+            );
+            stages.push(stage_row(
+                "agents",
+                error.latency_ms,
+                "failed",
+                Some(diagnostic.summary.clone()),
+            ));
+            append_not_run_stages(&mut stages, "agents");
+            return Ok(build_failed_probe_profile(
+                reused_existing_connection,
+                "agents",
+                connect_latency_ms,
+                gateway_latency_ms,
+                config_latency_ms,
+                error.latency_ms,
+                0,
+                total_start.elapsed().as_millis() as u64,
+                stages,
+                diagnostic,
+            ));
+        }
+    };
+    emit_probe_progress(
+        emitter_ref,
+        "agents",
+        "success",
+        Some(agents_latency_ms),
+        None,
+    );
+    stages.push(stage_row("agents", agents_latency_ms, "ok", None));
+
+    start_probe_stage(emitter_ref, "version");
+    let (version_res, version_latency_ms) = match time_probe_stage(
+        SSH_PROBE_STAGE_TIMEOUT_SECS,
+        "version probe timed out",
+        async { pool.exec_login(host_id, "openclaw --version").await },
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(error) => {
+            let diagnostic = from_any_error(
+                stage_to_diagnostic_stage("version"),
+                SshIntent::HealthCheck,
+                error.message,
+            );
+            emit_probe_progress(
+                emitter_ref,
+                "version",
+                "failed",
+                Some(error.latency_ms),
+                Some(diagnostic.summary.clone()),
+            );
+            stages.push(stage_row(
+                "version",
+                error.latency_ms,
+                "failed",
+                Some(diagnostic.summary.clone()),
+            ));
+            return Ok(build_failed_probe_profile(
+                reused_existing_connection,
+                "version",
+                connect_latency_ms,
+                gateway_latency_ms,
+                config_latency_ms,
+                agents_latency_ms,
+                error.latency_ms,
+                total_start.elapsed().as_millis() as u64,
+                stages,
+                diagnostic,
+            ));
+        }
+    };
+    emit_probe_progress(
+        emitter_ref,
+        "version",
+        "success",
+        Some(version_latency_ms),
+        None,
+    );
+    stages.push(stage_row("version", version_latency_ms, "ok", None));
+
+    let active_agents = if agents_res.exit_code == 0 {
+        let json = serde_json::from_str::<Value>(&agents_res.stdout).unwrap_or(Value::Null);
+        count_agent_entries_from_cli_json(&json).unwrap_or(0)
+    } else {
+        0
+    };
+
+    let global_default_model = config_json
+        .pointer("/defaults/model")
+        .and_then(read_model_value)
+        .or_else(|| {
+            config_json
+                .pointer("/default/model")
+                .and_then(read_model_value)
+        });
+    let fallback_models = config_json
+        .pointer("/defaults/model/fallbacks")
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(Value::as_str)
+                .map(String::from)
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let _openclaw_version = {
+        let trimmed = version_res.stdout.trim().to_string();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed)
+        }
+    };
+
+    let healthy = gateway_res.exit_code == 0 || config_json != Value::Null;
+    let total_latency_ms = total_start.elapsed().as_millis() as u64;
+    let (bottleneck_stage, bottleneck_latency_ms) = pick_bottleneck_stage(
+        connect_latency_ms,
+        gateway_latency_ms,
+        config_latency_ms,
+        version_latency_ms,
+        agents_latency_ms,
+    );
+    emit_probe_progress(
+        emitter_ref,
+        "version",
+        "completed",
+        Some(total_latency_ms),
+        None,
+    );
+
+    Ok(build_probe_profile(
+        "success",
+        reused_existing_connection,
+        StatusLight {
+            healthy,
+            active_agents,
+            global_default_model,
+            fallback_models,
+            ssh_diagnostic: None,
+        },
+        connect_latency_ms,
+        gateway_latency_ms,
+        config_latency_ms,
+        agents_latency_ms,
+        version_latency_ms,
+        total_latency_ms,
+        bottleneck_stage,
+        bottleneck_latency_ms,
+        stages,
+    ))
 }
 
 #[cfg(test)]
@@ -101,14 +721,20 @@ mod tests {
 
     #[test]
     fn pick_bottleneck_stage_prefers_largest_latency() {
-        let (stage, latency) = pick_bottleneck_stage(120, 90, 400, 250);
+        let (stage, latency) = pick_bottleneck_stage(120, 90, 400, 250, 100);
         assert_eq!((stage, latency), ("config", 400));
     }
 
     #[test]
     fn pick_bottleneck_stage_keeps_other_on_empty_measurements() {
-        let (stage, latency) = pick_bottleneck_stage(0, 0, 0, 0);
+        let (stage, latency) = pick_bottleneck_stage(0, 0, 0, 0, 0);
         assert_eq!((stage, latency), ("other", 0));
+    }
+
+    #[test]
+    fn pick_bottleneck_stage_includes_agents_stage() {
+        let (stage, latency) = pick_bottleneck_stage(120, 90, 200, 250, 480);
+        assert_eq!((stage, latency), ("agents", 480));
     }
 
     #[test]
@@ -263,109 +889,46 @@ pub async fn remote_get_system_status(
 }
 
 #[tauri::command]
+pub async fn probe_ssh_connection_profile(
+    pool: State<'_, SshConnectionPool>,
+    host_id: String,
+    request_id: String,
+    app: AppHandle,
+) -> Result<SshConnectionProfile, String> {
+    let emitter = ProbeEmitter {
+        app,
+        host_id: host_id.clone(),
+        request_id,
+        current_stage: Arc::new(Mutex::new("connect".to_string())),
+    };
+
+    match timeout(
+        Duration::from_secs(SSH_PROBE_TOTAL_TIMEOUT_SECS),
+        probe_ssh_connection_profile_impl(&pool, &host_id, Some(emitter.clone())),
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => {
+            let current_stage = emitter.current_stage();
+            let message = format!("ssh probe timed out during {current_stage}");
+            emitter.emit(&current_stage, "failed", None, Some(message.clone()));
+            Err(message)
+        }
+    }
+}
+
+#[tauri::command]
 pub async fn remote_get_ssh_connection_profile(
     pool: State<'_, SshConnectionPool>,
     host_id: String,
 ) -> Result<SshConnectionProfile, String> {
-    let total_start = Instant::now();
-    let (connect_result, gateway_result, config_result, agents_result, version_result) = tokio::join!(
-        timed_exec_login(&pool, &host_id, "true"),
-        timed_exec_login(
-            &pool,
-            &host_id,
-            "pgrep -f '[o]penclaw-gateway' >/dev/null 2>&1",
-        ),
-        timed_openclaw_remote_with_autofix(&pool, &host_id, &["config", "get", "agents", "--json"]),
-        run_openclaw_remote_with_autofix(&pool, &host_id, &["agents", "list", "--json"]),
-        timed_exec_login(&pool, &host_id, "openclaw --version"),
-    );
-
-    let (_connect_res, connect_latency_ms) = connect_result?;
-    let (gateway_res, gateway_latency_ms) = gateway_result?;
-    let (config_res, config_latency_ms) = config_result?;
-    let agents_res = agents_result?;
-    let (version_res, version_latency_ms) = version_result?;
-
-    let config_ok = config_res.exit_code == 0;
-    let active_agents = if agents_res.exit_code == 0 {
-        let output = crate::cli_runner::CliOutput {
-            stdout: agents_res.stdout.clone(),
-            stderr: agents_res.stderr.clone(),
-            exit_code: agents_res.exit_code as i32,
-        };
-        let json = crate::cli_runner::parse_json_output(&output).unwrap_or(Value::Null);
-        count_agent_entries_from_cli_json(&json).unwrap_or(0)
-    } else {
-        0
-    };
-    let (global_default_model, fallback_models) = if config_ok {
-        let cfg: Value = {
-            let output = crate::cli_runner::CliOutput {
-                stdout: config_res.stdout.clone(),
-                stderr: config_res.stderr.clone(),
-                exit_code: config_res.exit_code as i32,
-            };
-            crate::cli_runner::parse_json_output(&output).unwrap_or(Value::Null)
-        };
-        let model = cfg
-            .pointer("/defaults/model")
-            .and_then(|v| read_model_value(v))
-            .or_else(|| cfg.pointer("/default/model").and_then(read_model_value));
-        let fallbacks = cfg
-            .pointer("/defaults/model/fallbacks")
-            .and_then(Value::as_array)
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(Value::as_str)
-                    .map(String::from)
-                    .collect()
-            })
-            .unwrap_or_default();
-        (model, fallbacks)
-    } else {
-        (None, Vec::new())
-    };
-
-    let _openclaw_version = {
-        let trimmed = version_res.stdout.trim().to_string();
-        if trimmed.is_empty() {
-            None
-        } else {
-            Some(trimmed)
-        }
-    };
-
-    let healthy = gateway_res.exit_code == 0 || config_ok;
-
-    let total_latency_ms = total_start.elapsed().as_millis() as u64;
-    let (quality, quality_score) = classify_connection_quality(total_latency_ms);
-    let (bottleneck_stage, bottleneck_latency_ms) = pick_bottleneck_stage(
-        connect_latency_ms,
-        gateway_latency_ms,
-        config_latency_ms,
-        version_latency_ms,
-    );
-
-    Ok(SshConnectionProfile {
-        status: StatusLight {
-            healthy,
-            active_agents,
-            global_default_model,
-            fallback_models,
-            ssh_diagnostic: None,
-        },
-        connect_latency_ms,
-        gateway_latency_ms,
-        config_latency_ms,
-        version_latency_ms,
-        total_latency_ms,
-        quality: quality.to_string(),
-        quality_score,
-        bottleneck: SshBottleneck {
-            stage: bottleneck_stage.to_string(),
-            latency_ms: bottleneck_latency_ms,
-        },
-    })
+    timeout(
+        Duration::from_secs(SSH_PROBE_TOTAL_TIMEOUT_SECS),
+        probe_ssh_connection_profile_impl(&pool, &host_id, None),
+    )
+    .await
+    .map_err(|_| "ssh probe timed out".to_string())?
 }
 
 #[tauri::command]
