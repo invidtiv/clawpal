@@ -82,11 +82,11 @@ describe("DoctorRecoveryOverview", () => {
 
     expect(html).toContain("Gateway needs attention first");
     expect(html).toContain("Apply 1 safe fix and re-run recovery");
-    expect(html).toContain("Fix 1 safe issue");
+    expect(html).toContain("Fix 1 issue");
     expect(html).toContain("Agents");
     expect(html).toContain("Gateway");
-    expect(html.match(/Fix 1 safe issue/g)?.length ?? 0).toBe(1);
-    expect(html).toContain("Open Gateway docs");
+    expect(html.match(/Fix 1 issue/g)?.length ?? 0).toBe(1);
+    expect(html).not.toContain("Open Gateway docs");
     expect(html).toContain("text-emerald-700");
     expect(html).toContain("<details open");
     expect(html).toContain("<details");

@@ -125,13 +125,34 @@ export function RescueAsciiHeader({
                 )}
               >
                 {typedToken === "e" ? (
-                  <span
-                    className={cn(
-                      "h-[5px] w-[5px] rounded-full sm:h-[6px] sm:w-[6px]",
-                      eyeToneByState[state],
-                      state === "checking" && "animate-pulse",
-                    )}
-                  />
+                  state === "active" ? (
+                    <span
+                      data-bot-eye-expression="uparrow"
+                      className="relative translate-y-[2px] h-[14px] w-[20px] sm:h-[16px] sm:w-[22px]"
+                    >
+                      <span
+                        className={cn(
+                          "absolute left-[2px] top-[6px] h-[3px] w-[10px] origin-right rotate-45 rounded-full sm:left-[2px] sm:top-[6px] sm:w-[11px]",
+                          eyeToneByState[state],
+                        )}
+                      />
+                      <span
+                        className={cn(
+                          "absolute right-[2px] top-[6px] h-[3px] w-[10px] origin-left -rotate-45 rounded-full sm:right-[2px] sm:top-[6px] sm:w-[11px]",
+                          eyeToneByState[state],
+                        )}
+                      />
+                    </span>
+                  ) : (
+                    <span
+                      data-bot-eye-expression="idle"
+                      className={cn(
+                        "h-[5px] w-[5px] rounded-full sm:h-[6px] sm:w-[6px]",
+                        eyeToneByState[state],
+                        state === "checking" && "animate-pulse",
+                      )}
+                    />
+                  )
                 ) : null}
               </span>
             );

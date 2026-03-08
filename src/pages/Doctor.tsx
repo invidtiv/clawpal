@@ -41,6 +41,8 @@ import {
   getPrimaryRescueActionIcon,
   getIdleRescueProgress,
   isIconOnlyPrimaryRescueAction,
+  normalizeRescueManageResultAfterAction,
+  shouldRefreshStatusAfterAction,
   shouldShowPrimaryRecovery,
 } from "@/lib/rescueBotUi";
 import type {
@@ -324,7 +326,7 @@ export function Doctor({ showGatewayLogsUi = false }: DoctorProps) {
     updateRescueState({ pendingAction: action, error: null });
     try {
       const result = await ua.manageRescueBot(action);
-      applyRescueResult(result);
+      applyRescueResult(normalizeRescueManageResultAfterAction(action, result));
       const successText = (() => {
         switch (action) {
           case "set":
@@ -347,28 +349,30 @@ export function Doctor({ showGatewayLogsUi = false }: DoctorProps) {
             return null;
         }
       })();
-      updateRescueState({ statusChecking: true });
-      try {
-        const statusResult = await ua.manageRescueBot("status");
-        applyRescueResult(statusResult);
-      } catch (error) {
-        const text = error instanceof Error ? error.message : String(error);
-        updateRescueState({
-          runtimeState: "error",
-          error: t("doctor.rescueBotStatusCheckFailed", {
-            defaultValue: "Failed to refresh helper status: {{error}}",
-            error: text,
-          }),
-        });
-        toast.error(
-          t("doctor.rescueBotStatusCheckFailed", {
-            defaultValue: "Failed to refresh helper status: {{error}}",
-            error: text,
-          }),
-        );
-        return;
-      } finally {
-        updateRescueState({ statusChecking: false });
+      if (shouldRefreshStatusAfterAction(action)) {
+        updateRescueState({ statusChecking: true });
+        try {
+          const statusResult = await ua.manageRescueBot("status");
+          applyRescueResult(statusResult);
+        } catch (error) {
+          const text = error instanceof Error ? error.message : String(error);
+          updateRescueState({
+            runtimeState: "error",
+            error: t("doctor.rescueBotStatusCheckFailed", {
+              defaultValue: "Failed to refresh helper status: {{error}}",
+              error: text,
+            }),
+          });
+          toast.error(
+            t("doctor.rescueBotStatusCheckFailed", {
+              defaultValue: "Failed to refresh helper status: {{error}}",
+              error: text,
+            }),
+          );
+          return;
+        } finally {
+          updateRescueState({ statusChecking: false });
+        }
       }
       if (successText) {
         toast.success(successText);

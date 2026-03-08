@@ -570,7 +570,7 @@
   "doctor.primaryRepairSkipped": "已跳过：{{count}}",
   "doctor.primaryRepairFailedCount": "失败：{{count}}",
   "doctor.primaryRepairComingSoon": "Rescue Bot 自动修复将在下一步提供。",
-  "doctor.fixSafeIssues": "修复 {{count}} 个安全问题",
+  "doctor.fixSafeIssues": "修复 {{count}} 个问题",
   "doctor.fullAuto": "全自动",
   "doctor.fullAutoTitle": "启用全自动模式？",
   "doctor.fullAutoWarning": "全自动模式下，Agent 发出的所有命令将立即执行，无需你的审批。这包括写入操作和任意 Shell 命令。请仅在信任 Agent 来源时启用。",

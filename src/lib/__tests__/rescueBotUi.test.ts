@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
+import type { RescueBotManageResult } from "@/lib/types";
 import type { RescuePrimarySectionResult } from "@/lib/types";
 import {
   buildCheckProgressLines,
@@ -9,6 +10,8 @@ import {
   getPrimaryRescueActionIcon,
   getIdleRescueProgress,
   isIconOnlyPrimaryRescueAction,
+  normalizeRescueManageResultAfterAction,
+  shouldRefreshStatusAfterAction,
   shouldShowPrimaryRecovery,
 } from "@/lib/rescueBotUi";
 
@@ -39,6 +42,34 @@ describe("rescueBotUi", () => {
     expect(getPrimaryRescueActionIcon("configured_inactive")).toBe("play");
     expect(getPrimaryRescueActionIcon("error")).toBe("play");
     expect(getPrimaryRescueActionIcon("active")).toBe("pause");
+  });
+
+  test("keeps deactivate success in paused state while the gateway is winding down", () => {
+    const activeResult: RescueBotManageResult = {
+      action: "deactivate",
+      profile: "rescue",
+      mainPort: 18789,
+      rescuePort: 19789,
+      minRecommendedPort: 18809,
+      configured: true,
+      active: true,
+      runtimeState: "active",
+      wasAlreadyConfigured: true,
+      commands: [],
+    };
+
+    expect(normalizeRescueManageResultAfterAction("deactivate", activeResult)).toEqual({
+      ...activeResult,
+      active: false,
+      runtimeState: "configured_inactive",
+    });
+  });
+
+  test("skips immediate status refresh after deactivate so the UI stays paused", () => {
+    expect(shouldRefreshStatusAfterAction("activate")).toBe(true);
+    expect(shouldRefreshStatusAfterAction("set")).toBe(true);
+    expect(shouldRefreshStatusAfterAction("unset")).toBe(true);
+    expect(shouldRefreshStatusAfterAction("deactivate")).toBe(false);
   });
 
   test("exposes a stable idle progress baseline for each rescue state", () => {

@@ -1,4 +1,4 @@
-import { ExternalLinkIcon, WrenchIcon } from "lucide-react";
+import { WrenchIcon } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import type {
@@ -55,7 +55,7 @@ export function DoctorRecoveryOverview({
   const fixableCount = diagnosis.summary.fixableIssueCount;
   const fixText = t("doctor.fixSafeIssues", {
     count: fixableCount,
-    defaultValue: fixableCount === 1 ? "Fix 1 safe issue" : `Fix ${fixableCount} safe issues`,
+    defaultValue: fixableCount === 1 ? "Fix 1 issue" : `Fix ${fixableCount} issues`,
   });
   const translateStatus = (
     status: RescuePrimaryDiagnosisResult["status"] | RescuePrimarySectionItem["status"],
@@ -153,22 +153,6 @@ export function DoctorRecoveryOverview({
                       >
                         {translateStatus(section.status)}
                       </Badge>
-                      <Button
-                        asChild
-                        variant="ghost"
-                        size="icon-sm"
-                        className="text-muted-foreground hover:text-foreground"
-                      >
-                        <a
-                          href={section.docsUrl}
-                          target="_blank"
-                          rel="noreferrer"
-                          aria-label={`Open ${section.title} docs`}
-                          title={`Open ${section.title} docs`}
-                        >
-                          <ExternalLinkIcon className="size-3.5" />
-                        </a>
-                      </Button>
                     </div>
                   </div>
                 </CardHeader>

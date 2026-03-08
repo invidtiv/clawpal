@@ -1,4 +1,6 @@
 import type {
+  RescueBotAction,
+  RescueBotManageResult,
   RescueBotRuntimeState,
   RescuePrimarySectionResult,
 } from "@/lib/types";
@@ -46,6 +48,26 @@ export function getPrimaryRescueActionIcon(
   runtimeState: RescueBotRuntimeState,
 ): RescuePrimaryActionIcon {
   return runtimeState === "active" ? "pause" : "play";
+}
+
+export function normalizeRescueManageResultAfterAction(
+  action: RescueBotAction,
+  result: RescueBotManageResult,
+): RescueBotManageResult {
+  if (action !== "deactivate") {
+    return result;
+  }
+  return {
+    ...result,
+    active: false,
+    runtimeState: "configured_inactive",
+  };
+}
+
+export function shouldRefreshStatusAfterAction(
+  action: RescueBotAction,
+): boolean {
+  return action !== "deactivate";
 }
 
 export function getIdleRescueProgress(
