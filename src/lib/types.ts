@@ -354,6 +354,39 @@ export interface StatusExtra {
   duplicateInstalls?: string[];
 }
 
+export interface InstanceConfigSnapshot {
+  globalDefaultModel?: string;
+  fallbackModels: string[];
+  agents: AgentOverview[];
+}
+
+export interface InstanceRuntimeSnapshot {
+  status: InstanceStatus;
+  agents: AgentOverview[];
+  globalDefaultModel?: string;
+  fallbackModels: string[];
+}
+
+export interface ChannelsConfigSnapshot {
+  channels: ChannelNode[];
+  bindings: Binding[];
+}
+
+export interface ChannelsRuntimeSnapshot {
+  channels: ChannelNode[];
+  bindings: Binding[];
+  agents: AgentOverview[];
+}
+
+export interface CronConfigSnapshot {
+  jobs: CronJob[];
+}
+
+export interface CronRuntimeSnapshot {
+  jobs: CronJob[];
+  watchdog: WatchdogStatus & { alive: boolean; deployed: boolean };
+}
+
 export interface Binding {
   agentId: string;
   match: { channel: string; peer?: { id: string; kind: string } };
@@ -537,12 +570,28 @@ export interface RescuePrimaryIssue {
   source: "rescue" | "primary";
 }
 
+export interface RescueDocHypothesis {
+  title: string;
+  reason: string;
+  score: number;
+}
+
+export interface RescueDocCitation {
+  url: string;
+  section: string;
+}
+
 export interface RescuePrimarySummary {
   status: "healthy" | "degraded" | "broken" | "inactive";
   headline: string;
   recommendedAction: string;
   fixableIssueCount: number;
   selectedFixIssueIds: string[];
+  rootCauseHypotheses?: RescueDocHypothesis[];
+  fixSteps?: string[];
+  confidence?: number;
+  citations?: RescueDocCitation[];
+  versionAwareness?: string;
 }
 
 export interface RescuePrimarySectionItem {
@@ -561,6 +610,11 @@ export interface RescuePrimarySectionResult {
   summary: string;
   docsUrl: string;
   items: RescuePrimarySectionItem[];
+  rootCauseHypotheses?: RescueDocHypothesis[];
+  fixSteps?: string[];
+  confidence?: number;
+  citations?: RescueDocCitation[];
+  versionAwareness?: string;
 }
 
 export interface RescuePrimaryDiagnosisResult {
@@ -675,6 +729,7 @@ export interface PreviewQueueResult {
   commands: PendingCommand[];
   configBefore: string;
   configAfter: string;
+  warnings: string[];
   errors: string[];
 }
 

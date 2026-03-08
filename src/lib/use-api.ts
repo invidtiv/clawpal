@@ -6,6 +6,14 @@ import {
   explainAndBuildGuidanceError,
 } from "./guidance";
 import { extractErrorText } from "./sshDiagnostic";
+import {
+  createDataLoadRequestId,
+  emitDataLoadMetric,
+  inferDataLoadPage,
+  inferDataLoadSource,
+  parseInstanceToken,
+} from "./data-load-log";
+import { writePersistedReadCache } from "./persistent-read-cache";
 
 /** Returns true if the error already triggered a guidance panel, so toast can be skipped. */
 export function hasGuidanceEmitted(error: unknown): boolean {
@@ -55,6 +63,29 @@ export function readCacheValue<T>(key: string): T | undefined {
 
 export function buildCacheKey(instanceCacheKey: string, method: string, args: unknown[] = []): string {
   return makeCacheKey(instanceCacheKey, method, args);
+}
+
+const HOST_SHARED_READ_METHODS = new Set([
+  "getInstanceConfigSnapshot",
+  "getInstanceRuntimeSnapshot",
+  "getStatusExtra",
+  "getChannelsConfigSnapshot",
+  "getChannelsRuntimeSnapshot",
+  "getCronConfigSnapshot",
+  "getCronRuntimeSnapshot",
+  "getRescueBotStatus",
+  "checkOpenclawUpdate",
+]);
+
+export function resolveReadCacheScopeKey(
+  instanceCacheKey: string,
+  persistenceScope: string,
+  method: string,
+): string {
+  if (HOST_SHARED_READ_METHODS.has(method)) {
+    return persistenceScope;
+  }
+  return instanceCacheKey;
 }
 
 function makeCacheKey(instanceCacheKey: string, method: string, args: unknown[]): string {
@@ -124,8 +155,84 @@ export function setOptimisticReadCache<T>(
   _notifyCacheSubscribers(key);
 }
 
+export function primeReadCache<T>(
+  key: string,
+  value: T,
+  ttlMs: number,
+) {
+  API_READ_CACHE.set(key, {
+    value,
+    expiresAt: Date.now() + ttlMs,
+    optimisticUntil: undefined,
+  });
+  trimReadCacheIfNeeded();
+  _notifyCacheSubscribers(key);
+}
+
+export async function prewarmRemoteInstanceReadCache(
+  instanceId: string,
+  instanceToken: number,
+) {
+  const instanceCacheKey = `${instanceId}#${instanceToken}`;
+  const persistenceScope = instanceId;
+  const warm = <T,>(
+    method: string,
+    ttlMs: number,
+    loader: () => Promise<T>,
+  ) => callWithReadCache(
+    resolveReadCacheScopeKey(instanceCacheKey, persistenceScope, method),
+    persistenceScope,
+    method,
+    [],
+    ttlMs,
+    loader,
+  ).catch(() => undefined);
+
+  void warm(
+    "getInstanceConfigSnapshot",
+    20_000,
+    () => api.remoteGetInstanceConfigSnapshot(instanceId),
+  );
+  void warm(
+    "getInstanceRuntimeSnapshot",
+    10_000,
+    () => api.remoteGetInstanceRuntimeSnapshot(instanceId),
+  );
+  void warm(
+    "getStatusExtra",
+    15_000,
+    () => api.remoteGetStatusExtra(instanceId),
+  );
+  void warm(
+    "getChannelsConfigSnapshot",
+    20_000,
+    () => api.remoteGetChannelsConfigSnapshot(instanceId),
+  );
+  void warm(
+    "getChannelsRuntimeSnapshot",
+    12_000,
+    () => api.remoteGetChannelsRuntimeSnapshot(instanceId),
+  );
+  void warm(
+    "getCronConfigSnapshot",
+    20_000,
+    () => api.remoteGetCronConfigSnapshot(instanceId),
+  );
+  void warm(
+    "getCronRuntimeSnapshot",
+    12_000,
+    () => api.remoteGetCronRuntimeSnapshot(instanceId),
+  );
+  void warm(
+    "getRescueBotStatus",
+    8_000,
+    () => api.remoteGetRescueBotStatus(instanceId),
+  );
+}
+
 function callWithReadCache<TResult>(
   instanceCacheKey: string,
+  persistenceScope: string,
   method: string,
   args: unknown[],
   ttlMs: number,
@@ -134,21 +241,60 @@ function callWithReadCache<TResult>(
   if (ttlMs <= 0) return loader();
   const now = Date.now();
   const key = makeCacheKey(instanceCacheKey, method, args);
+  const page = inferDataLoadPage(method);
+  const instanceToken = parseInstanceToken(instanceCacheKey);
   const entry = API_READ_CACHE.get(key);
   if (entry) {
     // If pinned by optimistic update, return the pinned value
     if (entry.optimisticUntil && entry.optimisticUntil > now) {
+      emitDataLoadMetric({
+        requestId: createDataLoadRequestId(method),
+        resource: method,
+        page,
+        instanceId: persistenceScope,
+        instanceToken,
+        source: "cache",
+        phase: "success",
+        elapsedMs: 0,
+        cacheHit: true,
+      });
       return Promise.resolve(entry.value as TResult);
     }
     if (entry.expiresAt > now) {
+      emitDataLoadMetric({
+        requestId: createDataLoadRequestId(method),
+        resource: method,
+        page,
+        instanceId: persistenceScope,
+        instanceToken,
+        source: "cache",
+        phase: "success",
+        elapsedMs: 0,
+        cacheHit: true,
+      });
       return Promise.resolve(entry.value as TResult);
     }
     if (entry.inFlight) {
       return entry.inFlight as Promise<TResult>;
     }
   }
+  const requestId = createDataLoadRequestId(method);
+  const startedAt = Date.now();
+  const source = inferDataLoadSource(method);
+  emitDataLoadMetric({
+    requestId,
+    resource: method,
+    page,
+    instanceId: persistenceScope,
+    instanceToken,
+    source,
+    phase: "start",
+    elapsedMs: 0,
+    cacheHit: false,
+  });
   const request = loader()
     .then((value) => {
+      const elapsedMs = Date.now() - startedAt;
       const current = API_READ_CACHE.get(key);
       // Don't overwrite if a newer optimistic value was set while we were fetching
       if (current?.optimisticUntil && current.optimisticUntil > Date.now()) {
@@ -157,6 +303,17 @@ function callWithReadCache<TResult>(
           ...current,
           inFlight: undefined,
         });
+        emitDataLoadMetric({
+          requestId,
+          resource: method,
+          page,
+          instanceId: persistenceScope,
+          instanceToken,
+          source,
+          phase: "success",
+          elapsedMs,
+          cacheHit: false,
+        });
         return current.value as TResult;
       }
       API_READ_CACHE.set(key, {
@@ -164,8 +321,20 @@ function callWithReadCache<TResult>(
         expiresAt: Date.now() + ttlMs,
         optimisticUntil: undefined,
       });
+      writePersistedReadCache(persistenceScope, method, args, value);
       trimReadCacheIfNeeded();
       _notifyCacheSubscribers(key);
+      emitDataLoadMetric({
+        requestId,
+        resource: method,
+        page,
+        instanceId: persistenceScope,
+        instanceToken,
+        source,
+        phase: "success",
+        elapsedMs,
+        cacheHit: false,
+      });
       return value;
     })
     .catch((error) => {
@@ -173,6 +342,18 @@ function callWithReadCache<TResult>(
       if (current?.inFlight === request) {
         API_READ_CACHE.delete(key);
       }
+      emitDataLoadMetric({
+        requestId,
+        resource: method,
+        page,
+        instanceId: persistenceScope,
+        instanceToken,
+        source,
+        phase: "error",
+        elapsedMs: Date.now() - startedAt,
+        cacheHit: false,
+        errorSummary: extractErrorText(error),
+      });
       throw error;
     });
   API_READ_CACHE.set(key, {
@@ -219,6 +400,7 @@ export function shouldLogRemoteInvokeMetric(ok: boolean, elapsedMs: number): boo
 export function useApi() {
   const {
     instanceId,
+    instanceViewToken,
     instanceToken,
     isRemote,
     isDocker,
@@ -235,6 +417,7 @@ export function useApi() {
   const transport: "local" | "docker_local" | "remote_ssh" = isRemote
     ? "remote_ssh"
     : (isDocker ? "docker_local" : "local");
+  const persistenceScope = instanceId;
 
   const explainAndWrapError = useCallback(
     async (method: string | undefined, rawError: unknown) => {
@@ -330,9 +513,16 @@ export function useApi() {
     ) => {
       const call = dispatch(localFn, remoteFn, method);
       return (...args: TArgs): Promise<TResult> =>
-        callWithReadCache(instanceCacheKey, method, args, ttlMs, () => call(...args));
+        callWithReadCache(
+          resolveReadCacheScopeKey(instanceCacheKey, persistenceScope, method),
+          persistenceScope,
+          method,
+          args,
+          ttlMs,
+          () => call(...args),
+        );
     },
-    [dispatch, instanceCacheKey],
+    [dispatch, instanceCacheKey, persistenceScope],
   );
 
   const localCached = useCallback(
@@ -342,9 +532,9 @@ export function useApi() {
       fn: (...args: TArgs) => Promise<TResult>,
     ) => {
       return (...args: TArgs): Promise<TResult> =>
-        callWithReadCache(instanceCacheKey, method, args, ttlMs, () => fn(...args));
+        callWithReadCache(instanceCacheKey, persistenceScope, method, args, ttlMs, () => fn(...args));
     },
-    [instanceCacheKey],
+    [instanceCacheKey, persistenceScope],
   );
 
   const localGlobalCached = useCallback(
@@ -354,7 +544,7 @@ export function useApi() {
       fn: (...args: TArgs) => Promise<TResult>,
     ) => {
       return (...args: TArgs): Promise<TResult> =>
-        callWithReadCache(globalCacheKey, method, args, ttlMs, () => fn(...args));
+        callWithReadCache(globalCacheKey, globalCacheKey, method, args, ttlMs, () => fn(...args));
     },
     [globalCacheKey],
   );
@@ -367,10 +557,13 @@ export function useApi() {
       return (...args: TArgs): Promise<TResult> =>
         fn(...args).then((result) => {
           invalidateReadCacheForInstance(instanceCacheKey, methodsToInvalidate);
+          if (persistenceScope !== instanceCacheKey) {
+            invalidateReadCacheForInstance(persistenceScope, methodsToInvalidate);
+          }
           return result;
         });
     },
-    [instanceCacheKey],
+    [instanceCacheKey, persistenceScope],
   );
 
   const withGlobalInvalidation = useCallback(
@@ -416,6 +609,7 @@ export function useApi() {
     () => ({
       // Instance state
       instanceId,
+      instanceViewToken,
       instanceToken,
       instanceCacheKey,
       isRemote,
@@ -436,6 +630,18 @@ export function useApi() {
       getInstanceStatus: dispatch(
         api.getInstanceStatus,
         api.remoteGetInstanceStatus,
+      ),
+      getInstanceConfigSnapshot: dispatchCached(
+        "getInstanceConfigSnapshot",
+        isRemote ? 20_000 : 12_000,
+        api.getInstanceConfigSnapshot,
+        api.remoteGetInstanceConfigSnapshot,
+      ),
+      getInstanceRuntimeSnapshot: dispatchCached(
+        "getInstanceRuntimeSnapshot",
+        isRemote ? 10_000 : 6_000,
+        api.getInstanceRuntimeSnapshot,
+        api.remoteGetInstanceRuntimeSnapshot,
       ),
       getStatusExtra: dispatchCached(
         "getStatusExtra",
@@ -462,6 +668,18 @@ export function useApi() {
         isRemote ? 15_000 : 8_000,
         api.listChannelsMinimal,
         api.remoteListChannelsMinimal,
+      ),
+      getChannelsConfigSnapshot: dispatchCached(
+        "getChannelsConfigSnapshot",
+        isRemote ? 20_000 : 12_000,
+        api.getChannelsConfigSnapshot,
+        api.remoteGetChannelsConfigSnapshot,
+      ),
+      getChannelsRuntimeSnapshot: dispatchCached(
+        "getChannelsRuntimeSnapshot",
+        isRemote ? 12_000 : 8_000,
+        api.getChannelsRuntimeSnapshot,
+        api.remoteGetChannelsRuntimeSnapshot,
       ),
       listBindings: dispatchCached(
         "listBindings",
@@ -520,11 +738,17 @@ export function useApi() {
       ),
       restartGateway: withInvalidation(
         dispatch(api.restartGateway, api.remoteRestartGateway),
-        ["getInstanceStatus", "getStatusExtra"],
+        ["getInstanceStatus", "getStatusExtra", "getInstanceRuntimeSnapshot", "getRescueBotStatus"],
+      ),
+      getRescueBotStatus: dispatchCached(
+        "getRescueBotStatus",
+        isRemote ? 8_000 : 5_000,
+        api.getRescueBotStatus,
+        api.remoteGetRescueBotStatus,
       ),
       manageRescueBot: withInvalidation(
         dispatch(api.manageRescueBot, api.remoteManageRescueBot),
-        ["getInstanceStatus", "getStatusExtra"],
+        ["getInstanceStatus", "getStatusExtra", "getInstanceRuntimeSnapshot", "getRescueBotStatus"],
       ),
       diagnosePrimaryViaRescue: dispatch(
         api.diagnosePrimaryViaRescue,
@@ -628,6 +852,18 @@ export function useApi() {
         api.listCronJobs,
         api.remoteListCronJobs,
       ),
+      getCronConfigSnapshot: dispatchCached(
+        "getCronConfigSnapshot",
+        isRemote ? 20_000 : 12_000,
+        api.getCronConfigSnapshot,
+        api.remoteGetCronConfigSnapshot,
+      ),
+      getCronRuntimeSnapshot: dispatchCached(
+        "getCronRuntimeSnapshot",
+        isRemote ? 12_000 : 8_000,
+        api.getCronRuntimeSnapshot,
+        api.remoteGetCronRuntimeSnapshot,
+      ),
       getCronRuns: dispatchCached(
         "getCronRuns",
         isRemote ? 8_000 : 5_000,
@@ -636,11 +872,11 @@ export function useApi() {
       ),
       triggerCronJob: withInvalidation(
         dispatch(api.triggerCronJob, api.remoteTriggerCronJob),
-        ["listCronJobs", "getCronRuns", "getWatchdogStatus"],
+        ["listCronJobs", "getCronConfigSnapshot", "getCronRuntimeSnapshot", "getCronRuns", "getWatchdogStatus"],
       ),
       deleteCronJob: withInvalidation(
         dispatch(api.deleteCronJob, api.remoteDeleteCronJob),
-        ["listCronJobs", "getCronRuns", "getWatchdogStatus"],
+        ["listCronJobs", "getCronConfigSnapshot", "getCronRuntimeSnapshot", "getCronRuns", "getWatchdogStatus"],
       ),
       getWatchdogStatus: dispatchCached(
         "getWatchdogStatus",
@@ -650,22 +886,22 @@ export function useApi() {
       ),
       deployWatchdog: withInvalidation(
         dispatch(api.deployWatchdog, api.remoteDeployWatchdog),
-        ["getWatchdogStatus", "listCronJobs"],
+        ["getWatchdogStatus", "listCronJobs", "getCronRuntimeSnapshot"],
       ),
       startWatchdog: withInvalidation(
         dispatch(api.startWatchdog, api.remoteStartWatchdog),
-        ["getWatchdogStatus", "listCronJobs"],
+        ["getWatchdogStatus", "listCronJobs", "getCronRuntimeSnapshot"],
       ),
       stopWatchdog: withInvalidation(
         dispatch(api.stopWatchdog, api.remoteStopWatchdog),
-        ["getWatchdogStatus", "listCronJobs"],
+        ["getWatchdogStatus", "listCronJobs", "getCronRuntimeSnapshot"],
       ),
       uninstallWatchdog: withInvalidation(
         dispatch(
           api.uninstallWatchdog,
           api.remoteUninstallWatchdog,
         ),
-        ["getWatchdogStatus", "listCronJobs"],
+        ["getWatchdogStatus", "listCronJobs", "getCronRuntimeSnapshot"],
       ),
 
       // Queue
@@ -770,6 +1006,7 @@ export function useApi() {
       pinOptimistic,
       pinOptimisticGlobal,
       instanceId,
+      instanceViewToken,
       instanceCacheKey,
       isRemote,
       isDocker,

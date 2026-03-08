@@ -3,6 +3,7 @@ use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{LazyLock, Mutex};
 use std::{
     fs,
     process::{Command, Stdio},
@@ -20,6 +21,10 @@ use crate::history::{add_snapshot, list_snapshots, read_snapshot};
 use crate::install::session_store::InstallSessionStore;
 use crate::install::types::InstallState;
 use crate::models::resolve_paths;
+use crate::openclaw_doc_resolver::{
+    resolve_local_doc_guidance, resolve_remote_doc_guidance, DocCitation, DocGuidance,
+    DocResolveIssue, DocResolveRequest, RootCauseHypothesis,
+};
 use crate::ssh::{SftpEntry, SshConnectionPool, SshExecResult, SshHostConfig, SshTransferStats};
 use clawpal_core::ssh::diagnostic::{
     from_any_error, SshDiagnosticReport, SshDiagnosticStatus, SshErrorCode, SshIntent, SshStage,
@@ -34,6 +39,7 @@ pub mod discovery;
 pub mod doctor;
 pub mod gateway;
 pub mod logs;
+pub mod overview;
 pub mod precheck;
 pub mod preferences;
 pub mod profiles;
@@ -60,6 +66,8 @@ pub use gateway::*;
 #[allow(unused_imports)]
 pub use logs::*;
 #[allow(unused_imports)]
+pub use overview::*;
+#[allow(unused_imports)]
 pub use precheck::*;
 #[allow(unused_imports)]
 pub use preferences::*;
@@ -71,6 +79,10 @@ pub use rescue::*;
 pub use sessions::*;
 #[allow(unused_imports)]
 pub use watchdog::*;
+
+static REMOTE_OPENCLAW_CONFIG_PATH_CACHE: LazyLock<Mutex<HashMap<String, (String, Instant)>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+const REMOTE_OPENCLAW_CONFIG_PATH_CACHE_TTL: Duration = Duration::from_secs(300);
 
 /// Escape a string for safe inclusion in a single-quoted shell argument.
 fn shell_escape(s: &str) -> String {
@@ -205,6 +217,14 @@ pub struct RescuePrimarySummary {
     pub recommended_action: String,
     pub fixable_issue_count: usize,
     pub selected_fix_issue_ids: Vec<String>,
+    #[serde(default)]
+    pub root_cause_hypotheses: Vec<RootCauseHypothesis>,
+    #[serde(default)]
+    pub fix_steps: Vec<String>,
+    pub confidence: Option<f32>,
+    #[serde(default)]
+    pub citations: Vec<DocCitation>,
+    pub version_awareness: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -216,6 +236,14 @@ pub struct RescuePrimarySectionResult {
     pub summary: String,
     pub docs_url: String,
     pub items: Vec<RescuePrimarySectionItem>,
+    #[serde(default)]
+    pub root_cause_hypotheses: Vec<RootCauseHypothesis>,
+    #[serde(default)]
+    pub fix_steps: Vec<String>,
+    pub confidence: Option<f32>,
+    #[serde(default)]
+    pub citations: Vec<DocCitation>,
+    pub version_awareness: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -270,7 +298,7 @@ pub struct ExtractModelProfileEntry {
     pub source: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OpenclawUpdateCache {
     pub checked_at: u64,
@@ -1256,6 +1284,14 @@ pub async fn manage_rescue_bot(
 }
 
 #[tauri::command]
+pub async fn get_rescue_bot_status(
+    profile: Option<String>,
+    rescue_port: Option<u16>,
+) -> Result<RescueBotManageResult, String> {
+    manage_rescue_bot("status".to_string(), profile, rescue_port).await
+}
+
+#[tauri::command]
 pub async fn diagnose_primary_via_rescue(
     target_profile: Option<String>,
     rescue_profile: Option<String>,
@@ -1813,6 +1849,11 @@ fn build_rescue_primary_sections(
                 summary,
                 docs_url: rescue_section_docs_url(key).to_string(),
                 items,
+                root_cause_hypotheses: Vec::new(),
+                fix_steps: Vec::new(),
+                confidence: None,
+                citations: Vec::new(),
+                version_awareness: None,
             }
         })
         .collect()
@@ -1887,7 +1928,151 @@ fn build_rescue_primary_summary(
         recommended_action,
         fixable_issue_count,
         selected_fix_issue_ids,
+        root_cause_hypotheses: Vec::new(),
+        fix_steps: Vec::new(),
+        confidence: None,
+        citations: Vec::new(),
+        version_awareness: None,
     }
+}
+
+fn doc_guidance_section_from_url(url: &str) -> Option<&'static str> {
+    let lowered = url.to_ascii_lowercase();
+    if lowered.contains("/gateway") || lowered.contains("/security") {
+        return Some("gateway");
+    }
+    if lowered.contains("/models") {
+        return Some("models");
+    }
+    if lowered.contains("/tools") {
+        return Some("tools");
+    }
+    if lowered.contains("/agents") {
+        return Some("agents");
+    }
+    if lowered.contains("/channels") {
+        return Some("channels");
+    }
+    None
+}
+
+fn classify_doc_guidance_section(
+    guidance: &DocGuidance,
+    sections: &[RescuePrimarySectionResult],
+) -> Option<&'static str> {
+    for citation in &guidance.citations {
+        if let Some(section) = doc_guidance_section_from_url(&citation.url) {
+            return Some(section);
+        }
+    }
+    for rule in &guidance.resolver_meta.rules_matched {
+        let lowered = rule.to_ascii_lowercase();
+        if lowered.contains("gateway") || lowered.contains("cron") {
+            return Some("gateway");
+        }
+        if lowered.contains("provider") || lowered.contains("auth") || lowered.contains("model") {
+            return Some("models");
+        }
+        if lowered.contains("tool") || lowered.contains("sandbox") || lowered.contains("allowlist")
+        {
+            return Some("tools");
+        }
+        if lowered.contains("agent") || lowered.contains("workspace") {
+            return Some("agents");
+        }
+        if lowered.contains("channel") || lowered.contains("group") || lowered.contains("pairing") {
+            return Some("channels");
+        }
+    }
+    sections
+        .iter()
+        .find(|section| section.status == "broken")
+        .or_else(|| sections.iter().find(|section| section.status == "degraded"))
+        .map(|section| match section.key.as_str() {
+            "gateway" => "gateway",
+            "models" => "models",
+            "tools" => "tools",
+            "agents" => "agents",
+            "channels" => "channels",
+            _ => "gateway",
+        })
+}
+
+fn build_doc_resolve_request(
+    instance_scope: &str,
+    transport: &str,
+    openclaw_version: Option<String>,
+    issues: &[RescuePrimaryIssue],
+    config_content: String,
+    gateway_status: Option<String>,
+) -> DocResolveRequest {
+    DocResolveRequest {
+        instance_scope: instance_scope.to_string(),
+        transport: transport.to_string(),
+        openclaw_version,
+        doctor_issues: issues
+            .iter()
+            .map(|issue| DocResolveIssue {
+                id: issue.id.clone(),
+                severity: issue.severity.clone(),
+                message: issue.message.clone(),
+            })
+            .collect(),
+        config_content,
+        error_log: issues
+            .iter()
+            .map(|issue| format!("[{}] {}", issue.severity, issue.message))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        gateway_status,
+    }
+}
+
+fn apply_doc_guidance_to_diagnosis(
+    mut diagnosis: RescuePrimaryDiagnosisResult,
+    guidance: Option<DocGuidance>,
+) -> RescuePrimaryDiagnosisResult {
+    let Some(guidance) = guidance else {
+        return diagnosis;
+    };
+    if !guidance.root_cause_hypotheses.is_empty() {
+        diagnosis.summary.root_cause_hypotheses = guidance.root_cause_hypotheses.clone();
+    }
+    if !guidance.fix_steps.is_empty() {
+        diagnosis.summary.fix_steps = guidance.fix_steps.clone();
+        if diagnosis.summary.status != "healthy" {
+            if let Some(first_step) = guidance.fix_steps.first() {
+                diagnosis.summary.recommended_action = first_step.clone();
+            }
+        }
+    }
+    if !guidance.citations.is_empty() {
+        diagnosis.summary.citations = guidance.citations.clone();
+    }
+    diagnosis.summary.confidence = Some(guidance.confidence);
+    diagnosis.summary.version_awareness = Some(guidance.version_awareness.clone());
+
+    if let Some(section_key) = classify_doc_guidance_section(&guidance, &diagnosis.sections) {
+        if let Some(section) = diagnosis
+            .sections
+            .iter_mut()
+            .find(|section| section.key == section_key)
+        {
+            if !guidance.root_cause_hypotheses.is_empty() {
+                section.root_cause_hypotheses = guidance.root_cause_hypotheses.clone();
+            }
+            if !guidance.fix_steps.is_empty() {
+                section.fix_steps = guidance.fix_steps.clone();
+            }
+            if !guidance.citations.is_empty() {
+                section.citations = guidance.citations.clone();
+            }
+            section.confidence = Some(guidance.confidence);
+            section.version_awareness = Some(guidance.version_awareness.clone());
+        }
+    }
+
+    diagnosis
 }
 
 fn parse_json_from_openclaw_output(output: &OpenclawCommandOutput) -> Option<Value> {
@@ -2185,7 +2370,21 @@ fn diagnose_primary_via_rescue_local(
     target_profile: &str,
     rescue_profile: &str,
 ) -> Result<RescuePrimaryDiagnosisResult, String> {
-    let config = read_openclaw_config(&resolve_paths()).ok();
+    let paths = resolve_paths();
+    let config = read_openclaw_config(&paths).ok();
+    let config_content = fs::read_to_string(&paths.config_path)
+        .ok()
+        .and_then(|raw| {
+            clawpal_core::config::parse_and_normalize_config(&raw)
+                .ok()
+                .map(|(_, normalized)| normalized)
+        })
+        .or_else(|| {
+            config
+                .as_ref()
+                .and_then(|cfg| serde_json::to_string_pretty(cfg).ok())
+        })
+        .unwrap_or_default();
     let (rescue_configured, rescue_port) = resolve_local_rescue_profile_state(rescue_profile)?;
     let rescue_gateway_status = if rescue_configured {
         let command = build_profile_command(
@@ -2204,7 +2403,7 @@ fn diagnose_primary_via_rescue_local(
     let primary_gateway_output = run_openclaw_dynamic(&primary_gateway_command)?;
     let runtime_checks = collect_local_rescue_runtime_checks(config.as_ref());
 
-    Ok(build_rescue_primary_diagnosis(
+    let diagnosis = build_rescue_primary_diagnosis(
         target_profile,
         rescue_profile,
         rescue_configured,
@@ -2214,7 +2413,18 @@ fn diagnose_primary_via_rescue_local(
         rescue_gateway_status.as_ref(),
         &primary_doctor_output,
         &primary_gateway_output,
-    ))
+    );
+    let doc_request = build_doc_resolve_request(
+        "local",
+        "local",
+        Some(resolve_openclaw_version()),
+        &diagnosis.issues,
+        config_content,
+        Some(gateway_output_detail(&primary_gateway_output)),
+    );
+    let guidance = tauri::async_runtime::block_on(resolve_local_doc_guidance(&doc_request, &paths));
+
+    Ok(apply_doc_guidance_to_diagnosis(diagnosis, Some(guidance)))
 }
 
 async fn diagnose_primary_via_rescue_remote(
@@ -2223,10 +2433,14 @@ async fn diagnose_primary_via_rescue_remote(
     target_profile: &str,
     rescue_profile: &str,
 ) -> Result<RescuePrimaryDiagnosisResult, String> {
-    let config = remote_read_openclaw_config_text_and_json(pool, host_id)
+    let remote_config = remote_read_openclaw_config_text_and_json(pool, host_id)
         .await
-        .ok()
-        .map(|(_, _, cfg)| cfg);
+        .ok();
+    let config_content = remote_config
+        .as_ref()
+        .map(|(_, normalized, _)| normalized.clone())
+        .unwrap_or_default();
+    let config = remote_config.as_ref().map(|(_, _, cfg)| cfg.clone());
     let (rescue_configured, rescue_port) =
         resolve_remote_rescue_profile_state(pool, host_id, rescue_profile).await?;
     let rescue_gateway_status = if rescue_configured {
@@ -2248,7 +2462,7 @@ async fn diagnose_primary_via_rescue_remote(
         run_remote_openclaw_dynamic(pool, host_id, primary_gateway_command).await?;
     let runtime_checks = collect_remote_rescue_runtime_checks(pool, host_id, config.as_ref()).await;
 
-    Ok(build_rescue_primary_diagnosis(
+    let diagnosis = build_rescue_primary_diagnosis(
         target_profile,
         rescue_profile,
         rescue_configured,
@@ -2258,7 +2472,24 @@ async fn diagnose_primary_via_rescue_remote(
         rescue_gateway_status.as_ref(),
         &primary_doctor_output,
         &primary_gateway_output,
-    ))
+    );
+    let remote_version = pool
+        .exec_login(host_id, "openclaw --version 2>/dev/null || true")
+        .await
+        .ok()
+        .map(|output| output.stdout.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let doc_request = build_doc_resolve_request(
+        host_id,
+        "remote_ssh",
+        remote_version,
+        &diagnosis.issues,
+        config_content,
+        Some(gateway_output_detail(&primary_gateway_output)),
+    );
+    let guidance = resolve_remote_doc_guidance(pool, host_id, &doc_request, &resolve_paths()).await;
+
+    Ok(apply_doc_guidance_to_diagnosis(diagnosis, Some(guidance)))
 }
 
 fn collect_safe_primary_issue_ids(
@@ -3295,6 +3526,27 @@ fn normalize_semver_components(raw: &str) -> Option<Vec<u32>> {
     Some(parts)
 }
 
+#[cfg(test)]
+mod openclaw_update_tests {
+    use super::normalize_openclaw_release_tag;
+
+    #[test]
+    fn normalize_openclaw_release_tag_extracts_semver_from_github_tag() {
+        assert_eq!(
+            normalize_openclaw_release_tag("v2026.3.2"),
+            Some("2026.3.2".into())
+        );
+        assert_eq!(
+            normalize_openclaw_release_tag("OpenClaw v2026.3.2"),
+            Some("2026.3.2".into())
+        );
+        assert_eq!(
+            normalize_openclaw_release_tag("2026.3.2-rc.1"),
+            Some("2026.3.2-rc.1".into())
+        );
+    }
+}
+
 fn unix_timestamp_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -3380,190 +3632,114 @@ fn check_openclaw_update_cached(
     paths: &crate::models::OpenClawPaths,
     force: bool,
 ) -> Result<OpenclawUpdateCheck, String> {
-    let cache_path = openclaw_update_cache_path(paths);
-    let now = unix_timestamp_secs();
-    if !force {
-        if let Some(cached) = read_openclaw_update_cache(&cache_path) {
-            if now.saturating_sub(cached.checked_at) < cached.ttl_seconds {
-                let installed_version = cached
-                    .installed_version
-                    .unwrap_or_else(resolve_openclaw_version);
-                let upgrade_available =
-                    compare_semver(&installed_version, cached.latest_version.as_deref());
-                return Ok(OpenclawUpdateCheck {
-                    installed_version,
-                    latest_version: cached.latest_version,
-                    upgrade_available,
-                    channel: cached.channel,
-                    details: cached.details,
-                    source: cached.source,
-                    checked_at: format_timestamp_from_unix(now),
-                });
-            }
-        }
-    }
-
     let installed_version = resolve_openclaw_version();
-    let (latest_version, channel, details, source, upgrade_available) =
-        detect_openclaw_update_cached(&installed_version).unwrap_or((
-            None,
-            None,
-            Some("failed to detect update status".into()),
-            "openclaw-command".into(),
-            false,
-        ));
-    let checked_at = format_timestamp_from_unix(now);
-    let cache = OpenclawUpdateCache {
-        checked_at: now,
-        latest_version: latest_version.clone(),
-        channel,
-        details: details.clone(),
-        source: source.clone(),
-        installed_version: Some(installed_version.clone()),
-        ttl_seconds: 60 * 60 * 6,
-    };
-    save_openclaw_update_cache(&cache_path, &cache)?;
-    let upgrade = compare_semver(&installed_version, latest_version.as_deref());
+    let cache_path = openclaw_update_cache_path(paths);
+    let mut cache = resolve_openclaw_latest_release_cached(paths, force).unwrap_or_else(|_| {
+        OpenclawUpdateCache {
+            checked_at: unix_timestamp_secs(),
+            latest_version: None,
+            channel: None,
+            details: Some("failed to detect latest GitHub release".into()),
+            source: "github-release".into(),
+            installed_version: None,
+            ttl_seconds: 60 * 60 * 6,
+        }
+    });
+    if cache.installed_version.as_deref() != Some(installed_version.as_str()) {
+        cache.installed_version = Some(installed_version.clone());
+        save_openclaw_update_cache(&cache_path, &cache)?;
+    }
+    let upgrade = compare_semver(&installed_version, cache.latest_version.as_deref());
     Ok(OpenclawUpdateCheck {
         installed_version,
-        latest_version,
-        upgrade_available: upgrade || upgrade_available,
+        latest_version: cache.latest_version,
+        upgrade_available: upgrade,
         channel: cache.channel,
-        details,
-        source,
-        checked_at,
+        details: cache.details,
+        source: cache.source,
+        checked_at: format_timestamp_from_unix(cache.checked_at),
     })
 }
 
-fn detect_openclaw_update_cached(
-    installed_version: &str,
-) -> Option<(Option<String>, Option<String>, Option<String>, String, bool)> {
-    let output = run_openclaw_raw(&["update", "status"]).ok()?;
-    if let Some((latest_version, channel, details, upgrade_available)) =
-        parse_openclaw_update_json(&output.stdout, installed_version)
-    {
-        return Some((
-            latest_version,
-            Some(channel),
-            Some(details),
-            "openclaw update status --json".into(),
-            upgrade_available,
-        ));
+fn resolve_openclaw_latest_release_cached(
+    paths: &crate::models::OpenClawPaths,
+    force: bool,
+) -> Result<OpenclawUpdateCache, String> {
+    let cache_path = openclaw_update_cache_path(paths);
+    let now = unix_timestamp_secs();
+    let existing = read_openclaw_update_cache(&cache_path);
+    if !force {
+        if let Some(cached) = existing.as_ref() {
+            if now.saturating_sub(cached.checked_at) < cached.ttl_seconds {
+                return Ok(cached.clone());
+            }
+        }
     }
-    let parsed = parse_openclaw_update_text(&output.stdout);
-    if let Some((latest_version, channel, details)) = parsed {
-        let source = "openclaw update status".into();
-        let available = latest_version
-            .as_ref()
-            .is_some_and(|latest| compare_semver(installed_version, Some(latest)));
-        return Some((
-            latest_version,
-            Some(channel),
-            Some(details),
-            source,
-            available,
-        ));
-    }
-    let latest_version = query_openclaw_latest_npm().ok().flatten();
-    let details = latest_version
-        .as_ref()
-        .map(|value| format!("npm latest {value}"))
-        .unwrap_or_else(|| "update status not available".into());
-    let upgrade = latest_version
-        .as_ref()
-        .is_some_and(|latest| compare_semver(installed_version, Some(latest.as_str())));
-    Some((latest_version, None, Some(details), "npm".into(), upgrade))
-}
 
-fn parse_openclaw_update_json(
-    raw: &str,
-    installed_version: &str,
-) -> Option<(Option<String>, String, String, bool)> {
-    let json_str = clawpal_core::doctor::extract_json_from_output(raw)?;
-    let payload: Value = serde_json::from_str(json_str).ok()?;
-    let channel = payload
-        .pointer("/channel/value")
-        .and_then(Value::as_str)
-        .unwrap_or("unknown")
-        .to_string();
-
-    let latest_from_update = payload
-        .pointer("/update/registry/latestVersion")
-        .and_then(Value::as_str)
-        .map(|value| value.to_string());
-    let latest = payload
-        .pointer("/availability/latestVersion")
-        .and_then(Value::as_str)
-        .map(|value| value.to_string())
-        .or(latest_from_update);
-    let has_update = payload
-        .pointer("/availability/available")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-
-    let details = payload
-        .pointer("/availability/latestVersion")
-        .and_then(Value::as_str)
-        .map(|value| format!("npm latest {value}"))
-        .or_else(|| {
-            if has_update {
-                Some("update available".into())
+    match query_openclaw_latest_github_release() {
+        Ok(latest_version) => {
+            let cache = OpenclawUpdateCache {
+                checked_at: now,
+                latest_version: latest_version.clone(),
+                channel: None,
+                details: latest_version
+                    .as_ref()
+                    .map(|value| format!("GitHub release {value}"))
+                    .or_else(|| Some("GitHub release unavailable".into())),
+                source: "github-release".into(),
+                installed_version: existing.and_then(|cache| cache.installed_version),
+                ttl_seconds: 60 * 60 * 6,
+            };
+            save_openclaw_update_cache(&cache_path, &cache)?;
+            Ok(cache)
+        }
+        Err(error) => {
+            if let Some(cached) = existing {
+                Ok(cached)
             } else {
-                Some("up to date".into())
+                Err(error)
             }
-        })
-        .unwrap_or_else(|| "update status unavailable".into());
-
-    let upgrade_available = if let Some(latest_version) = latest.as_deref() {
-        compare_semver(installed_version, Some(latest_version))
-    } else {
-        has_update
-    };
-
-    Some((latest, channel, details, upgrade_available))
-}
-
-fn parse_openclaw_update_text(raw: &str) -> Option<(Option<String>, String, String)> {
-    let mut channel = String::from("unknown");
-    for line in raw.lines() {
-        if line.contains("Channel") {
-            let right = line.split('│').last().or_else(|| line.split('|').last())?;
-            channel = right.trim().to_string();
-        }
-        if line.to_lowercase().contains("update") && line.contains("npm latest") {
-            if let Some(token) = extract_version_from_text(line) {
-                return Some((Some(token), channel, line.trim().to_string()));
-            }
-            return Some((None, channel, line.trim().to_string()));
-        }
-        if line.to_lowercase().contains("update") && line.contains("unknown") {
-            return Some((None, channel, line.trim().to_string()));
         }
     }
-    None
 }
 
-fn query_openclaw_latest_npm() -> Result<Option<String>, String> {
-    // Query npm registry directly via HTTP — no local npm CLI needed
+fn normalize_openclaw_release_tag(raw: &str) -> Option<String> {
+    extract_version_from_text(raw).or_else(|| {
+        let trimmed = raw.trim().trim_start_matches(['v', 'V']);
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    })
+}
+
+fn query_openclaw_latest_github_release() -> Result<Option<String>, String> {
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
+        .user_agent("ClawPal Update Checker (+https://github.com/zhixianio/clawpal)")
         .build()
         .map_err(|e| format!("HTTP client error: {e}"))?;
     let resp = client
-        .get("https://registry.npmjs.org/openclaw/latest")
-        .header("Accept", "application/json")
+        .get("https://api.github.com/repos/openclaw/openclaw/releases/latest")
+        .header("Accept", "application/vnd.github+json")
         .send()
-        .map_err(|e| format!("npm registry request failed: {e}"))?;
+        .map_err(|e| format!("GitHub releases request failed: {e}"))?;
     if !resp.status().is_success() {
         return Ok(None);
     }
     let body: Value = resp
         .json()
-        .map_err(|e| format!("npm registry parse failed: {e}"))?;
+        .map_err(|e| format!("GitHub releases parse failed: {e}"))?;
     let version = body
-        .get("version")
+        .get("tag_name")
         .and_then(Value::as_str)
-        .map(String::from);
+        .and_then(normalize_openclaw_release_tag)
+        .or_else(|| {
+            body.get("name")
+                .and_then(Value::as_str)
+                .and_then(normalize_openclaw_release_tag)
+        });
     Ok(version)
 }
 
@@ -6100,6 +6276,11 @@ mod rescue_bot_tests {
                 recommended_action: "Review fixable issues".into(),
                 fixable_issue_count: 1,
                 selected_fix_issue_ids: vec!["field.agents".into()],
+                root_cause_hypotheses: Vec::new(),
+                fix_steps: Vec::new(),
+                confidence: None,
+                citations: Vec::new(),
+                version_awareness: None,
             },
             sections: Vec::new(),
             checks: Vec::new(),
@@ -6299,6 +6480,97 @@ mod rescue_bot_tests {
         assert_eq!(summary.fixable_issue_count, 1);
         assert_eq!(summary.selected_fix_issue_ids, vec!["field.agents"]);
         assert!(summary.headline.contains("Gateway"));
+    }
+
+    #[test]
+    fn test_apply_doc_guidance_attaches_to_summary_and_matching_section() {
+        let diagnosis = RescuePrimaryDiagnosisResult {
+            status: "degraded".into(),
+            checked_at: "2026-03-08T00:00:00Z".into(),
+            target_profile: "primary".into(),
+            rescue_profile: "rescue".into(),
+            rescue_configured: true,
+            rescue_port: Some(19789),
+            summary: RescuePrimarySummary {
+                status: "degraded".into(),
+                headline: "Agents has recommended improvements".into(),
+                recommended_action: "Review agent recommendations".into(),
+                fixable_issue_count: 1,
+                selected_fix_issue_ids: vec!["field.agents".into()],
+                root_cause_hypotheses: Vec::new(),
+                fix_steps: Vec::new(),
+                confidence: None,
+                citations: Vec::new(),
+                version_awareness: None,
+            },
+            sections: vec![RescuePrimarySectionResult {
+                key: "agents".into(),
+                title: "Agents".into(),
+                status: "degraded".into(),
+                summary: "Agents has 1 recommended change".into(),
+                docs_url: "https://docs.openclaw.ai/agents".into(),
+                items: Vec::new(),
+                root_cause_hypotheses: Vec::new(),
+                fix_steps: Vec::new(),
+                confidence: None,
+                citations: Vec::new(),
+                version_awareness: None,
+            }],
+            checks: Vec::new(),
+            issues: vec![RescuePrimaryIssue {
+                id: "field.agents".into(),
+                code: "required.field".into(),
+                severity: "warn".into(),
+                message: "missing agents".into(),
+                auto_fixable: true,
+                fix_hint: Some("Initialize agents.defaults.model".into()),
+                source: "primary".into(),
+            }],
+        };
+        let guidance = DocGuidance {
+            status: "ok".into(),
+            source_strategy: "local-docs-first".into(),
+            root_cause_hypotheses: vec![RootCauseHypothesis {
+                title: "Agent defaults are missing".into(),
+                reason: "The primary profile has no agents.defaults.model binding.".into(),
+                score: 0.91,
+            }],
+            fix_steps: vec![
+                "Set agents.defaults.model to a valid provider/model pair.".into(),
+                "Re-run the primary check after saving the config.".into(),
+            ],
+            confidence: 0.91,
+            citations: vec![DocCitation {
+                url: "https://docs.openclaw.ai/agents".into(),
+                section: "defaults".into(),
+            }],
+            version_awareness: "Guidance matches OpenClaw 2026.3.x.".into(),
+            resolver_meta: crate::openclaw_doc_resolver::ResolverMeta {
+                cache_hit: false,
+                sources_checked: vec!["target-local-docs".into()],
+                rules_matched: vec!["agent_workspace_conflict".into()],
+                fetched_pages: 1,
+                fallback_used: false,
+            },
+        };
+
+        let enriched = apply_doc_guidance_to_diagnosis(diagnosis, Some(guidance));
+
+        assert_eq!(enriched.summary.root_cause_hypotheses.len(), 1);
+        assert_eq!(
+            enriched.summary.fix_steps.first().map(String::as_str),
+            Some("Set agents.defaults.model to a valid provider/model pair.")
+        );
+        assert_eq!(
+            enriched.summary.recommended_action,
+            "Set agents.defaults.model to a valid provider/model pair."
+        );
+        assert_eq!(enriched.sections[0].key, "agents");
+        assert_eq!(enriched.sections[0].citations.len(), 1);
+        assert_eq!(
+            enriched.sections[0].version_awareness.as_deref(),
+            Some("Guidance matches OpenClaw 2026.3.x.")
+        );
     }
 }
 
@@ -8652,6 +8924,13 @@ async fn remote_resolve_openclaw_config_path(
     pool: &SshConnectionPool,
     host_id: &str,
 ) -> Result<String, String> {
+    if let Ok(cache) = REMOTE_OPENCLAW_CONFIG_PATH_CACHE.lock() {
+        if let Some((path, cached_at)) = cache.get(host_id) {
+            if cached_at.elapsed() < REMOTE_OPENCLAW_CONFIG_PATH_CACHE_TTL {
+                return Ok(path.clone());
+            }
+        }
+    }
     let result = pool
         .exec_login(
             host_id,
@@ -8669,6 +8948,9 @@ async fn remote_resolve_openclaw_config_path(
     let path = result.stdout.trim();
     if path.is_empty() {
         return Err("Remote openclaw config path probe returned empty output".into());
+    }
+    if let Ok(mut cache) = REMOTE_OPENCLAW_CONFIG_PATH_CACHE.lock() {
+        cache.insert(host_id.to_string(), (path.to_string(), Instant::now()));
     }
     Ok(path.to_string())
 }

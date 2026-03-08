@@ -40,6 +40,7 @@ import type {
   SshProbeProgressEvent,
 } from "@/lib/types";
 import { shouldShowLocalNotInstalled } from "./start-page-instance-health";
+import { buildInstanceCardSummary } from "./overview-loading";
 
 const DEFAULT_DOCKER_OPENCLAW_HOME = "~/.clawpal/docker-local";
 const DEFAULT_DOCKER_CLAWPAL_DATA_DIR = "~/.clawpal/docker-local/data";
@@ -203,8 +204,15 @@ export function StartPage({
 
         // Poll local instance
         try {
-          const status = await api.getInstanceStatus();
-          updates.local = { healthy: status.healthy, agentCount: status.activeAgents };
+          const configSnapshot = await api.getInstanceConfigSnapshot();
+          if (!cancelled) {
+            setHealthMap((prev) => ({
+              ...prev,
+              local: buildInstanceCardSummary(configSnapshot, null),
+            }));
+          }
+          const runtimeSnapshot = await api.getInstanceRuntimeSnapshot();
+          updates.local = buildInstanceCardSummary(configSnapshot, runtimeSnapshot);
         } catch {
           updates.local = { healthy: null, agentCount: 0 };
         }
@@ -223,8 +231,15 @@ export function StartPage({
           try {
             await api.setActiveOpenclawHome(target.openclawHome);
             await api.setActiveClawpalDataDir(target.clawpalDataDir || null);
-            const status = await api.getInstanceStatus();
-            updates[target.id] = { healthy: status.healthy, agentCount: status.activeAgents };
+            const configSnapshot = await api.getInstanceConfigSnapshot();
+            if (!cancelled) {
+              setHealthMap((prev) => ({
+                ...prev,
+                [target.id]: buildInstanceCardSummary(configSnapshot, null),
+              }));
+            }
+            const runtimeSnapshot = await api.getInstanceRuntimeSnapshot();
+            updates[target.id] = buildInstanceCardSummary(configSnapshot, runtimeSnapshot);
           } catch {
             updates[target.id] = { healthy: null, agentCount: 0 };
           } finally {
@@ -276,8 +291,15 @@ export function StartPage({
             try {
               await api.setActiveOpenclawHome(d.openclawHome);
               if (d.clawpalDataDir) await api.setActiveClawpalDataDir(d.clawpalDataDir);
-              const status = await api.getInstanceStatus();
-              updates[d.id] = { healthy: status.healthy, agentCount: status.activeAgents };
+              const configSnapshot = await api.getInstanceConfigSnapshot();
+              if (!cancelled) {
+                setHealthMap((prev) => ({
+                  ...prev,
+                  [d.id]: buildInstanceCardSummary(configSnapshot, null),
+                }));
+              }
+              const runtimeSnapshot = await api.getInstanceRuntimeSnapshot();
+              updates[d.id] = buildInstanceCardSummary(configSnapshot, runtimeSnapshot);
             } catch {
               updates[d.id] = { healthy: null, agentCount: 0 };
             } finally {

@@ -22,6 +22,20 @@ interface DoctorRecoveryOverviewProps {
   onRepairIssue: (issueId: string) => void;
 }
 
+function hasDocGuidance(target: {
+  rootCauseHypotheses?: { title: string; reason: string }[];
+  fixSteps?: string[];
+  citations?: { url: string; section: string }[];
+  versionAwareness?: string;
+}) {
+  return !!(
+    target.rootCauseHypotheses?.length
+    || target.fixSteps?.length
+    || target.citations?.length
+    || target.versionAwareness
+  );
+}
+
 function itemBadgeVariant(status: RescuePrimarySectionItem["status"]) {
   return status === "error" ? "destructive" : "outline";
 }
@@ -129,6 +143,47 @@ export function DoctorRecoveryOverview({
           {repairError ? (
             <div className="text-sm text-destructive">{repairError}</div>
           ) : null}
+          {hasDocGuidance(diagnosis.summary) ? (
+            <div className="rounded-md border border-border/60 bg-background/70 p-3 text-sm">
+              <div className="space-y-2">
+                {diagnosis.summary.rootCauseHypotheses?.map((hypothesis) => (
+                  <div key={hypothesis.title}>
+                    <div className="font-medium">{hypothesis.title}</div>
+                    <div className="text-muted-foreground">{hypothesis.reason}</div>
+                  </div>
+                ))}
+                {diagnosis.summary.fixSteps?.length ? (
+                  <div className="space-y-1">
+                    {diagnosis.summary.fixSteps.map((step, index) => (
+                      <div key={`${step}-${index}`} className="text-muted-foreground">
+                        {step}
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
+                {diagnosis.summary.versionAwareness ? (
+                  <div className="text-xs text-muted-foreground">
+                    {diagnosis.summary.versionAwareness}
+                  </div>
+                ) : null}
+                {diagnosis.summary.citations?.length ? (
+                  <div className="flex flex-wrap gap-2 text-xs">
+                    {diagnosis.summary.citations.map((citation, index) => (
+                      <a
+                        key={`${citation.url}-${index}`}
+                        className="text-primary underline underline-offset-4"
+                        href={citation.url}
+                        target="_blank"
+                        rel="noreferrer"
+                      >
+                        {citation.section || citation.url}
+                      </a>
+                    ))}
+                  </div>
+                ) : null}
+              </div>
+            </div>
+          ) : null}
         </CardContent>
       </Card>
 
@@ -159,6 +214,47 @@ export function DoctorRecoveryOverview({
               </summary>
               <CardContent className="pt-3">
                 <div className="grid gap-2">
+                  {hasDocGuidance(section) ? (
+                    <div className="rounded-md border border-border/60 bg-muted/20 p-3 text-sm">
+                      <div className="space-y-2">
+                        {section.rootCauseHypotheses?.map((hypothesis) => (
+                          <div key={hypothesis.title}>
+                            <div className="font-medium">{hypothesis.title}</div>
+                            <div className="text-muted-foreground">{hypothesis.reason}</div>
+                          </div>
+                        ))}
+                        {section.fixSteps?.length ? (
+                          <div className="space-y-1">
+                            {section.fixSteps.map((step, index) => (
+                              <div key={`${step}-${index}`} className="text-muted-foreground">
+                                {step}
+                              </div>
+                            ))}
+                          </div>
+                        ) : null}
+                        {section.versionAwareness ? (
+                          <div className="text-xs text-muted-foreground">
+                            {section.versionAwareness}
+                          </div>
+                        ) : null}
+                        {section.citations?.length ? (
+                          <div className="flex flex-wrap gap-2 text-xs">
+                            {section.citations.map((citation, index) => (
+                              <a
+                                key={`${citation.url}-${index}`}
+                                className="text-primary underline underline-offset-4"
+                                href={citation.url}
+                                target="_blank"
+                                rel="noreferrer"
+                              >
+                                {citation.section || citation.url}
+                              </a>
+                            ))}
+                          </div>
+                        ) : null}
+                      </div>
+                    </div>
+                  ) : null}
                   {section.items.map((item) => (
                     <div
                       key={item.id}

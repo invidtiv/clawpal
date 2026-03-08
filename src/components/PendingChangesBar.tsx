@@ -237,6 +237,17 @@ export function PendingChangesBar({ onApplied, onDiscarded, showToast }: Pending
               ))}
             </div>
           )}
+          {preview?.warnings && preview.warnings.length > 0 && (
+            <div className="rounded-md border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-800 dark:text-amber-200">
+              <p className="font-medium">{t("queue.previewWarningsTitle")}</p>
+              <p className="mt-1 text-xs opacity-80">{t("queue.previewWarningsDescription")}</p>
+              <div className="mt-2 space-y-1">
+                {preview.warnings.map((warning, i) => (
+                  <p key={i}>{warning}</p>
+                ))}
+              </div>
+            </div>
+          )}
           {applyError && (
             <p className="text-sm text-destructive">{applyError}</p>
           )}

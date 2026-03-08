@@ -5,18 +5,16 @@ import { check } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { getVersion } from "@tauri-apps/api/app";
 import { toast } from "sonner";
-import { api } from "@/lib/api";
 import { hasGuidanceEmitted, useApi } from "@/lib/use-api";
 import { isAlreadyExplainedGuidanceError } from "@/lib/guidance";
 import { useTheme } from "@/lib/use-theme";
 import { useFont } from "@/lib/use-font";
 import type { UiFont } from "@/lib/use-font";
-import { getProfilePushEligibility, resolveProfileCredentialView } from "@/lib/profile-credential";
+import { resolveProfileCredentialView } from "@/lib/profile-credential";
 import type {
   ModelCatalogProvider,
   ModelProfile,
   ProviderAuthSuggestion,
-  RegisteredInstance,
   ResolvedApiKey,
 } from "@/lib/types";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
@@ -66,18 +64,10 @@ type ProfileForm = {
 
 type CredentialSource = "oauth" | "env" | "manual";
 
-type ProfilePushTarget = {
-  id: string;
-  label: string;
-  kind: "local" | "remote";
-  connected: boolean;
-};
-
 const MODEL_CATALOG_CACHE_TTL_MS = 5 * 60_000;
 const ENABLE_PROFILE_TEST_BUTTON = true;
 let modelCatalogCache: { value: ModelCatalogProvider[]; expiresAt: number } | null = null;
 let profilesExtractedOnce = false;
-const LOCAL_PUSH_TARGET_ID = "__local_openclaw__";
 const PROVIDER_FALLBACK_OPTIONS = [
   "openai",
   "openai-codex",
@@ -265,21 +255,6 @@ export function Settings({
   const [message, setMessage] = useState("");
   const [authSuggestion, setAuthSuggestion] = useState<ProviderAuthSuggestion | null>(null);
   const [testingProfileId, setTestingProfileId] = useState<string | null>(null);
-  const [pushDialogOpen, setPushDialogOpen] = useState(false);
-  const [pushTargets, setPushTargets] = useState<ProfilePushTarget[]>([
-    {
-      id: LOCAL_PUSH_TARGET_ID,
-      label: "Local OpenClaw",
-      kind: "local",
-      connected: true,
-    },
-  ]);
-  const [pushTargetsLoading, setPushTargetsLoading] = useState(false);
-  const [selectedPushTargetId, setSelectedPushTargetId] = useState(LOCAL_PUSH_TARGET_ID);
-  const [selectedPushProfileIds, setSelectedPushProfileIds] = useState<string[]>([]);
-  const [pushingProfiles, setPushingProfiles] = useState(false);
-  const [importingLocalProfiles, setImportingLocalProfiles] = useState(false);
-  const [importingRemoteProfiles, setImportingRemoteProfiles] = useState(false);
   const [showSshTransferSpeedUi, setShowSshTransferSpeedUi] = useState(false);
 
   const [catalogRefreshed, setCatalogRefreshed] = useState(false);
@@ -378,74 +353,7 @@ export function Settings({
       });
   };
 
-  const loadPushTargets = useCallback(async () => {
-    setPushTargetsLoading(true);
-    try {
-      const registered = await api.listRegisteredInstances();
-      const remoteInstances = registered.filter(
-        (instance: RegisteredInstance) => instance.instanceType === "remote_ssh",
-      );
-      const remoteStatuses = await Promise.all(
-        remoteInstances.map(async (instance) => {
-          try {
-            const status = await api.sshStatus(instance.id);
-            return {
-              id: instance.id,
-              connected: status === "connected",
-            };
-          } catch {
-            return {
-              id: instance.id,
-              connected: false,
-            };
-          }
-        }),
-      );
-      const statusMap = new Map(remoteStatuses.map((item) => [item.id, item.connected]));
-      const nextTargets: ProfilePushTarget[] = [
-        {
-          id: LOCAL_PUSH_TARGET_ID,
-          label: t("settings.pushTargetLocal"),
-          kind: "local",
-          connected: true,
-        },
-        ...remoteInstances.map((instance) => ({
-          id: instance.id,
-          label: instance.label?.trim() || instance.id,
-          kind: "remote" as const,
-          connected: statusMap.get(instance.id) === true,
-        })),
-      ];
-      setPushTargets(nextTargets);
-      setSelectedPushTargetId((current) => {
-        if (nextTargets.some((target) => target.id === current && target.connected)) {
-          return current;
-        }
-        return nextTargets.find((target) => target.connected)?.id ?? LOCAL_PUSH_TARGET_ID;
-      });
-    } catch (error) {
-      const errorText = error instanceof Error ? error.message : String(error);
-      toast.error(t("settings.pushTargetsLoadFailed", { error: errorText }));
-      setPushTargets([
-        {
-          id: LOCAL_PUSH_TARGET_ID,
-          label: t("settings.pushTargetLocal"),
-          kind: "local",
-          connected: true,
-        },
-      ]);
-      setSelectedPushTargetId(LOCAL_PUSH_TARGET_ID);
-    } finally {
-      setPushTargetsLoading(false);
-    }
-  }, [t]);
-
   useEffect(refreshProfiles, [ua]);
-
-  useEffect(() => {
-    if (!pushDialogOpen) return;
-    void loadPushTargets();
-  }, [loadPushTargets, pushDialogOpen]);
 
   useEffect(() => {
     ua.getAppPreferences()
@@ -495,22 +403,6 @@ export function Settings({
     }
     return map;
   }, [apiKeys]);
-
-  const pushEligibilityMap = useMemo(() => {
-    const map = new Map<string, ReturnType<typeof getProfilePushEligibility>>();
-    for (const profile of profiles || []) {
-      map.set(
-        profile.id,
-        getProfilePushEligibility(profile, resolvedCredentialMap.get(profile.id)),
-      );
-    }
-    return map;
-  }, [profiles, resolvedCredentialMap]);
-
-  const selectedPushTarget = useMemo(
-    () => pushTargets.find((target) => target.id === selectedPushTargetId) ?? null,
-    [pushTargets, selectedPushTargetId],
-  );
 
   // Check for existing auth when provider changes
   useEffect(() => {
@@ -744,96 +636,6 @@ export function Settings({
     }
   };
 
-  const importLocalProfiles = async () => {
-    setImportingLocalProfiles(true);
-    try {
-      const result = await ua.extractModelProfilesFromConfig();
-      refreshProfiles();
-      toast.success(
-        t("settings.importLocalProfilesSuccess", {
-          created: result.created,
-          reused: result.reused,
-        }),
-      );
-    } catch (error) {
-      const errorText = error instanceof Error ? error.message : String(error);
-      toast.error(t("settings.importLocalProfilesFailed", { error: errorText }));
-    } finally {
-      setImportingLocalProfiles(false);
-    }
-  };
-
-  const importActiveRemoteProfiles = async () => {
-    if (!ua.isRemote || !ua.isConnected) return;
-    setImportingRemoteProfiles(true);
-    try {
-      const result = await api.remoteSyncProfilesToLocalAuth(ua.instanceId);
-      refreshProfiles();
-      toast.success(
-        t("settings.importRemoteProfilesSuccess", {
-          synced: result.syncedProfiles,
-          target: ua.instanceId,
-        }),
-      );
-    } catch (error) {
-      const errorText = error instanceof Error ? error.message : String(error);
-      toast.error(t("settings.importRemoteProfilesFailed", { error: errorText }));
-    } finally {
-      setImportingRemoteProfiles(false);
-    }
-  };
-
-  const openPushDialog = () => {
-    setSelectedPushProfileIds([]);
-    setSelectedPushTargetId(LOCAL_PUSH_TARGET_ID);
-    setPushDialogOpen(true);
-  };
-
-  const togglePushProfileSelection = (profileId: string, checked: boolean) => {
-    setSelectedPushProfileIds((current) => {
-      if (checked) {
-        return current.includes(profileId) ? current : [...current, profileId];
-      }
-      return current.filter((id) => id !== profileId);
-    });
-  };
-
-  const submitPushProfiles = async () => {
-    if (!selectedPushTarget || !selectedPushTarget.connected) {
-      toast.error(t("settings.pushProfilesTargetRequired"));
-      return;
-    }
-    const selectedIds = selectedPushProfileIds.filter((profileId) => {
-      const eligibility = pushEligibilityMap.get(profileId);
-      return eligibility?.allowed;
-    });
-    if (selectedIds.length === 0) {
-      toast.error(t("settings.pushProfilesSelectionRequired"));
-      return;
-    }
-
-    setPushingProfiles(true);
-    try {
-      const result = selectedPushTarget.kind === "local"
-        ? await api.pushModelProfilesToLocalOpenclaw(selectedIds)
-        : await api.pushModelProfilesToRemoteOpenclaw(selectedPushTarget.id, selectedIds);
-      toast.success(
-        t("settings.pushProfilesSuccess", {
-          target: selectedPushTarget.label,
-          pushed: result.pushedProfiles,
-          blocked: result.blockedProfiles,
-        }),
-      );
-      setPushDialogOpen(false);
-      setSelectedPushProfileIds([]);
-    } catch (error) {
-      const errorText = error instanceof Error ? error.message : String(error);
-      toast.error(t("settings.pushProfilesFailed", { error: errorText }));
-    } finally {
-      setPushingProfiles(false);
-    }
-  };
-
   const showProfiles = section !== "preferences";
   const showPreferences = section !== "profiles";
 
@@ -970,35 +772,6 @@ export function Settings({
                 <div className="flex items-center justify-between gap-2 flex-wrap">
                   <CardTitle>{t('settings.modelProfiles')}</CardTitle>
                   <div className="flex items-center gap-2 flex-wrap">
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      onClick={() => {
-                        void importLocalProfiles();
-                      }}
-                      disabled={importingLocalProfiles}
-                    >
-                      {importingLocalProfiles
-                        ? t("settings.importLocalProfilesRunning")
-                        : t("settings.importLocalProfiles")}
-                    </Button>
-                    {ua.isRemote && ua.isConnected && (
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        onClick={() => {
-                          void importActiveRemoteProfiles();
-                        }}
-                        disabled={importingRemoteProfiles}
-                      >
-                        {importingRemoteProfiles
-                          ? t("settings.importRemoteProfilesRunning")
-                          : t("settings.importRemoteProfiles")}
-                      </Button>
-                    )}
-                    <Button size="sm" variant="outline" onClick={openPushDialog}>
-                      {t("settings.pushProfiles")}
-                    </Button>
                     <Button size="sm" onClick={openAddProfile}>{t('settings.addProfile')}</Button>
                   </div>
                 </div>
@@ -1133,145 +906,6 @@ export function Settings({
       {message && (
         <p className="text-sm text-muted-foreground mt-3">{message}</p>
       )}
-
-      <Dialog
-        open={pushDialogOpen}
-        onOpenChange={(open) => {
-          setPushDialogOpen(open);
-          if (!open) {
-            setSelectedPushProfileIds([]);
-            setSelectedPushTargetId(LOCAL_PUSH_TARGET_ID);
-            setPushingProfiles(false);
-          }
-        }}
-      >
-        <DialogContent className="sm:max-w-2xl">
-          <DialogHeader>
-            <DialogTitle>{t("settings.pushProfilesTitle")}</DialogTitle>
-          </DialogHeader>
-          <div className="space-y-5">
-            <div className="space-y-2">
-              <div className="text-sm font-semibold">{t("settings.pushProfilesTargetStep")}</div>
-              {pushTargetsLoading ? (
-                <p className="text-sm text-muted-foreground">{t("settings.loading")}</p>
-              ) : (
-                <div className="grid gap-2">
-                  {pushTargets.map((target) => (
-                    <button
-                      key={target.id}
-                      type="button"
-                      className={`rounded-lg border px-3 py-2 text-left transition-colors ${
-                        selectedPushTargetId === target.id
-                          ? "border-primary bg-primary/5"
-                          : "border-border hover:border-primary/40"
-                      } ${target.connected ? "" : "opacity-60"}`}
-                      onClick={() => {
-                        if (!target.connected) return;
-                        setSelectedPushTargetId(target.id);
-                      }}
-                    >
-                      <div className="flex items-center justify-between gap-2">
-                        <span className="font-medium">{target.label}</span>
-                        <Badge variant="outline">
-                          {target.kind === "local"
-                            ? t("settings.pushTargetLocalBadge")
-                            : (target.connected
-                              ? t("settings.pushTargetRemoteConnected")
-                              : t("settings.pushTargetRemoteDisconnected"))}
-                        </Badge>
-                      </div>
-                    </button>
-                  ))}
-                </div>
-              )}
-            </div>
-
-            <div className="space-y-2">
-              <div className="text-sm font-semibold">{t("settings.pushProfilesProfileStep")}</div>
-              {!selectedPushTarget ? (
-                <p className="text-sm text-muted-foreground">
-                  {t("settings.pushProfilesSelectTargetFirst")}
-                </p>
-              ) : profiles === null ? (
-                <p className="text-sm text-muted-foreground">{t("settings.loadingProfiles")}</p>
-              ) : profiles.length === 0 ? (
-                <p className="text-sm text-muted-foreground">{t("settings.noProfiles")}</p>
-              ) : (
-                <div className="max-h-[360px] space-y-2 overflow-y-auto pr-1">
-                  {profiles.map((profile) => {
-                    const eligibility = pushEligibilityMap.get(profile.id) ?? {
-                      allowed: false,
-                      reason: "missing_static_credential" as const,
-                    };
-                    const disabled = !eligibility.allowed || !selectedPushTarget.connected;
-                    const checked = selectedPushProfileIds.includes(profile.id);
-                    const reasonText = eligibility.reason === "oauth"
-                      ? t("settings.pushProfileBlockedOauth")
-                      : eligibility.reason === "missing_static_credential"
-                        ? t("settings.pushProfileBlockedMissingCredential")
-                        : "";
-                    return (
-                      <label
-                        key={profile.id}
-                        className={`flex cursor-pointer items-start gap-3 rounded-lg border px-3 py-2 ${
-                          disabled ? "opacity-60" : "hover:border-primary/40"
-                        }`}
-                      >
-                        <Checkbox
-                          checked={checked}
-                          disabled={disabled}
-                          onCheckedChange={(next) => {
-                            togglePushProfileSelection(profile.id, next === true);
-                          }}
-                          aria-label={`${profile.provider}/${profile.model}`}
-                        />
-                        <div className="min-w-0 flex-1">
-                          <div className="flex items-center justify-between gap-2">
-                            <div className="truncate font-medium">
-                              {profile.provider}/{profile.model}
-                            </div>
-                            {!eligibility.allowed && (
-                              <Badge variant="outline">{t("settings.pushProfileBlocked")}</Badge>
-                            )}
-                          </div>
-                          {profile.baseUrl && (
-                            <div className="mt-0.5 truncate text-xs text-muted-foreground">
-                              URL: {profile.baseUrl}
-                            </div>
-                          )}
-                          {reasonText && (
-                            <div className="mt-0.5 text-xs text-muted-foreground">
-                              {reasonText}
-                            </div>
-                          )}
-                        </div>
-                      </label>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
-          </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setPushDialogOpen(false)}>
-              {t("settings.cancel")}
-            </Button>
-            <Button
-              onClick={() => {
-                void submitPushProfiles();
-              }}
-              disabled={
-                pushingProfiles
-                || !selectedPushTarget
-                || !selectedPushTarget.connected
-                || selectedPushProfileIds.length === 0
-              }
-            >
-              {pushingProfiles ? t("settings.pushProfilesRunning") : t("settings.pushProfilesConfirm")}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
 
       {/* Add / Edit Profile Dialog */}
       <Dialog open={profileDialogOpen} onOpenChange={(open) => {

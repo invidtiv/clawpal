@@ -28,6 +28,10 @@ import {
 } from "@/components/ui/popover";
 import { useInstance } from "@/lib/instance-context";
 import {
+  createDataLoadRequestId,
+  emitDataLoadMetric,
+} from "@/lib/data-load-log";
+import {
   buildStatusProgressLines,
   buildCheckProgressLines,
   buildFixProgressLines,
@@ -47,6 +51,8 @@ import type {
   RescuePrimaryRepairResult,
 } from "@/lib/types";
 import { useApi } from "@/lib/use-api";
+import { readPersistedReadCache } from "@/lib/persistent-read-cache";
+import { buildInitialRescueState } from "./overview-loading";
 
 interface RescueUiState {
   pendingAction: RescueBotAction | null;
@@ -184,14 +190,36 @@ export function Doctor(_: DoctorProps) {
   const { t } = useTranslation();
   const ua = useApi();
   const { isRemote, isConnected } = useInstance();
+  const persistedRescueStatus = useMemo(
+    () => readPersistedReadCache<RescueBotManageResult>(
+      ua.instanceId,
+      "getRescueBotStatus",
+      [],
+    ) ?? null,
+    [ua.instanceId],
+  );
+  const initialRescueState = useMemo(
+    () => buildInitialRescueState(persistedRescueStatus),
+    [persistedRescueStatus],
+  );
 
   const [logsOpen, setLogsOpen] = useState(false);
   const [logsSource, setLogsSource] = useState<"clawpal" | "gateway" | "helper">("gateway");
 
-  const [rescueState, setRescueState] = useState<RescueUiState>(createInitialRescueUiState);
+  const [rescueState, setRescueState] = useState<RescueUiState>(() => {
+    const base = createInitialRescueUiState();
+    if (!initialRescueState) {
+      return base;
+    }
+    return {
+      ...base,
+      ...initialRescueState,
+    };
+  });
   const [primaryState, setPrimaryState] = useState<PrimaryRecoveryState>(
     createInitialPrimaryRecoveryState,
   );
+  const liveReadsReady = ua.instanceToken !== 0;
 
   const updateRescueState = (patch: Partial<RescueUiState>) => {
     setRescueState((prev) => ({ ...prev, ...patch }));
@@ -222,6 +250,7 @@ export function Doctor(_: DoctorProps) {
 
   const refreshRescueStatus = useCallback(async (isCancelled?: () => boolean) => {
     const cancelled = () => isCancelled?.() ?? false;
+    if (!liveReadsReady) return;
     if (isRemote && !isConnected) {
       if (cancelled()) return;
       updateRescueState({
@@ -236,13 +265,49 @@ export function Doctor(_: DoctorProps) {
     }
 
     updateRescueState({ statusChecking: true, error: null });
+    const requestId = createDataLoadRequestId("getRescueBotStatus");
+    emitDataLoadMetric({
+      requestId,
+      resource: "getRescueBotStatus",
+      page: "doctor",
+      instanceId: ua.instanceId,
+      instanceToken: ua.instanceToken,
+      source: "runtime",
+      phase: "start",
+      elapsedMs: 0,
+      cacheHit: false,
+    });
+    const startedAt = Date.now();
     try {
-      const result = await ua.manageRescueBot("status");
+      const result = await ua.getRescueBotStatus();
       if (cancelled()) return;
       applyRescueResult(result);
+      emitDataLoadMetric({
+        requestId,
+        resource: "getRescueBotStatus",
+        page: "doctor",
+        instanceId: ua.instanceId,
+        instanceToken: ua.instanceToken,
+        source: "runtime",
+        phase: "success",
+        elapsedMs: Date.now() - startedAt,
+        cacheHit: false,
+      });
     } catch (error) {
       const text = error instanceof Error ? error.message : String(error);
       if (cancelled()) return;
+      emitDataLoadMetric({
+        requestId,
+        resource: "getRescueBotStatus",
+        page: "doctor",
+        instanceId: ua.instanceId,
+        instanceToken: ua.instanceToken,
+        source: "runtime",
+        phase: "error",
+        elapsedMs: Date.now() - startedAt,
+        cacheHit: false,
+        errorSummary: text,
+      });
       updateRescueState({
         runtimeState: "error",
         configured: false,
@@ -257,7 +322,23 @@ export function Doctor(_: DoctorProps) {
       if (cancelled()) return;
       updateRescueState({ statusChecking: false });
     }
-  }, [applyRescueResult, isConnected, isRemote, t, ua]);
+  }, [applyRescueResult, isConnected, isRemote, liveReadsReady, t, ua]);
+
+  useEffect(() => {
+    if (persistedRescueStatus) {
+      emitDataLoadMetric({
+        requestId: createDataLoadRequestId("getRescueBotStatus"),
+        resource: "getRescueBotStatus",
+        page: "doctor",
+        instanceId: ua.instanceId,
+        instanceToken: ua.instanceToken,
+        source: "persisted",
+        phase: "success",
+        elapsedMs: 0,
+        cacheHit: true,
+      });
+    }
+  }, [persistedRescueStatus, ua.instanceId, ua.instanceToken, ua.instanceViewToken]);
 
   const runRescueAction = async (action: RescueBotAction) => {
     if (isRemote && !isConnected) {
@@ -294,7 +375,7 @@ export function Doctor(_: DoctorProps) {
       if (shouldRefreshStatusAfterAction(action)) {
         updateRescueState({ statusChecking: true });
         try {
-          const statusResult = await ua.manageRescueBot("status");
+          const statusResult = await ua.getRescueBotStatus();
           applyRescueResult(statusResult);
         } catch (error) {
           const text = error instanceof Error ? error.message : String(error);
@@ -340,6 +421,7 @@ export function Doctor(_: DoctorProps) {
   };
 
   const handleCheckPrimaryViaRescue = async () => {
+    if (!liveReadsReady) return;
     if (isRemote && !isConnected) {
       updatePrimaryState({ checkError: t("doctor.rescueBotConnectRequired") });
       return;
@@ -353,11 +435,47 @@ export function Doctor(_: DoctorProps) {
       repairResult: null,
       repairError: null,
     });
+    const requestId = createDataLoadRequestId("diagnosePrimaryViaRescue");
+    emitDataLoadMetric({
+      requestId,
+      resource: "diagnosePrimaryViaRescue",
+      page: "doctor",
+      instanceId: ua.instanceId,
+      instanceToken: ua.instanceToken,
+      source: "cli",
+      phase: "start",
+      elapsedMs: 0,
+      cacheHit: false,
+    });
+    const startedAt = Date.now();
     try {
       const result = await ua.diagnosePrimaryViaRescue("primary", rescueState.profile);
       updatePrimaryState({ checkResult: result });
+      emitDataLoadMetric({
+        requestId,
+        resource: "diagnosePrimaryViaRescue",
+        page: "doctor",
+        instanceId: ua.instanceId,
+        instanceToken: ua.instanceToken,
+        source: "cli",
+        phase: "success",
+        elapsedMs: Date.now() - startedAt,
+        cacheHit: false,
+      });
     } catch (error) {
       const text = error instanceof Error ? error.message : String(error);
+      emitDataLoadMetric({
+        requestId,
+        resource: "diagnosePrimaryViaRescue",
+        page: "doctor",
+        instanceId: ua.instanceId,
+        instanceToken: ua.instanceToken,
+        source: "cli",
+        phase: "error",
+        elapsedMs: Date.now() - startedAt,
+        cacheHit: false,
+        errorSummary: text,
+      });
       updatePrimaryState({
         checkError: t("doctor.primaryCheckFailed", {
           defaultValue: "Primary recovery check failed: {{error}}",
@@ -370,6 +488,7 @@ export function Doctor(_: DoctorProps) {
   };
 
   const handleRepairPrimaryViaRescue = async (issueIds?: string[]) => {
+    if (!liveReadsReady) return;
     if (isRemote && !isConnected) {
       updatePrimaryState({ repairError: t("doctor.rescueBotConnectRequired") });
       return;
@@ -384,6 +503,19 @@ export function Doctor(_: DoctorProps) {
       repairError: null,
       repairResult: null,
     });
+    const requestId = createDataLoadRequestId("repairPrimaryViaRescue");
+    emitDataLoadMetric({
+      requestId,
+      resource: "repairPrimaryViaRescue",
+      page: "doctor",
+      instanceId: ua.instanceId,
+      instanceToken: ua.instanceToken,
+      source: "cli",
+      phase: "start",
+      elapsedMs: 0,
+      cacheHit: false,
+    });
+    const startedAt = Date.now();
     try {
       const result = await ua.repairPrimaryViaRescue(
         "primary",
@@ -401,8 +533,31 @@ export function Doctor(_: DoctorProps) {
           count: result.appliedIssueIds.length,
         }),
       );
+      emitDataLoadMetric({
+        requestId,
+        resource: "repairPrimaryViaRescue",
+        page: "doctor",
+        instanceId: ua.instanceId,
+        instanceToken: ua.instanceToken,
+        source: "cli",
+        phase: "success",
+        elapsedMs: Date.now() - startedAt,
+        cacheHit: false,
+      });
     } catch (error) {
       const text = error instanceof Error ? error.message : String(error);
+      emitDataLoadMetric({
+        requestId,
+        resource: "repairPrimaryViaRescue",
+        page: "doctor",
+        instanceId: ua.instanceId,
+        instanceToken: ua.instanceToken,
+        source: "cli",
+        phase: "error",
+        elapsedMs: Date.now() - startedAt,
+        cacheHit: false,
+        errorSummary: text,
+      });
       updatePrimaryState({
         repairResult: null,
         repairError: t("doctor.primaryRepairFailed", {

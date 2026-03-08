@@ -876,6 +876,8 @@
   "queue.previewing": "预览中...",
   "queue.previewTitle": "预览队列变更",
   "queue.previewDescription": "检查 {{count}} 条排队命令，应用后将执行并重启网关。",
+  "queue.previewWarningsTitle": "预览说明",
+  "queue.previewWarningsDescription": "预览会先校验配置 diff。文件系统副作用仍会在应用时真实执行。",
   "queue.applyAndRestart": "应用并重启网关",
   "queue.applySuccess": "变更已应用，网关已重启",
   "queue.applyFailed": "应用失败：{{error}}",

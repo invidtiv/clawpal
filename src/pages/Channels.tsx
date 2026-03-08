@@ -1,6 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import type { AgentOverview, Binding, ChannelNode, DiscordGuildChannel, ModelProfile } from "../lib/types";
+import type {
+  AgentOverview,
+  Binding,
+  ChannelNode,
+  ChannelsConfigSnapshot,
+  ChannelsRuntimeSnapshot,
+  DiscordGuildChannel,
+  ModelProfile,
+} from "../lib/types";
 import { useApi, hasGuidanceEmitted } from "@/lib/use-api";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -16,6 +24,12 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { CreateAgentDialog, type CreateAgentResult } from "@/components/CreateAgentDialog";
+import { buildInitialChannelsState } from "./overview-loading";
+import {
+  createDataLoadRequestId,
+  emitDataLoadMetric,
+} from "@/lib/data-load-log";
+import { readPersistedReadCache } from "@/lib/persistent-read-cache";
 
 interface AgentGroup {
   identity: string;
@@ -59,11 +73,25 @@ export function Channels({
 }) {
   const { t } = useTranslation();
   const ua = useApi();
-  const [agents, setAgents] = useState<AgentOverview[]>([]);
-  const [bindings, setBindings] = useState<Binding[]>([]);
+  const persistedConfigSnapshot = useMemo(
+    () => readPersistedReadCache<ChannelsConfigSnapshot>(ua.instanceId, "getChannelsConfigSnapshot", []) ?? null,
+    [ua.instanceId],
+  );
+  const persistedRuntimeSnapshot = useMemo(
+    () => readPersistedReadCache<ChannelsRuntimeSnapshot>(ua.instanceId, "getChannelsRuntimeSnapshot", []) ?? null,
+    [ua.instanceId],
+  );
+  const initialChannelsState = useMemo(
+    () => buildInitialChannelsState(persistedConfigSnapshot, persistedRuntimeSnapshot),
+    [persistedConfigSnapshot, persistedRuntimeSnapshot],
+  );
+  const [agents, setAgents] = useState<AgentOverview[]>(() => initialChannelsState.agents);
+  const [bindings, setBindings] = useState<Binding[]>(() => initialChannelsState.bindings);
+  const [channelNodes, setChannelNodes] = useState<ChannelNode[]>(() => initialChannelsState.channels);
   const [modelProfiles, setModelProfiles] = useState<ModelProfile[]>([]);
   const [refreshing, setRefreshing] = useState<string | null>(null);
   const [saving, setSaving] = useState<string | null>(null);
+  const [channelsLoaded, setChannelsLoaded] = useState(() => initialChannelsState.loaded);
   const initializedKeyRef = useRef<string>("");
 
   // Create agent dialog
@@ -73,27 +101,72 @@ export function Channels({
     peerId: string;
     guildId?: string;
   } | null>(null);
+  const liveReadsReady = ua.instanceToken !== 0;
 
-  const refreshAgents = useCallback(() => {
-    ua.listAgents().then(setAgents).catch((e) => console.error("Failed to load agents:", e));
-  }, [ua]);
+  const loadChannelsConfig = useCallback(async () => {
+    if (!liveReadsReady) return;
+    try {
+      const snapshot = await ua.getChannelsConfigSnapshot();
+      setChannelNodes(snapshot.channels);
+      setBindings(snapshot.bindings);
+    } catch (error) {
+      console.error("Failed to load channel config snapshot:", error);
+    } finally {
+      setChannelsLoaded(true);
+    }
+  }, [liveReadsReady, ua]);
 
-  const refreshBindings = useCallback(() => {
-    ua.listBindings().then((b) => setBindings(b)).catch((e) => console.error("Failed to load bindings:", e));
-  }, [ua]);
+  const loadChannelsRuntime = useCallback(async () => {
+    if (!liveReadsReady) return;
+    try {
+      const snapshot = await ua.getChannelsRuntimeSnapshot();
+      setChannelNodes(snapshot.channels);
+      setBindings(snapshot.bindings);
+      setAgents(snapshot.agents);
+    } catch (error) {
+      console.error("Failed to load channel runtime snapshot:", error);
+    } finally {
+      setChannelsLoaded(true);
+    }
+  }, [liveReadsReady, ua]);
 
   useEffect(() => {
     const initKey = `${ua.instanceId}#${ua.instanceToken}`;
     if (initializedKeyRef.current === initKey) return;
     initializedKeyRef.current = initKey;
-    refreshAgents();
-    refreshBindings();
-    ua.listModelProfiles().then((p) => setModelProfiles(p.filter((m) => m.enabled))).catch((e) => console.error("Failed to load model profiles:", e));
-    // Channel/discord caches are loaded by App.tsx when route === "channels",
-    // no need to duplicate here.
-  }, [ua, refreshAgents, refreshBindings]);
+    if (persistedConfigSnapshot) {
+      emitDataLoadMetric({
+        requestId: createDataLoadRequestId("getChannelsConfigSnapshot"),
+        resource: "getChannelsConfigSnapshot",
+        page: "channels",
+        instanceId: ua.instanceId,
+        instanceToken: ua.instanceToken,
+        source: "persisted",
+        phase: "success",
+        elapsedMs: 0,
+        cacheHit: true,
+      });
+    }
+    if (persistedRuntimeSnapshot) {
+      emitDataLoadMetric({
+        requestId: createDataLoadRequestId("getChannelsRuntimeSnapshot"),
+        resource: "getChannelsRuntimeSnapshot",
+        page: "channels",
+        instanceId: ua.instanceId,
+        instanceToken: ua.instanceToken,
+        source: "persisted",
+        phase: "success",
+        elapsedMs: 0,
+        cacheHit: true,
+      });
+    }
+    if (liveReadsReady) {
+      void loadChannelsConfig();
+      void loadChannelsRuntime();
+      ua.listModelProfiles().then((p) => setModelProfiles(p.filter((m) => m.enabled))).catch((e) => console.error("Failed to load model profiles:", e));
+    }
+  }, [liveReadsReady, loadChannelsConfig, loadChannelsRuntime, persistedConfigSnapshot, persistedRuntimeSnapshot, ua]);
 
-  const channelNodes = ua.channelNodes || [];
   const discordChannels = ua.discordGuildChannels;
 
   const handleRefreshDiscord = () => {
@@ -108,7 +181,7 @@ export function Channels({
 
   const handleRefreshPlatform = (platform: string) => {
     setRefreshing(platform);
-    ua.refreshChannelNodesCache()
+    Promise.all([loadChannelsConfig(), loadChannelsRuntime()])
       .then(() => {
         showToast?.(t('channels.platformRefreshed', { platform: PLATFORM_LABELS[platform] || platform }), "success");
       })
@@ -182,7 +255,7 @@ export function Channels({
           : `Unbind ${platform}:${peerId}`,
         ["openclaw", "config", "set", "bindings", JSON.stringify(newBindings), "--json"],
       );
-      refreshBindings();
+      void Promise.all([loadChannelsConfig(), loadChannelsRuntime()]);
     } catch (e) {
       if (!hasGuidanceEmitted(e)) showToast?.(String(e), "error");
     } finally {
@@ -245,7 +318,6 @@ export function Channels({
   };
 
   const discordLoaded = discordChannels !== null;
-  const channelsLoaded = ua.channelNodes !== null;
   const hasDiscord = (discordChannels || []).length > 0;
   const hasOther = otherPlatforms.length > 0;
 
@@ -276,7 +348,7 @@ export function Channels({
               </Button>
             </div>
 
-            {discordChannels === null || ua.discordChannelsLoading ? (
+            {discordChannels === null ? (
               <p className="text-sm text-muted-foreground animate-pulse">{t('channels.loadingDiscord')}</p>
             ) : discordGuilds.length === 0 ? (
               <p className="text-sm text-muted-foreground">
@@ -356,7 +428,7 @@ export function Channels({
         }}
         modelProfiles={modelProfiles}
         onCreated={(result: CreateAgentResult) => {
-          refreshAgents();
+          void loadChannelsRuntime();
           if (pendingChannel) {
             handleAssign(pendingChannel.platform, pendingChannel.peerId, result.agentId);
             if (result.persona && pendingChannel.platform === "discord") {

@@ -157,6 +157,16 @@ pub async fn remote_manage_rescue_bot(
 }
 
 #[tauri::command]
+pub async fn remote_get_rescue_bot_status(
+    pool: State<'_, SshConnectionPool>,
+    host_id: String,
+    profile: Option<String>,
+    rescue_port: Option<u16>,
+) -> Result<RescueBotManageResult, String> {
+    remote_manage_rescue_bot(pool, host_id, "status".to_string(), profile, rescue_port).await
+}
+
+#[tauri::command]
 pub async fn remote_diagnose_primary_via_rescue(
     pool: State<'_, SshConnectionPool>,
     host_id: String,

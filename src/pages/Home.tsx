@@ -24,9 +24,26 @@ import {
 import { CreateAgentDialog } from "@/components/CreateAgentDialog";
 import { UpgradeDialog } from "@/components/UpgradeDialog";
 import { Skeleton } from "@/components/ui/skeleton";
-import type { InstanceStatus, StatusExtra, AgentOverview, ModelProfile } from "../lib/types";
+import type {
+  InstanceStatus,
+  StatusExtra,
+  AgentOverview,
+  ModelProfile,
+  InstanceConfigSnapshot,
+  InstanceRuntimeSnapshot,
+} from "../lib/types";
 import { useApi, hasGuidanceEmitted } from "@/lib/use-api";
 import { profileToModelValue } from "@/lib/model-value";
+import {
+  applyConfigSnapshotToHomeState,
+  buildInitialHomeState,
+  shouldStartDeferredUpdateCheck,
+} from "./overview-loading";
+import {
+  createDataLoadRequestId,
+  emitDataLoadMetric,
+} from "@/lib/data-load-log";
+import { readPersistedReadCache } from "@/lib/persistent-read-cache";
 
 type OpenclawUpdateLatch = {
   checkedAt: number;
@@ -72,12 +89,28 @@ export function Home({
 }) {
   const { t } = useTranslation();
   const ua = useApi();
-  const [status, setStatus] = useState<InstanceStatus | null>(null);
-  const [statusExtra, setStatusExtra] = useState<StatusExtra | null>(null);
-  const [version, setVersion] = useState<string | null>(null);
+  const persistedConfigSnapshot = useMemo(
+    () => readPersistedReadCache<InstanceConfigSnapshot>(ua.instanceId, "getInstanceConfigSnapshot", []) ?? null,
+    [ua.instanceId],
+  );
+  const persistedRuntimeSnapshot = useMemo(
+    () => readPersistedReadCache<InstanceRuntimeSnapshot>(ua.instanceId, "getInstanceRuntimeSnapshot", []) ?? null,
+    [ua.instanceId],
+  );
+  const persistedStatusExtra = useMemo(
+    () => readPersistedReadCache<StatusExtra>(ua.instanceId, "getStatusExtra", []) ?? null,
+    [ua.instanceId],
+  );
+  const initialHomeState = useMemo(
+    () => buildInitialHomeState(persistedConfigSnapshot, persistedRuntimeSnapshot, persistedStatusExtra),
+    [persistedConfigSnapshot, persistedRuntimeSnapshot, persistedStatusExtra],
+  );
+  const [status, setStatus] = useState<InstanceStatus | null>(() => initialHomeState.status);
+  const [statusExtra, setStatusExtra] = useState<StatusExtra | null>(() => initialHomeState.statusExtra);
+  const [version, setVersion] = useState<string | null>(() => initialHomeState.version);
   const [updateInfo, setUpdateInfo] = useState<{ available: boolean; latest?: string } | null>(null);
   const [checkingUpdate, setCheckingUpdate] = useState(false);
-  const [agents, setAgents] = useState<AgentOverview[] | null>(null);
+  const [agents, setAgents] = useState<AgentOverview[] | null>(() => initialHomeState.agents);
   const [modelProfiles, setModelProfiles] = useState<ModelProfile[]>([]);
   const [savingModel, setSavingModel] = useState(false);
   const [fallbackSelectKey, setFallbackSelectKey] = useState(0);
@@ -85,6 +118,7 @@ export function Home({
   // Create agent dialog
   const [showCreateAgent, setShowCreateAgent] = useState(false);
   const [showUpgradeDialog, setShowUpgradeDialog] = useState(false);
+  const liveReadsReady = ua.instanceToken !== 0;
 
   const resolveModelValue = (profileId: string | null): string | null => {
     if (!profileId) return null;
@@ -117,7 +151,8 @@ export function Home({
   }, [ua]);
 
   // Health status with grace period: retry quickly when unhealthy, then slow-poll
-  const [statusSettled, setStatusSettled] = useState(false);
+  const [statusSettled, setStatusSettled] = useState(() => initialHomeState.statusSettled);
+  const homeStateRef = useRef(initialHomeState);
   const retriesRef = useRef(0);
   const remoteErrorShownRef = useRef(false);
   const remoteUnhealthyStreakRef = useRef(0);
@@ -125,25 +160,6 @@ export function Home({
   const onboardingGuidanceSigRef = useRef<string>("");
 
   const statusInFlightRef = useRef(false);
-
-  // On instance switch, immediately clear stale state so UI shows loading
-  // placeholders instead of previous instance data.
-  useEffect(() => {
-    setStatus(null);
-    setStatusExtra(null);
-    setVersion(null);
-    setUpdateInfo(null);
-    setCheckingUpdate(false);
-    setAgents(null);
-    setModelProfiles([]);
-    setStatusSettled(false);
-    retriesRef.current = 0;
-    remoteErrorShownRef.current = false;
-    remoteUnhealthyStreakRef.current = 0;
-    statusInFlightRef.current = false;
-    duplicateInstallGuidanceSigRef.current = "";
-    onboardingGuidanceSigRef.current = "";
-  }, [ua.instanceToken]);
 
   useEffect(() => {
     const entries = statusExtra?.duplicateInstalls || [];
@@ -206,12 +222,49 @@ export function Home({
     }));
   }, [statusSettled, status, modelProfiles, t, ua.instanceId, ua.isDocker, ua.isRemote]);
 
-  const fetchStatus = useCallback(() => {
+  const applyConfigSnapshot = useCallback((snapshot: {
+    globalDefaultModel?: string;
+    fallbackModels: string[];
+    agents: AgentOverview[];
+  }) => {
+    const next = applyConfigSnapshotToHomeState(homeStateRef.current, snapshot);
+    setStatus(next.status);
+    setAgents(next.agents);
+    setStatusSettled(next.statusSettled);
+  }, []);
+
+  const applyRuntimeSnapshot = useCallback((snapshot: InstanceRuntimeSnapshot) => {
+    setStatus({
+      ...snapshot.status,
+      globalDefaultModel: snapshot.globalDefaultModel,
+      fallbackModels: snapshot.fallbackModels,
+    });
+    setAgents(snapshot.agents);
+    setStatusSettled(true);
+  }, []);
+
+  useEffect(() => {
+    homeStateRef.current = {
+      status,
+      agents,
+      statusSettled,
+      version,
+      statusExtra,
+    };
+  }, [agents, status, statusExtra, statusSettled, version]);
+
+  const fetchRuntimeSnapshot = useCallback(() => {
+    if (!liveReadsReady) return;
     if (ua.isRemote && !ua.isConnected) return; // Wait for SSH connection
     if (hasPendingRef.current || optimisticLockedUntilRef.current > Date.now()) return; // Don't overwrite optimistic UI
     if (statusInFlightRef.current) return; // Prevent overlapping polls
     statusInFlightRef.current = true;
-    ua.getInstanceStatus().then((s) => {
+    ua.getInstanceRuntimeSnapshot().then((snapshot) => {
+      const s: InstanceStatus = {
+        ...snapshot.status,
+        globalDefaultModel: snapshot.globalDefaultModel,
+        fallbackModels: snapshot.fallbackModels,
+      };
       let resolvedHealthy = s.healthy;
       if (ua.isRemote) {
         if (s.healthy) {
@@ -228,12 +281,13 @@ export function Home({
       // rather than flashing "unset" — only update health which is independent.
       if (ua.isRemote && s.activeAgents === 0 && !s.globalDefaultModel) {
         setStatus((prev) => prev ? { ...prev, healthy: resolvedHealthy } : next);
-      } else {
-        setStatus(next);
-      }
-      if (ua.isRemote) {
-        setStatusSettled(true);
-        remoteErrorShownRef.current = false;
+        } else {
+          setStatus(next);
+        }
+        setAgents(snapshot.agents);
+        if (ua.isRemote) {
+          setStatusSettled(true);
+          remoteErrorShownRef.current = false;
       } else {
         if (s.healthy) {
           setStatusSettled(true);
@@ -257,86 +311,123 @@ export function Home({
     }).finally(() => {
       statusInFlightRef.current = false;
     });
-  }, [ua, showToast, t]);
+  }, [liveReadsReady, ua, showToast, t]);
+
+  const fetchStatusExtra = useCallback(() => {
+    if (!liveReadsReady) return;
+    if (ua.isRemote && !ua.isConnected) return;
+    if (hasPendingRef.current || optimisticLockedUntilRef.current > Date.now()) return;
+    ua.getStatusExtra()
+      .then((next) => {
+        setStatusExtra(next);
+        if (next.openclawVersion) {
+          setVersion(next.openclawVersion);
+        }
+      })
+      .catch((error) => {
+        console.error("Failed to fetch status extra:", error);
+      });
+  }, [liveReadsReady, ua]);
+
+  const refreshInstanceOverview = useCallback(() => {
+    if (!liveReadsReady) return;
+    if (ua.isRemote && !ua.isConnected) return;
+    void ua.getInstanceConfigSnapshot()
+      .then(applyConfigSnapshot)
+      .catch((error) => console.error("Failed to fetch instance config snapshot:", error));
+    fetchRuntimeSnapshot();
+  }, [applyConfigSnapshot, fetchRuntimeSnapshot, liveReadsReady, ua]);
+
+  useEffect(() => {
+    if (!liveReadsReady) return;
+    if (ua.isRemote && !ua.isConnected) return;
+    ua.getInstanceConfigSnapshot()
+      .then(applyConfigSnapshot)
+      .catch((e) => {
+        console.error("Failed to fetch instance config snapshot:", e);
+      });
+  }, [applyConfigSnapshot, liveReadsReady, ua]);
+
+  useEffect(() => {
+    if (!liveReadsReady) return;
+    if (ua.isRemote && !ua.isConnected) return;
+    fetchStatusExtra();
+  }, [fetchStatusExtra, liveReadsReady, ua.isConnected, ua.isRemote]);
+
+  useEffect(() => {
+    if (persistedConfigSnapshot) {
+      emitDataLoadMetric({
+        requestId: createDataLoadRequestId("getInstanceConfigSnapshot"),
+        resource: "getInstanceConfigSnapshot",
+        page: "home",
+        instanceId: ua.instanceId,
+        instanceToken: ua.instanceToken,
+        source: "persisted",
+        phase: "success",
+        elapsedMs: 0,
+        cacheHit: true,
+      });
+    }
+
+    if (persistedRuntimeSnapshot) {
+      emitDataLoadMetric({
+        requestId: createDataLoadRequestId("getInstanceRuntimeSnapshot"),
+        resource: "getInstanceRuntimeSnapshot",
+        page: "home",
+        instanceId: ua.instanceId,
+        instanceToken: ua.instanceToken,
+        source: "persisted",
+        phase: "success",
+        elapsedMs: 0,
+        cacheHit: true,
+      });
+    }
+
+    if (persistedStatusExtra) {
+      emitDataLoadMetric({
+        requestId: createDataLoadRequestId("getStatusExtra"),
+        resource: "getStatusExtra",
+        page: "home",
+        instanceId: ua.instanceId,
+        instanceToken: ua.instanceToken,
+        source: "persisted",
+        phase: "success",
+        elapsedMs: 0,
+        cacheHit: true,
+      });
+    }
+    setUpdateInfo(null);
+    setCheckingUpdate(false);
+    setModelProfiles([]);
+    retriesRef.current = 0;
+    remoteErrorShownRef.current = false;
+    remoteUnhealthyStreakRef.current = 0;
+    statusInFlightRef.current = false;
+    duplicateInstallGuidanceSigRef.current = "";
+    onboardingGuidanceSigRef.current = "";
+  }, [persistedConfigSnapshot, persistedRuntimeSnapshot, persistedStatusExtra, ua.instanceId, ua.instanceToken]);
 
   useEffect(() => {
     remoteErrorShownRef.current = false;
     remoteUnhealthyStreakRef.current = 0;
-    const initial = setTimeout(fetchStatus, 250);
+    if (!liveReadsReady) return;
+    const initial = setTimeout(fetchRuntimeSnapshot, ua.isRemote ? 400 : 250);
     // Poll fast (2s) while not settled, slow (10s) once settled; remote always slow
-    const interval = setInterval(fetchStatus, ua.isRemote ? 30000 : (statusSettled ? 10000 : 2000));
+    const interval = setInterval(fetchRuntimeSnapshot, ua.isRemote ? 30000 : (statusSettled ? 10000 : 2000));
     return () => {
       clearTimeout(initial);
       clearInterval(interval);
     };
-  }, [fetchStatus, statusSettled, ua.isRemote]);
-
-  // Tier 2: version + duplicate detection — called once on mount (not polled)
-  const fetchStatusExtra = useCallback(() => {
-    if (ua.isRemote && !ua.isConnected) return;
-    ua.getStatusExtra().then((extra) => {
-      setStatusExtra(extra);
-      if (extra.openclawVersion) setVersion(extra.openclawVersion);
-    }).catch((e) => {
-      console.error("Failed to fetch status extra:", e);
-    });
-  }, [ua]);
+  }, [fetchRuntimeSnapshot, liveReadsReady, statusSettled, ua.isRemote]);
 
   useEffect(() => {
-    // Delay for remote to avoid SSH burst (tier 1 + tier 2 = 4 concurrent SSH
-    // processes on Windows which has no ControlMaster multiplexing).
-    if (ua.isRemote) {
-      const timer = setTimeout(fetchStatusExtra, 3000);
-      return () => clearTimeout(timer);
-    }
-    const timer = setTimeout(fetchStatusExtra, 350);
-    return () => clearTimeout(timer);
-  }, [fetchStatusExtra, ua.isRemote]);
-
-  const refreshAgents = useCallback(() => {
-    if (ua.isRemote && !ua.isConnected) return; // Wait for SSH connection
-    if (hasPendingRef.current || optimisticLockedUntilRef.current > Date.now()) return; // Don't overwrite optimistic UI
-    ua.listAgents().then((a) => {
-      setAgents(a);
-      if (ua.isRemote) remoteErrorShownRef.current = false;
-    }).catch((e) => {
-      if (ua.isRemote) {
-        // SSH sessions can be transiently unavailable during tab switch;
-        // retry once after a short delay before surfacing the error.
-        setTimeout(() => {
-          ua.listAgents().then((a) => {
-            setAgents(a);
-            remoteErrorShownRef.current = false;
-          }).catch((e2) => {
-            console.error("Failed to load remote agents:", e2);
-            if (!remoteErrorShownRef.current) {
-              remoteErrorShownRef.current = true;
-            }
-          });
-        }, 1500);
-      } else {
-        console.error("Failed to load agents:", e);
-      }
-    });
-  }, [ua, showToast, t]);
-
-  useEffect(() => {
-    const initial = setTimeout(refreshAgents, 300);
-    // Auto-refresh agents (remote less frequently to avoid ssh process spam)
-    const interval = setInterval(refreshAgents, ua.isRemote ? 30000 : 15000);
-    return () => {
-      clearTimeout(initial);
-      clearInterval(interval);
-    };
-  }, [refreshAgents, ua.isRemote]);
-
-  useEffect(() => {
+    if (!liveReadsReady) return;
     if (ua.isRemote && !ua.isConnected) return;
     const timer = setTimeout(() => {
       ua.listModelProfiles().then((p) => setModelProfiles(p.filter((m) => m.enabled))).catch((e) => console.error("Failed to load model profiles:", e));
     }, 350);
     return () => clearTimeout(timer);
-  }, [ua]);
+  }, [liveReadsReady, ua]);
 
   // Match current global model value to a profile ID
   const currentModelProfileId = useMemo(() => {
@@ -372,28 +463,43 @@ export function Home({
       return;
     }
 
+    if (!shouldStartDeferredUpdateCheck({
+      isRemote: ua.isRemote,
+      isConnected: ua.isConnected,
+    })) {
+      setCheckingUpdate(false);
+      return;
+    }
+
     setCheckingUpdate(true);
     setUpdateInfo(null);
-    const timer = setTimeout(() => {
-      if (ua.isRemote && !ua.isConnected) { setCheckingUpdate(false); return; }
-      ua.checkOpenclawUpdate()
-        .then((u) => {
-          const next = {
-            checkedAt: Date.now(),
-            available: u.upgradeAvailable,
-            latest: u.latestVersion ?? undefined,
-            installedVersion: u.installedVersion,
-          };
-          OPENCLAW_UPDATE_LATCH.set(instanceKey, next);
-          setUpdateInfo({ available: next.available, latest: next.latest });
-          // Fallback: set version from update check if tier 2 hasn't provided it yet
-          if (u.installedVersion) setVersion((prev) => prev || u.installedVersion);
-        })
-        .catch((e) => console.error("Failed to check update:", e))
-        .finally(() => setCheckingUpdate(false));
-    }, 2000); // Defer to avoid blocking startup with heavy CLI calls
-    return () => clearTimeout(timer);
-  }, [ua]);
+    let cancelled = false;
+    ua.checkOpenclawUpdate()
+      .then((u) => {
+        if (cancelled) return;
+        const next = {
+          checkedAt: Date.now(),
+          available: u.upgradeAvailable,
+          latest: u.latestVersion ?? undefined,
+          installedVersion: u.installedVersion,
+        };
+        OPENCLAW_UPDATE_LATCH.set(instanceKey, next);
+        setUpdateInfo({ available: next.available, latest: next.latest });
+        if (u.installedVersion) setVersion((prev) => prev || u.installedVersion);
+      })
+      .catch((e) => {
+        if (cancelled) return;
+        console.error("Failed to check update:", e);
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setCheckingUpdate(false);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [agents, status, statusSettled, ua]);
 
   const handleDeleteAgent = (agentId: string) => {
     if (ua.isRemote && !ua.isConnected) return;
@@ -440,6 +546,11 @@ export function Home({
             <span className="text-sm font-semibold font-mono">{version || "..."}</span>
             {checkingUpdate && (
               <Badge variant="outline" className="text-muted-foreground">{t('home.checkingUpdates')}</Badge>
+            )}
+            {!checkingUpdate && updateInfo?.latest && (
+              <Badge variant="outline" className="text-muted-foreground">
+                {t('home.latestRelease', { version: updateInfo.latest })}
+              </Badge>
             )}
             {!checkingUpdate && updateInfo?.available && updateInfo.latest && updateInfo.latest !== version && (
               <>
@@ -761,7 +872,7 @@ export function Home({
         open={showCreateAgent}
         onOpenChange={setShowCreateAgent}
         modelProfiles={modelProfiles}
-        onCreated={() => refreshAgents()}
+        onCreated={() => refreshInstanceOverview()}
       />
 
       {/* Upgrade Dialog */}
@@ -771,8 +882,7 @@ export function Home({
           setShowUpgradeDialog(open);
           if (!open) {
             // Refresh version + update status after closing upgrade dialog
-            fetchStatus();
-            fetchStatusExtra();
+            refreshInstanceOverview();
             ua.checkOpenclawUpdate()
               .then((u) => setUpdateInfo({ available: u.upgradeAvailable, latest: u.latestVersion ?? undefined }))
               .catch(() => {});

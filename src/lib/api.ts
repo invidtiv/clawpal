@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { AgentOverview, AgentSessionAnalysis, AppPreferences, ApplyQueueResult, ApplyResult, BackupInfo, Binding, BugReportSettings, BugReportStats, ChannelNode, CronJob, CronRun, DiscordGuildChannel, DiscoveredInstance, DockerInstance, EnsureAccessResult, GuidanceAction, HistoryItem, InstallMethodCapability, InstallOrchestratorDecision, InstallSession, InstallStepResult, InstallTargetDecision, InstanceStatus, StatusExtra, ModelCatalogProvider, ModelProfile, PendingCommand, PrecheckIssue, PreviewQueueResult, PreviewResult, ProfilePushResult, ProviderAuthSuggestion, Recipe, RecordInstallExperienceResult, RegisteredInstance, RelatedSecretPushResult, RemoteAuthSyncResult, RescueBotAction, RescueBotManageResult, RescuePrimaryDiagnosisResult, RescuePrimaryRepairResult, ResolvedApiKey, SshConfigHostSuggestion, SshConnectionProfile, SshDiagnosticReport, SshHost, SshIntent, SshTransferStats, SystemStatus, DoctorReport, SessionFile, WatchdogStatus } from "./types";
+import type { AgentOverview, AgentSessionAnalysis, AppPreferences, ApplyQueueResult, ApplyResult, BackupInfo, Binding, BugReportSettings, BugReportStats, ChannelNode, ChannelsConfigSnapshot, ChannelsRuntimeSnapshot, CronConfigSnapshot, CronJob, CronRun, CronRuntimeSnapshot, DiscordGuildChannel, DiscoveredInstance, DockerInstance, EnsureAccessResult, GuidanceAction, HistoryItem, InstallMethodCapability, InstallOrchestratorDecision, InstallSession, InstallStepResult, InstallTargetDecision, InstanceConfigSnapshot, InstanceRuntimeSnapshot, InstanceStatus, StatusExtra, ModelCatalogProvider, ModelProfile, PendingCommand, PrecheckIssue, PreviewQueueResult, PreviewResult, ProfilePushResult, ProviderAuthSuggestion, Recipe, RecordInstallExperienceResult, RegisteredInstance, RelatedSecretPushResult, RemoteAuthSyncResult, RescueBotAction, RescueBotManageResult, RescuePrimaryDiagnosisResult, RescuePrimaryRepairResult, ResolvedApiKey, SshConfigHostSuggestion, SshConnectionProfile, SshDiagnosticReport, SshHost, SshIntent, SshTransferStats, SystemStatus, DoctorReport, SessionFile, WatchdogStatus } from "./types";
 
 export const api = {
   setActiveOpenclawHome: (path: string | null): Promise<boolean> =>
@@ -86,6 +86,10 @@ export const api = {
     invoke("migrate_legacy_instances", { legacyDockerInstances, legacyOpenTabIds }),
   getInstanceStatus: (): Promise<InstanceStatus> =>
     invoke("get_status_light", {}),
+  getInstanceConfigSnapshot: (): Promise<InstanceConfigSnapshot> =>
+    invoke("get_instance_config_snapshot", {}),
+  getInstanceRuntimeSnapshot: (): Promise<InstanceRuntimeSnapshot> =>
+    invoke("get_instance_runtime_snapshot", {}),
   getStatusExtra: (): Promise<StatusExtra> =>
     invoke("get_status_extra", {}),
   getCachedModelCatalog: (): Promise<ModelCatalogProvider[]> =>
@@ -162,6 +166,10 @@ export const api = {
     invoke("delete_backup", { backupName }),
   listChannelsMinimal: (): Promise<ChannelNode[]> =>
     invoke("list_channels_minimal", {}),
+  getChannelsConfigSnapshot: (): Promise<ChannelsConfigSnapshot> =>
+    invoke("get_channels_config_snapshot", {}),
+  getChannelsRuntimeSnapshot: (): Promise<ChannelsRuntimeSnapshot> =>
+    invoke("get_channels_runtime_snapshot", {}),
   listDiscordGuildChannels: (): Promise<DiscordGuildChannel[]> =>
     invoke("list_discord_guild_channels", {}),
   refreshDiscordGuildChannels: (): Promise<DiscordGuildChannel[]> =>
@@ -170,6 +178,8 @@ export const api = {
     invoke("restart_gateway", {}),
   manageRescueBot: (action: RescueBotAction, profile?: string, rescuePort?: number): Promise<RescueBotManageResult> =>
     invoke("manage_rescue_bot", { action, profile: profile ?? null, rescuePort: rescuePort ?? null }),
+  getRescueBotStatus: (profile?: string, rescuePort?: number): Promise<RescueBotManageResult> =>
+    invoke("get_rescue_bot_status", { profile: profile ?? null, rescuePort: rescuePort ?? null }),
   diagnosePrimaryViaRescue: (targetProfile?: string, rescueProfile?: string): Promise<RescuePrimaryDiagnosisResult> =>
     invoke("diagnose_primary_via_rescue", { targetProfile: targetProfile ?? null, rescueProfile: rescueProfile ?? null }),
   repairPrimaryViaRescue: (targetProfile?: string, rescueProfile?: string, issueIds?: string[]): Promise<RescuePrimaryRepairResult> =>
@@ -211,6 +221,10 @@ export const api = {
     invoke("remote_read_raw_config", { hostId }),
   remoteGetInstanceStatus: (hostId: string): Promise<InstanceStatus> =>
     invoke("remote_get_system_status", { hostId }),
+  remoteGetInstanceConfigSnapshot: (hostId: string): Promise<InstanceConfigSnapshot> =>
+    invoke("remote_get_instance_config_snapshot", { hostId }),
+  remoteGetInstanceRuntimeSnapshot: (hostId: string): Promise<InstanceRuntimeSnapshot> =>
+    invoke("remote_get_instance_runtime_snapshot", { hostId }),
   remoteGetSshConnectionProfile: (hostId: string): Promise<SshConnectionProfile> =>
     invoke("remote_get_ssh_connection_profile", { hostId }),
   remoteGetStatusExtra: (hostId: string): Promise<StatusExtra> =>
@@ -219,12 +233,18 @@ export const api = {
     invoke("remote_list_agents_overview", { hostId }),
   remoteListChannelsMinimal: (hostId: string): Promise<ChannelNode[]> =>
     invoke("remote_list_channels_minimal", { hostId }),
+  remoteGetChannelsConfigSnapshot: (hostId: string): Promise<ChannelsConfigSnapshot> =>
+    invoke("remote_get_channels_config_snapshot", { hostId }),
+  remoteGetChannelsRuntimeSnapshot: (hostId: string): Promise<ChannelsRuntimeSnapshot> =>
+    invoke("remote_get_channels_runtime_snapshot", { hostId }),
   remoteListBindings: (hostId: string): Promise<Binding[]> =>
     invoke("remote_list_bindings", { hostId }),
   remoteRestartGateway: (hostId: string): Promise<boolean> =>
     invoke("remote_restart_gateway", { hostId }),
   remoteManageRescueBot: (hostId: string, action: RescueBotAction, profile?: string, rescuePort?: number): Promise<RescueBotManageResult> =>
     invoke("remote_manage_rescue_bot", { hostId, action, profile: profile ?? null, rescuePort: rescuePort ?? null }),
+  remoteGetRescueBotStatus: (hostId: string, profile?: string, rescuePort?: number): Promise<RescueBotManageResult> =>
+    invoke("remote_get_rescue_bot_status", { hostId, profile: profile ?? null, rescuePort: rescuePort ?? null }),
   remoteDiagnosePrimaryViaRescue: (hostId: string, targetProfile?: string, rescueProfile?: string): Promise<RescuePrimaryDiagnosisResult> =>
     invoke("remote_diagnose_primary_via_rescue", { hostId, targetProfile: targetProfile ?? null, rescueProfile: rescueProfile ?? null }),
   remoteRepairPrimaryViaRescue: (hostId: string, targetProfile?: string, rescueProfile?: string, issueIds?: string[]): Promise<RescuePrimaryRepairResult> =>
@@ -304,6 +324,10 @@ export const api = {
   // Cron
   listCronJobs: (): Promise<CronJob[]> =>
     invoke("list_cron_jobs", {}),
+  getCronConfigSnapshot: (): Promise<CronConfigSnapshot> =>
+    invoke("get_cron_config_snapshot", {}),
+  getCronRuntimeSnapshot: (): Promise<CronRuntimeSnapshot> =>
+    invoke("get_cron_runtime_snapshot", {}),
   getCronRuns: (jobId: string, limit?: number): Promise<CronRun[]> =>
     invoke("get_cron_runs", { jobId, limit }),
   triggerCronJob: (jobId: string): Promise<string> =>
@@ -326,6 +350,10 @@ export const api = {
   // Remote cron
   remoteListCronJobs: (hostId: string): Promise<CronJob[]> =>
     invoke("remote_list_cron_jobs", { hostId }),
+  remoteGetCronConfigSnapshot: (hostId: string): Promise<CronConfigSnapshot> =>
+    invoke("remote_get_cron_config_snapshot", { hostId }),
+  remoteGetCronRuntimeSnapshot: (hostId: string): Promise<CronRuntimeSnapshot> =>
+    invoke("remote_get_cron_runtime_snapshot", { hostId }),
   remoteGetCronRuns: (hostId: string, jobId: string, limit?: number): Promise<CronRun[]> =>
     invoke("remote_get_cron_runs", { hostId, jobId, limit }),
   remoteTriggerCronJob: (hostId: string, jobId: string): Promise<string> =>

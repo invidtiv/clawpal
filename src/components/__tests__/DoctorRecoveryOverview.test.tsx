@@ -23,6 +23,25 @@ describe("DoctorRecoveryOverview", () => {
         recommendedAction: "Apply 1 safe fix and re-run recovery",
         fixableIssueCount: 1,
         selectedFixIssueIds: ["field.agents"],
+        rootCauseHypotheses: [
+          {
+            title: "Agent defaults are missing",
+            reason: "The primary profile has no agents.defaults.model binding.",
+            score: 0.91,
+          },
+        ],
+        fixSteps: [
+          "Set agents.defaults.model to a valid provider/model pair.",
+          "Re-run the primary check after saving the config.",
+        ],
+        confidence: 0.91,
+        citations: [
+          {
+            url: "https://docs.openclaw.ai/agents",
+            section: "defaults",
+          },
+        ],
+        versionAwareness: "Guidance matches OpenClaw 2026.3.x.",
       },
       sections: [
         {
@@ -31,6 +50,25 @@ describe("DoctorRecoveryOverview", () => {
           status: "degraded",
           summary: "Agents has 1 recommended change",
           docsUrl: "https://docs.openclaw.ai/agents",
+          rootCauseHypotheses: [
+            {
+              title: "Agent defaults are missing",
+              reason: "The primary profile has no agents.defaults.model binding.",
+              score: 0.91,
+            },
+          ],
+          fixSteps: [
+            "Set agents.defaults.model to a valid provider/model pair.",
+            "Re-run the primary check after saving the config.",
+          ],
+          confidence: 0.91,
+          citations: [
+            {
+              url: "https://docs.openclaw.ai/agents",
+              section: "defaults",
+            },
+          ],
+          versionAwareness: "Guidance matches OpenClaw 2026.3.x.",
           items: [
             {
               id: "field.agents",
@@ -85,6 +123,11 @@ describe("DoctorRecoveryOverview", () => {
     expect(html).toContain("Fix 1 issue");
     expect(html).toContain("Agents");
     expect(html).toContain("Gateway");
+    expect(html).toContain("Agent defaults are missing");
+    expect(html).toContain("The primary profile has no agents.defaults.model binding.");
+    expect(html).toContain("Set agents.defaults.model to a valid provider/model pair.");
+    expect(html).toContain("Guidance matches OpenClaw 2026.3.x.");
+    expect(html).toContain("docs.openclaw.ai/agents");
     expect(html.match(/Fix 1 issue/g)?.length ?? 0).toBe(1);
     expect(html).not.toContain("Open Gateway docs");
     expect(html).toContain("text-emerald-700");

@@ -17,6 +17,7 @@ describe("Doctor page rescue header", () => {
         children: React.createElement(InstanceContext.Provider, {
           value: {
             instanceId: "local",
+            instanceViewToken: "local",
             instanceToken: 0,
             isRemote: false,
             isDocker: false,

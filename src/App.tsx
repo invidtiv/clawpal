@@ -19,8 +19,9 @@ import logoUrl from "./assets/logo.png";
 import { InstanceTabBar } from "./components/InstanceTabBar";
 import { InstanceContext } from "./lib/instance-context";
 import { api } from "./lib/api";
-import { buildCacheKey, invalidateGlobalReadCache, subscribeToCacheKey } from "./lib/use-api";
+import { buildCacheKey, invalidateGlobalReadCache, prewarmRemoteInstanceReadCache, subscribeToCacheKey } from "./lib/use-api";
 import { explainAndBuildGuidanceError, withGuidance } from "./lib/guidance";
+import { readPersistedReadCache, writePersistedReadCache } from "./lib/persistent-read-cache";
 import { useFont } from "./lib/use-font";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -930,6 +931,7 @@ export function App() {
     let cancelled = false;
     let nextHome: string | null = null;
     let nextDataDir: string | null = null;
+    setInstanceToken(0);
     const activeRegistered = registeredInstances.find((item) => item.id === activeInstance);
     if (activeInstance === "local" || isRemote) {
       nextHome = null;
@@ -968,6 +970,11 @@ export function App() {
       cancelled = true;
     };
   }, [activeInstance, isDocker, isRemote, dockerInstances, registeredInstances]);
+
+  useEffect(() => {
+    if (!isRemote || !isConnected || !instanceToken) return;
+    prewarmRemoteInstanceReadCache(activeInstance, instanceToken);
+  }, [activeInstance, instanceToken, isConnected, isRemote]);
 
   // Keep active remote instance self-healed: detect dropped SSH and reconnect.
   useEffect(() => {
@@ -1040,8 +1047,12 @@ export function App() {
   // Avoid clearing on transient connection-status changes, which causes
   // Channels page to flicker between "loading" and loaded data.
   useEffect(() => {
-    setChannelNodes(null);
-    setDiscordGuildChannels(null);
+    setChannelNodes(
+      readPersistedReadCache<ChannelNode[]>(activeInstance, "listChannelsMinimal", []) ?? null,
+    );
+    setDiscordGuildChannels(
+      readPersistedReadCache<DiscordGuildChannel[]>(activeInstance, "listDiscordGuildChannels", []) ?? null,
+    );
   }, [activeInstance]);
 
   const refreshChannelNodesCache = useCallback(async () => {
@@ -1051,6 +1062,7 @@ export function App() {
         ? await api.remoteListChannelsMinimal(activeInstance)
         : await api.listChannelsMinimal();
       setChannelNodes(nodes);
+      writePersistedReadCache(activeInstance, "listChannelsMinimal", [], nodes);
       return nodes;
     } finally {
       setChannelsLoading(false);
@@ -1064,6 +1076,7 @@ export function App() {
         ? await api.remoteListDiscordGuildChannels(activeInstance)
         : await api.listDiscordGuildChannels();
       setDiscordGuildChannels(channels);
+      writePersistedReadCache(activeInstance, "listDiscordGuildChannels", [], channels);
       return channels;
     } finally {
       setDiscordChannelsLoading(false);
@@ -1312,6 +1325,7 @@ export function App() {
       />
       <InstanceContext.Provider value={{
         instanceId: activeInstance,
+        instanceViewToken: activeInstance,
         instanceToken,
         isRemote,
         isDocker,
@@ -1502,7 +1516,7 @@ export function App() {
           {/* ── Instance mode content ── */}
           {!inStart && route === "home" && (
             <Home
-              key={`home-${configVersion}`}
+              key={`home-${activeInstance}-${configVersion}`}
               instanceLabel={openTabs.find((t) => t.id === activeInstance)?.label || activeInstance}
               showToast={showToast}
               onNavigate={(r) => navigateRoute(r as Route)}
@@ -1529,17 +1543,17 @@ export function App() {
           {!inStart && route === "cook" && !recipeId && <p>{t('config.noRecipeSelected')}</p>}
           {!inStart && route === "channels" && (
             <Channels
-              key={`channels-${configVersion}`}
+              key={`channels-${activeInstance}-${configVersion}`}
               showToast={showToast}
             />
           )}
-          {!inStart && route === "cron" && <Cron />}
-          {!inStart && route === "history" && <History key={`history-${configVersion}`} />}
+          {!inStart && route === "cron" && <Cron key={`cron-${activeInstance}-${configVersion}`} />}
+          {!inStart && route === "history" && <History key={`history-${activeInstance}-${configVersion}`} />}
           {!inStart && route === "doctor" && (
             <Doctor key={activeInstance} />
           )}
-          {!inStart && route === "context" && <OpenclawContext />}
-          {!inStart && route === "orchestrator" && <Orchestrator />}
+          {!inStart && route === "context" && <OpenclawContext key={`context-${activeInstance}`} />}
+          {!inStart && route === "orchestrator" && <Orchestrator key={`orchestrator-${activeInstance}`} />}
           </Suspense>
         </div>
       </main>

@@ -1,15 +1,23 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 import { useApi } from "@/lib/use-api";
 import { cn } from "@/lib/utils";
 import type {
   CronJob,
+  CronConfigSnapshot,
   CronRun,
+  CronRuntimeSnapshot,
   CronSchedule,
   DiscordGuildChannel,
   WatchdogStatus,
 } from "@/lib/types";
+import {
+  createDataLoadRequestId,
+  emitDataLoadMetric,
+} from "@/lib/data-load-log";
+import { readPersistedReadCache } from "@/lib/persistent-read-cache";
+import { buildInitialCronState } from "./overview-loading";
 import {
   Card,
   CardContent,
@@ -140,9 +148,32 @@ export function Cron() {
   const { t, i18n } = useTranslation();
   const lang = i18n.language;
   const ua = useApi();
+  const persistedConfigSnapshot = useMemo(
+    () => readPersistedReadCache<CronConfigSnapshot>(
+      ua.instanceId,
+      "getCronConfigSnapshot",
+      [],
+    ) ?? null,
+    [ua.instanceId],
+  );
+  const persistedRuntimeSnapshot = useMemo(
+    () => readPersistedReadCache<CronRuntimeSnapshot>(
+      ua.instanceId,
+      "getCronRuntimeSnapshot",
+      [],
+    ) ?? null,
+    [ua.instanceId],
+  );
+  const initialCronState = useMemo(
+    () => buildInitialCronState(
+      persistedConfigSnapshot,
+      persistedRuntimeSnapshot,
+    ),
+    [persistedConfigSnapshot, persistedRuntimeSnapshot],
+  );
 
-  const [jobs, setJobs] = useState<CronJob[]>([]);
-  const [watchdog, setWatchdog] = useState<(WatchdogStatus & { alive: boolean; deployed: boolean }) | null>(null);
+  const [jobs, setJobs] = useState<CronJob[]>(() => initialCronState.jobs);
+  const [watchdog, setWatchdog] = useState<(WatchdogStatus & { alive: boolean; deployed: boolean }) | null>(() => initialCronState.watchdog);
   const [expandedJob, setExpandedJob] = useState<string | null>(null);
   const [runs, setRuns] = useState<Record<string, CronRun[]>>({});
   const [triggering, setTriggering] = useState<string | null>(null);
@@ -151,12 +182,65 @@ export function Cron() {
   const [lastSuccess, setLastSuccess] = useState<string | null>(null);
   const [filter, setFilter] = useState<CronFilter>("all");
   const [channels, setChannels] = useState<DiscordGuildChannel[]>([]);
+  const liveReadsReady = ua.instanceToken !== 0;
 
-  const loadJobs = useCallback(() => { ua.listCronJobs().then(setJobs).catch(() => {}); }, [ua]);
-  const loadWd = useCallback(() => { ua.getWatchdogStatus().then(setWatchdog).catch(() => setWatchdog(null)); }, [ua]);
-  const loadRuns = useCallback((id: string) => { ua.getCronRuns(id, 10).then(r => setRuns(p => ({ ...p, [id]: r }))).catch(() => {}); }, [ua]);
+  const loadConfigSnapshot = useCallback(() => {
+    if (!liveReadsReady) return;
+    ua.getCronConfigSnapshot()
+      .then((snapshot) => setJobs(snapshot.jobs))
+      .catch(() => {});
+  }, [liveReadsReady, ua]);
+  const loadRuntimeSnapshot = useCallback(() => {
+    if (!liveReadsReady) return;
+    ua.getCronRuntimeSnapshot()
+      .then((snapshot) => {
+        setJobs(snapshot.jobs);
+        setWatchdog(snapshot.watchdog);
+      })
+      .catch(() => setWatchdog(null));
+  }, [liveReadsReady, ua]);
+  const loadRuns = useCallback((id: string) => {
+    if (!liveReadsReady) return;
+    ua.getCronRuns(id, 10).then(r => setRuns(p => ({ ...p, [id]: r }))).catch(() => {});
+  }, [liveReadsReady, ua]);
 
-  useEffect(() => { loadJobs(); loadWd(); ua.listDiscordGuildChannels().then(setChannels).catch(() => {}); ua.refreshDiscordGuildChannels?.().then(setChannels).catch(() => {}); const iv = setInterval(() => { loadJobs(); loadWd(); }, 10_000); return () => clearInterval(iv); }, [loadJobs, loadWd]);
+  useEffect(() => {
+    if (persistedConfigSnapshot) {
+      emitDataLoadMetric({
+        requestId: createDataLoadRequestId("getCronConfigSnapshot"),
+        resource: "getCronConfigSnapshot",
+        page: "cron",
+        instanceId: ua.instanceId,
+        instanceToken: ua.instanceToken,
+        source: "persisted",
+        phase: "success",
+        elapsedMs: 0,
+        cacheHit: true,
+      });
+    }
+    if (persistedRuntimeSnapshot) {
+      emitDataLoadMetric({
+        requestId: createDataLoadRequestId("getCronRuntimeSnapshot"),
+        resource: "getCronRuntimeSnapshot",
+        page: "cron",
+        instanceId: ua.instanceId,
+        instanceToken: ua.instanceToken,
+        source: "persisted",
+        phase: "success",
+        elapsedMs: 0,
+        cacheHit: true,
+      });
+    }
+    if (!liveReadsReady) return;
+    loadConfigSnapshot();
+    loadRuntimeSnapshot();
+    ua.listDiscordGuildChannels().then(setChannels).catch(() => {});
+    ua.refreshDiscordGuildChannels?.().then(setChannels).catch(() => {});
+    const iv = setInterval(() => {
+      loadRuntimeSnapshot();
+    }, 10_000);
+    return () => clearInterval(iv);
+  }, [liveReadsReady, loadConfigSnapshot, loadRuntimeSnapshot, persistedConfigSnapshot, persistedRuntimeSnapshot, ua]);
   useEffect(() => { if (expandedJob) loadRuns(expandedJob); }, [expandedJob, loadRuns]);
 
   const showErr = (e: unknown) => { const msg = e instanceof Error ? e.message : String(e); setLastError(msg); setLastSuccess(null); setTimeout(() => setLastError(null), 8000); };
@@ -164,9 +248,9 @@ export function Cron() {
 
   const doTrigger = (id: string) => {
     setTriggering(id);
-    ua.triggerCronJob(id).then(() => { loadJobs(); loadRuns(id); showOk(t("cron.triggerSuccess")); }).catch(showErr).finally(() => setTriggering(null));
+    ua.triggerCronJob(id).then(() => { loadRuntimeSnapshot(); loadRuns(id); showOk(t("cron.triggerSuccess")); }).catch(showErr).finally(() => setTriggering(null));
   };
-  const doDelete = async (id: string) => { try { await ua.deleteCronJob(id); loadJobs(); } catch (e) { showErr(e); } };
+  const doDelete = async (id: string) => { try { await ua.deleteCronJob(id); loadConfigSnapshot(); loadRuntimeSnapshot(); } catch (e) { showErr(e); } };
   const pollUntilAlive = () => {
     let tries = 0;
     const iv = setInterval(() => {
@@ -186,7 +270,7 @@ export function Cron() {
         pollUntilAlive();
         return; // wdAction cleared by pollUntilAlive
       }
-      loadWd();
+      loadRuntimeSnapshot();
     } catch (e) { showErr(e); } finally { if (!andStart) setWdAction(null); }
   };
   const doStart = async () => {
@@ -196,8 +280,8 @@ export function Cron() {
       pollUntilAlive(); // wdAction cleared when alive detected
     } catch (e) { showErr(e); setWdAction(null); }
   };
-  const doStop = async () => { setWdAction("stopping"); try { await ua.stopWatchdog(); loadWd(); } catch (e) { showErr(e); } finally { setWdAction(null); } };
-  const doUninstall = async () => { setWdAction("uninstalling"); try { await ua.uninstallWatchdog(); loadWd(); } catch (e) { showErr(e); } finally { setWdAction(null); } };
+  const doStop = async () => { setWdAction("stopping"); try { await ua.stopWatchdog(); loadRuntimeSnapshot(); } catch (e) { showErr(e); } finally { setWdAction(null); } };
+  const doUninstall = async () => { setWdAction("uninstalling"); try { await ua.uninstallWatchdog(); loadRuntimeSnapshot(); } catch (e) { showErr(e); } finally { setWdAction(null); } };
 
   // watchdog status
   let wdDot = "bg-muted-foreground/40", wdText = t("watchdog.notDeployed");
