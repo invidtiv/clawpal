@@ -740,6 +740,16 @@ export function useApi() {
         dispatch(api.restartGateway, api.remoteRestartGateway),
         ["getInstanceStatus", "getStatusExtra", "getInstanceRuntimeSnapshot", "getRescueBotStatus"],
       ),
+      diagnoseDoctorAssistant: dispatch(
+        api.diagnoseDoctorAssistant,
+        api.remoteDiagnoseDoctorAssistant,
+        "diagnoseDoctorAssistant",
+      ),
+      repairDoctorAssistant: dispatch(
+        api.repairDoctorAssistant,
+        api.remoteRepairDoctorAssistant,
+        "repairDoctorAssistant",
+      ),
       getRescueBotStatus: dispatchCached(
         "getRescueBotStatus",
         isRemote ? 8_000 : 5_000,

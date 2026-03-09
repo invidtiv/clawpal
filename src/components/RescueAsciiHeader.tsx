@@ -1,3 +1,5 @@
+import { useEffect, useState } from "react";
+
 import type { RescueBotRuntimeState } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -51,6 +53,7 @@ interface RescueAsciiHeaderProps {
   title: string;
   progress?: number;
   animateProgress?: boolean;
+  animateFace?: boolean;
 }
 
 function clampProgress(progress?: number): number {
@@ -81,10 +84,32 @@ export function RescueAsciiHeader({
   title,
   progress,
   animateProgress = false,
+  animateFace = false,
 }: RescueAsciiHeaderProps) {
   const clampedProgress = clampProgress(progress);
   const filledSlots = Math.round(clampedProgress * PROGRESS_SLOTS);
+  const [blinkClosed, setBlinkClosed] = useState(false);
   let progressIndex = 0;
+
+  useEffect(() => {
+    if (!animateFace) {
+      setBlinkClosed(false);
+      return;
+    }
+    let closedTimeout: number | null = null;
+    const interval = window.setInterval(() => {
+      setBlinkClosed(true);
+      closedTimeout = window.setTimeout(() => {
+        setBlinkClosed(false);
+      }, 180);
+    }, 2200);
+    return () => {
+      window.clearInterval(interval);
+      if (closedTimeout !== null) {
+        window.clearTimeout(closedTimeout);
+      }
+    };
+  }, [animateFace]);
 
   return (
     <div className="min-w-0 text-center">
@@ -125,7 +150,15 @@ export function RescueAsciiHeader({
                 )}
               >
                 {typedToken === "e" ? (
-                  state === "active" ? (
+                  blinkClosed ? (
+                    <span
+                      data-bot-eye-expression="blink"
+                      className={cn(
+                        "h-[2px] w-[10px] rounded-full sm:w-[11px]",
+                        eyeToneByState[state],
+                      )}
+                    />
+                  ) : state === "active" ? (
                     <span
                       data-bot-eye-expression="uparrow"
                       className="relative translate-y-[2px] h-[14px] w-[20px] sm:h-[16px] sm:w-[22px]"

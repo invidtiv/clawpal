@@ -11,9 +11,9 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { api } from "@/lib/api";
+import { getDoctorLogTransport, type DoctorLogSource } from "@/lib/doctor-logs";
 import { useApi } from "@/lib/use-api";
-
-export type DoctorLogSource = "clawpal" | "gateway" | "helper";
 
 interface DoctorLogsDialogProps {
   open: boolean;
@@ -51,9 +51,10 @@ export function DoctorLogsDialog({
   const fetchLog = useCallback((which: DoctorLogSource) => {
     setLogsLoading(true);
     setLogsError((prev) => ({ ...prev, [which]: "" }));
+    const transport = getDoctorLogTransport(which);
     const fn =
-      which === "clawpal"
-        ? ua.readAppLog
+      transport === "local"
+        ? api.readAppLog
         : which === "gateway"
           ? ua.readGatewayLog
           : ua.readHelperLog;

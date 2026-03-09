@@ -2,6 +2,7 @@ import { Suspense, lazy, startTransition, useCallback, useEffect, useMemo, useRe
 import { useTranslation } from "react-i18next";
 import { check } from "@tauri-apps/plugin-updater";
 import { getVersion } from "@tauri-apps/api/app";
+import { listen } from "@tauri-apps/api/event";
 import {
   HomeIcon,
   HashIcon,
@@ -358,6 +359,7 @@ export function App() {
   const [sshTransferStats, setSshTransferStats] = useState<SshTransferStats | null>(null);
   const [doctorNavPulse, setDoctorNavPulse] = useState(false);
   const sshHealthFailStreakRef = useRef<Record<string, number>>({});
+  const doctorSshAutohealMuteUntilRef = useRef<Record<string, number>>({});
   const legacyMigrationDoneRef = useRef(false);
   const passphraseResolveRef = useRef<((value: string | null) => void) | null>(null);
   const [passphraseHostLabel, setPassphraseHostLabel] = useState<string>("");
@@ -996,6 +998,11 @@ export function App() {
     };
     const markFailure = (rawError: unknown) => {
       if (cancelled) return;
+      const mutedUntil = doctorSshAutohealMuteUntilRef.current[hostId] || 0;
+      if (Date.now() < mutedUntil) {
+        logDevIgnoredError("ssh autoheal muted during doctor flow", rawError);
+        return;
+      }
       const streak = (sshHealthFailStreakRef.current[hostId] || 0) + 1;
       sshHealthFailStreakRef.current[hostId] = streak;
       // Avoid flipping UI to disconnected/error on a single transient failure.
@@ -1042,6 +1049,24 @@ export function App() {
       clearInterval(timer);
     };
   }, [activeInstance, isRemote, showToast, t]);
+
+  useEffect(() => {
+    if (!isRemote) return;
+    let disposed = false;
+    const currentHostId = activeInstance;
+    const unlistenPromise = listen<{ phase?: string }>("doctor:assistant-progress", (event) => {
+      if (disposed) return;
+      const phase = event.payload?.phase || "";
+      const cooldownMs = phase === "cleanup" ? 45_000 : 30_000;
+      doctorSshAutohealMuteUntilRef.current[currentHostId] = Date.now() + cooldownMs;
+    });
+    return () => {
+      disposed = true;
+      void unlistenPromise.then((unlisten) => unlisten()).catch((error) => {
+        logDevIgnoredError("doctor progress unlisten", error);
+      });
+    };
+  }, [activeInstance, isRemote]);
 
   // Clear cached channel data only when switching instance.
   // Avoid clearing on transient connection-status changes, which causes

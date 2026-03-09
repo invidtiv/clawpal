@@ -1,246 +1,114 @@
+import { listen } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
-  AlertTriangleIcon,
-  CheckCircle2Icon,
-  CircleDashedIcon,
   FileTextIcon,
   LoaderCircleIcon,
-  MoreHorizontalIcon,
-  PlayIcon,
-  PauseCircleIcon,
-  PauseIcon,
-  RefreshCwIcon,
   StethoscopeIcon,
-  Trash2Icon,
+  WrenchIcon,
 } from "lucide-react";
-import { toast } from "sonner";
 
 import { DoctorLogsDialog } from "@/components/DoctorLogsDialog";
 import { DoctorRecoveryOverview } from "@/components/DoctorRecoveryOverview";
+import { DoctorTempProviderDialog } from "@/components/DoctorTempProviderDialog";
 import { RescueAsciiHeader } from "@/components/RescueAsciiHeader";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
-import {
-  Popover,
-  PopoverContent,
-  PopoverTrigger,
-} from "@/components/ui/popover";
 import { useInstance } from "@/lib/instance-context";
 import {
   createDataLoadRequestId,
   emitDataLoadMetric,
 } from "@/lib/data-load-log";
-import {
-  buildStatusProgressLines,
-  buildCheckProgressLines,
-  buildFixProgressLines,
-  getPrimaryRescueAction,
-  getPrimaryRescueActionIcon,
-  getIdleRescueProgress,
-  isIconOnlyPrimaryRescueAction,
-  normalizeRescueManageResultAfterAction,
-  shouldRefreshStatusAfterAction,
-  shouldShowPrimaryRecovery,
-} from "@/lib/rescueBotUi";
 import type {
-  RescueBotAction,
-  RescueBotManageResult,
+  ModelProfile,
   RescueBotRuntimeState,
   RescuePrimaryDiagnosisResult,
   RescuePrimaryRepairResult,
 } from "@/lib/types";
 import { useApi } from "@/lib/use-api";
-import { readPersistedReadCache } from "@/lib/persistent-read-cache";
-import { buildInitialRescueState } from "./overview-loading";
 
-interface RescueUiState {
-  pendingAction: RescueBotAction | null;
-  statusChecking: boolean;
-  runtimeState: RescueBotRuntimeState;
-  configured: boolean;
-  active: boolean;
-  profile: string;
-  port: number | null;
-  error: string | null;
-}
-
-interface PrimaryRecoveryState {
-  checkLoading: boolean;
-  checkResult: RescuePrimaryDiagnosisResult | null;
-  checkError: string | null;
-  repairing: boolean;
-  repairingIssueId: string | null;
-  repairResult: RescuePrimaryRepairResult | null;
-  repairError: string | null;
+interface DoctorProgressPayload {
+  runId?: string;
+  phase?: string;
+  line?: string;
+  progress?: number;
+  attempt?: number;
+  resolvedIssueId?: string | null;
+  resolvedIssueLabel?: string | null;
 }
 
 interface DoctorProps {
 }
 
-const createInitialRescueUiState = (): RescueUiState => ({
-  pendingAction: null,
-  statusChecking: false,
-  runtimeState: "checking",
-  configured: false,
-  active: false,
-  profile: "rescue",
-  port: null,
-  error: null,
-});
-
-const createInitialPrimaryRecoveryState = (): PrimaryRecoveryState => ({
-  checkLoading: false,
-  checkResult: null,
-  checkError: null,
-  repairing: false,
-  repairingIssueId: null,
-  repairResult: null,
-  repairError: null,
-});
-
-function useRotatingLine(active: boolean, lines: string[]) {
-  const [index, setIndex] = useState(0);
-
-  useEffect(() => {
-    if (!active || lines.length === 0) {
-      setIndex(0);
-      return;
-    }
-    setIndex(0);
-    const timer = window.setInterval(() => {
-      setIndex((current) => (current + 1) % lines.length);
-    }, 1400);
-    return () => window.clearInterval(timer);
-  }, [active, lines]);
-
-  if (!active || lines.length === 0) {
-    return null;
-  }
-  return {
-    line: lines[index] ?? null,
-    index,
-    total: lines.length,
-  };
+function diagnosisNeedsRepair(result: RescuePrimaryDiagnosisResult | null): boolean {
+  if (!result) return false;
+  if (result.status === "broken" || result.status === "degraded") return true;
+  return result.sections.some(
+    (section) => section.status === "broken" || section.status === "degraded",
+  );
 }
 
-function RescueStatusIndicator({
-  state,
-  title,
-}: {
-  state: RescueBotRuntimeState;
-  title: string;
-}) {
-  if (state === "active") {
-    return (
-      <div
-        className="inline-flex size-9 items-center justify-center rounded-full border border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
-        title={title}
-        aria-label={title}
-      >
-        <CheckCircle2Icon className="size-4" />
-      </div>
-    );
-  }
-  if (state === "configured_inactive") {
-    return (
-      <div
-        className="inline-flex size-9 items-center justify-center rounded-full border border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300"
-        title={title}
-        aria-label={title}
-      >
-        <PauseCircleIcon className="size-4" />
-      </div>
-    );
-  }
-  if (state === "error") {
-    return (
-      <div
-        className="inline-flex size-9 items-center justify-center rounded-full border border-destructive/30 bg-destructive/10 text-destructive"
-        title={title}
-        aria-label={title}
-      >
-        <AlertTriangleIcon className="size-4" />
-      </div>
-    );
-  }
-  if (state === "checking") {
-    return (
-      <div
-        className="inline-flex size-9 items-center justify-center rounded-full border border-border/60 bg-muted/40 text-muted-foreground"
-        title={title}
-        aria-label={title}
-      >
-        <LoaderCircleIcon className="size-4 animate-spin" />
-      </div>
-    );
-  }
-  return (
-    <div
-      className="inline-flex size-9 items-center justify-center rounded-full border border-border/60 bg-muted/40 text-muted-foreground"
-      title={title}
-      aria-label={title}
-    >
-      <CircleDashedIcon className="size-4" />
-    </div>
-  );
+function resolveBotState(
+  busy: boolean,
+  diagnosis: RescuePrimaryDiagnosisResult | null,
+  error: string | null,
+): RescueBotRuntimeState {
+  if (busy) return "checking";
+  if (error) return "error";
+  if (!diagnosis) return "configured_inactive";
+  return diagnosisNeedsRepair(diagnosis) ? "error" : "active";
 }
 
 export function Doctor(_: DoctorProps) {
   const { t } = useTranslation();
   const ua = useApi();
   const { isRemote, isConnected } = useInstance();
-  const persistedRescueStatus = useMemo(
-    () => readPersistedReadCache<RescueBotManageResult>(
-      ua.instanceId,
-      "getRescueBotStatus",
-      [],
-    ) ?? null,
-    [ua.instanceId],
-  );
-  const initialRescueState = useMemo(
-    () => buildInitialRescueState(persistedRescueStatus),
-    [persistedRescueStatus],
-  );
 
   const [logsOpen, setLogsOpen] = useState(false);
   const [logsSource, setLogsSource] = useState<"clawpal" | "gateway" | "helper">("gateway");
+  const [diagnosisLoading, setDiagnosisLoading] = useState(false);
+  const [repairing, setRepairing] = useState(false);
+  const [diagnosis, setDiagnosis] = useState<RescuePrimaryDiagnosisResult | null>(null);
+  const [repairResult, setRepairResult] = useState<RescuePrimaryRepairResult | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [statusLine, setStatusLine] = useState<string | null>(null);
+  const [statusProgress, setStatusProgress] = useState(0.16);
+  const [tempProviderDialogOpen, setTempProviderDialogOpen] = useState(false);
+  const [tempProviderProfileId, setTempProviderProfileId] = useState<string | null>(null);
 
-  const [rescueState, setRescueState] = useState<RescueUiState>(() => {
-    const base = createInitialRescueUiState();
-    if (!initialRescueState) {
-      return base;
-    }
-    return {
-      ...base,
-      ...initialRescueState,
-    };
-  });
-  const [primaryState, setPrimaryState] = useState<PrimaryRecoveryState>(
-    createInitialPrimaryRecoveryState,
-  );
+  const busy = diagnosisLoading || repairing;
   const liveReadsReady = ua.instanceToken !== 0;
+  const needsRepair = diagnosisNeedsRepair(diagnosis);
+  const pendingTempProviderSetup =
+    repairResult?.status === "needsTempProviderSetup" ? repairResult.pendingAction ?? null : null;
+  const repairableCount = useMemo(() => {
+    const summaryCount = diagnosis?.summary.fixableIssueCount ?? 0;
+    const actionableCount = diagnosis?.issues.filter((issue) => issue.severity !== "info").length ?? 0;
+    return Math.max(summaryCount, actionableCount, needsRepair ? 1 : 0);
+  }, [diagnosis, needsRepair]);
+  const botState = resolveBotState(busy, diagnosis, error);
 
-  const updateRescueState = (patch: Partial<RescueUiState>) => {
-    setRescueState((prev) => ({ ...prev, ...patch }));
-  };
-
-  const updatePrimaryState = (patch: Partial<PrimaryRecoveryState>) => {
-    setPrimaryState((prev) => ({ ...prev, ...patch }));
-  };
-
-  const applyRescueResult = useCallback((result: RescueBotManageResult) => {
-    updateRescueState({
-      runtimeState: result.runtimeState,
-      configured: result.configured,
-      active: result.active,
-      profile: result.profile,
-      port: result.configured ? result.rescuePort : null,
-      error: null,
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | null = null;
+    void listen<DoctorProgressPayload>("doctor:assistant-progress", (event) => {
+      if (disposed) return;
+      const payload = event.payload;
+      setStatusLine(payload.line?.trim() || null);
+      if (typeof payload.progress === "number" && !Number.isNaN(payload.progress)) {
+        setStatusProgress(Math.max(0, Math.min(1, payload.progress)));
+      }
+    }).then((fn) => {
+      if (disposed) {
+        fn();
+        return;
+      }
+      unlisten = fn;
     });
-    if (!result.active) {
-      setPrimaryState(createInitialPrimaryRecoveryState());
-    }
+    return () => {
+      disposed = true;
+      if (unlisten) unlisten();
+    };
   }, []);
 
   const openLogs = useCallback((source: "clawpal" | "gateway" | "helper" = "gateway") => {
@@ -248,197 +116,22 @@ export function Doctor(_: DoctorProps) {
     setLogsOpen(true);
   }, []);
 
-  const refreshRescueStatus = useCallback(async (isCancelled?: () => boolean) => {
-    const cancelled = () => isCancelled?.() ?? false;
-    if (!liveReadsReady) return;
+  const runDiagnosis = useCallback(async () => {
+    if (!liveReadsReady || busy) return;
     if (isRemote && !isConnected) {
-      if (cancelled()) return;
-      updateRescueState({
-        statusChecking: false,
-        runtimeState: "error",
-        configured: false,
-        active: false,
-        port: null,
-        error: t("doctor.rescueBotConnectRequired"),
-      });
+      setError(t("doctor.rescueBotConnectRequired", { defaultValue: "Connect to SSH first." }));
       return;
     }
-
-    updateRescueState({ statusChecking: true, error: null });
-    const requestId = createDataLoadRequestId("getRescueBotStatus");
-    emitDataLoadMetric({
-      requestId,
-      resource: "getRescueBotStatus",
-      page: "doctor",
-      instanceId: ua.instanceId,
-      instanceToken: ua.instanceToken,
-      source: "runtime",
-      phase: "start",
-      elapsedMs: 0,
-      cacheHit: false,
-    });
+    setDiagnosisLoading(true);
+    setRepairResult(null);
+    setError(null);
+    setStatusLine(t("doctor.analyzing", { defaultValue: "Diagnosing..." }));
+    setStatusProgress(0.08);
+    const requestId = createDataLoadRequestId("diagnoseDoctorAssistant");
     const startedAt = Date.now();
-    try {
-      const result = await ua.getRescueBotStatus();
-      if (cancelled()) return;
-      applyRescueResult(result);
-      emitDataLoadMetric({
-        requestId,
-        resource: "getRescueBotStatus",
-        page: "doctor",
-        instanceId: ua.instanceId,
-        instanceToken: ua.instanceToken,
-        source: "runtime",
-        phase: "success",
-        elapsedMs: Date.now() - startedAt,
-        cacheHit: false,
-      });
-    } catch (error) {
-      const text = error instanceof Error ? error.message : String(error);
-      if (cancelled()) return;
-      emitDataLoadMetric({
-        requestId,
-        resource: "getRescueBotStatus",
-        page: "doctor",
-        instanceId: ua.instanceId,
-        instanceToken: ua.instanceToken,
-        source: "runtime",
-        phase: "error",
-        elapsedMs: Date.now() - startedAt,
-        cacheHit: false,
-        errorSummary: text,
-      });
-      updateRescueState({
-        runtimeState: "error",
-        configured: false,
-        active: false,
-        port: null,
-        error: t("doctor.rescueBotStatusCheckFailed", {
-          defaultValue: "Failed to check Rescue Bot: {{error}}",
-          error: text,
-        }),
-      });
-    } finally {
-      if (cancelled()) return;
-      updateRescueState({ statusChecking: false });
-    }
-  }, [applyRescueResult, isConnected, isRemote, liveReadsReady, t, ua]);
-
-  useEffect(() => {
-    if (persistedRescueStatus) {
-      emitDataLoadMetric({
-        requestId: createDataLoadRequestId("getRescueBotStatus"),
-        resource: "getRescueBotStatus",
-        page: "doctor",
-        instanceId: ua.instanceId,
-        instanceToken: ua.instanceToken,
-        source: "persisted",
-        phase: "success",
-        elapsedMs: 0,
-        cacheHit: true,
-      });
-    }
-  }, [persistedRescueStatus, ua.instanceId, ua.instanceToken, ua.instanceViewToken]);
-
-  const runRescueAction = async (action: RescueBotAction) => {
-    if (isRemote && !isConnected) {
-      updateRescueState({ runtimeState: "error", error: t("doctor.rescueBotConnectRequired") });
-      return;
-    }
-
-    updateRescueState({ pendingAction: action, error: null });
-    try {
-      const result = await ua.manageRescueBot(action);
-      applyRescueResult(normalizeRescueManageResultAfterAction(action, result));
-      const successText = (() => {
-        switch (action) {
-          case "set":
-            return t("doctor.rescueBotSetSuccess", {
-              defaultValue: "Recovery helper is ready.",
-            });
-          case "activate":
-            return t("doctor.rescueBotActivateSuccess", {
-              defaultValue: "Recovery helper is enabled.",
-            });
-          case "deactivate":
-            return t("doctor.rescueBotDeactivateSuccess", {
-              defaultValue: "Recovery helper is paused.",
-            });
-          case "unset":
-            return t("doctor.rescueBotUnsetSuccess", {
-              defaultValue: "Recovery helper setup was removed.",
-            });
-          default:
-            return null;
-        }
-      })();
-      if (shouldRefreshStatusAfterAction(action)) {
-        updateRescueState({ statusChecking: true });
-        try {
-          const statusResult = await ua.getRescueBotStatus();
-          applyRescueResult(statusResult);
-        } catch (error) {
-          const text = error instanceof Error ? error.message : String(error);
-          updateRescueState({
-            runtimeState: "error",
-            error: t("doctor.rescueBotStatusCheckFailed", {
-              defaultValue: "Failed to refresh helper status: {{error}}",
-              error: text,
-            }),
-          });
-          toast.error(
-            t("doctor.rescueBotStatusCheckFailed", {
-              defaultValue: "Failed to refresh helper status: {{error}}",
-              error: text,
-            }),
-          );
-          return;
-        } finally {
-          updateRescueState({ statusChecking: false });
-        }
-      }
-      if (successText) {
-        toast.success(successText);
-      }
-    } catch (error) {
-      const text = error instanceof Error ? error.message : String(error);
-      updateRescueState({
-        runtimeState: "error",
-        error: t("doctor.rescueBotActionFailed", {
-          defaultValue: "Rescue Bot action failed: {{error}}",
-          error: text,
-        }),
-      });
-      toast.error(
-        t("doctor.rescueBotActionFailed", {
-          defaultValue: "Rescue Bot action failed: {{error}}",
-          error: text,
-        }),
-      );
-    } finally {
-      updateRescueState({ pendingAction: null });
-    }
-  };
-
-  const handleCheckPrimaryViaRescue = async () => {
-    if (!liveReadsReady) return;
-    if (isRemote && !isConnected) {
-      updatePrimaryState({ checkError: t("doctor.rescueBotConnectRequired") });
-      return;
-    }
-    updatePrimaryState({
-      checkLoading: true,
-      checkResult: null,
-      checkError: null,
-      repairing: false,
-      repairingIssueId: null,
-      repairResult: null,
-      repairError: null,
-    });
-    const requestId = createDataLoadRequestId("diagnosePrimaryViaRescue");
     emitDataLoadMetric({
       requestId,
-      resource: "diagnosePrimaryViaRescue",
+      resource: "diagnoseDoctorAssistant",
       page: "doctor",
       instanceId: ua.instanceId,
       instanceToken: ua.instanceToken,
@@ -447,13 +140,18 @@ export function Doctor(_: DoctorProps) {
       elapsedMs: 0,
       cacheHit: false,
     });
-    const startedAt = Date.now();
     try {
-      const result = await ua.diagnosePrimaryViaRescue("primary", rescueState.profile);
-      updatePrimaryState({ checkResult: result });
+      const result = await ua.diagnoseDoctorAssistant();
+      setDiagnosis(result);
+      setStatusProgress(1);
+      setStatusLine(
+        diagnosisNeedsRepair(result)
+          ? result.summary.recommendedAction
+          : t("doctor.primaryStatusHealthy", { defaultValue: "Healthy" }),
+      );
       emitDataLoadMetric({
         requestId,
-        resource: "diagnosePrimaryViaRescue",
+        resource: "diagnoseDoctorAssistant",
         page: "doctor",
         instanceId: ua.instanceId,
         instanceToken: ua.instanceToken,
@@ -462,11 +160,14 @@ export function Doctor(_: DoctorProps) {
         elapsedMs: Date.now() - startedAt,
         cacheHit: false,
       });
-    } catch (error) {
-      const text = error instanceof Error ? error.message : String(error);
+    } catch (cause) {
+      const text = cause instanceof Error ? cause.message : String(cause);
+      setError(text);
+      setStatusProgress(0.84);
+      setStatusLine(text);
       emitDataLoadMetric({
         requestId,
-        resource: "diagnosePrimaryViaRescue",
+        resource: "diagnoseDoctorAssistant",
         page: "doctor",
         instanceId: ua.instanceId,
         instanceToken: ua.instanceToken,
@@ -476,37 +177,31 @@ export function Doctor(_: DoctorProps) {
         cacheHit: false,
         errorSummary: text,
       });
-      updatePrimaryState({
-        checkError: t("doctor.primaryCheckFailed", {
-          defaultValue: "Primary recovery check failed: {{error}}",
-          error: text,
-        }),
-      });
     } finally {
-      updatePrimaryState({ checkLoading: false });
+      setDiagnosisLoading(false);
     }
-  };
+  }, [busy, isConnected, isRemote, liveReadsReady, t, ua]);
 
-  const handleRepairPrimaryViaRescue = async (issueIds?: string[]) => {
-    if (!liveReadsReady) return;
+  const runRepair = useCallback(async (overrideTempProviderProfileId?: string) => {
+    if (!liveReadsReady || busy || !diagnosis) return;
     if (isRemote && !isConnected) {
-      updatePrimaryState({ repairError: t("doctor.rescueBotConnectRequired") });
+      setError(t("doctor.rescueBotConnectRequired", { defaultValue: "Connect to SSH first." }));
       return;
     }
-    const selectedIssueIds =
-      issueIds
-      ?? primaryState.checkResult?.summary.selectedFixIssueIds
-      ?? [];
-    updatePrimaryState({
-      repairing: true,
-      repairingIssueId: issueIds?.length === 1 ? issueIds[0] : null,
-      repairError: null,
-      repairResult: null,
-    });
-    const requestId = createDataLoadRequestId("repairPrimaryViaRescue");
+    setRepairing(true);
+    setError(null);
+    setStatusLine(
+      t("doctor.fixSafeIssues", {
+        count: repairableCount,
+        defaultValue: repairableCount === 1 ? "Fixing 1 issue" : `Fixing ${repairableCount} issues`,
+      }),
+    );
+    setStatusProgress(0.18);
+    const requestId = createDataLoadRequestId("repairDoctorAssistant");
+    const startedAt = Date.now();
     emitDataLoadMetric({
       requestId,
-      resource: "repairPrimaryViaRescue",
+      resource: "repairDoctorAssistant",
       page: "doctor",
       instanceId: ua.instanceId,
       instanceToken: ua.instanceToken,
@@ -515,27 +210,35 @@ export function Doctor(_: DoctorProps) {
       elapsedMs: 0,
       cacheHit: false,
     });
-    const startedAt = Date.now();
     try {
-      const result = await ua.repairPrimaryViaRescue(
-        "primary",
-        rescueState.profile,
-        selectedIssueIds,
+      const result = await ua.repairDoctorAssistant(
+        overrideTempProviderProfileId ?? tempProviderProfileId ?? undefined,
+        diagnosis,
       );
-      updatePrimaryState({
-        repairResult: result,
-        checkResult: result.after,
-        checkError: null,
-      });
-      toast.success(
-        t("doctor.primaryRepairSuccess", {
-          defaultValue: "Applied {{count}} fix(es).",
-          count: result.appliedIssueIds.length,
-        }),
+      setRepairResult(result);
+      setDiagnosis(result.after);
+      if (result.pendingAction?.tempProviderProfileId) {
+        setTempProviderProfileId(result.pendingAction.tempProviderProfileId);
+      } else if (result.status === "completed" && !diagnosisNeedsRepair(result.after)) {
+        setTempProviderProfileId(null);
+      }
+      setStatusProgress(1);
+      setStatusLine(
+        result.status === "needsTempProviderSetup" && result.pendingAction
+          ? result.pendingAction.reason
+          : diagnosisNeedsRepair(result.after)
+            ? result.after.summary.recommendedAction
+          : t("doctor.primaryRepairSuccess", {
+              count: result.appliedIssueIds.length,
+              defaultValue:
+                result.appliedIssueIds.length === 1
+                  ? "Applied 1 fix."
+                  : `Applied ${result.appliedIssueIds.length} fixes.`,
+            }),
       );
       emitDataLoadMetric({
         requestId,
-        resource: "repairPrimaryViaRescue",
+        resource: "repairDoctorAssistant",
         page: "doctor",
         instanceId: ua.instanceId,
         instanceToken: ua.instanceToken,
@@ -544,11 +247,14 @@ export function Doctor(_: DoctorProps) {
         elapsedMs: Date.now() - startedAt,
         cacheHit: false,
       });
-    } catch (error) {
-      const text = error instanceof Error ? error.message : String(error);
+    } catch (cause) {
+      const text = cause instanceof Error ? cause.message : String(cause);
+      setError(text);
+      setStatusProgress(0.9);
+      setStatusLine(text);
       emitDataLoadMetric({
         requestId,
-        resource: "repairPrimaryViaRescue",
+        resource: "repairDoctorAssistant",
         page: "doctor",
         instanceId: ua.instanceId,
         instanceToken: ua.instanceToken,
@@ -558,98 +264,75 @@ export function Doctor(_: DoctorProps) {
         cacheHit: false,
         errorSummary: text,
       });
-      updatePrimaryState({
-        repairResult: null,
-        repairError: t("doctor.primaryRepairFailed", {
-          defaultValue: "Primary repair failed: {{error}}",
-          error: text,
-        }),
-      });
     } finally {
-      updatePrimaryState({
-        repairing: false,
-        repairingIssueId: null,
+      setRepairing(false);
+    }
+  }, [busy, diagnosis, isConnected, isRemote, liveReadsReady, repairableCount, t, tempProviderProfileId, ua]);
+
+  const buttonLabel = useMemo(() => {
+    if (diagnosisLoading) {
+      return t("doctor.analyzing", { defaultValue: "Diagnosing..." });
+    }
+    if (repairing) {
+      return t("doctor.repairing", { defaultValue: "Repairing..." });
+    }
+    if (pendingTempProviderSetup) {
+      return t(
+        tempProviderProfileId ? "doctor.editTempProvider" : "doctor.configureTempProvider",
+        {
+          defaultValue: tempProviderProfileId
+            ? "Edit temp gateway provider"
+            : "Configure temp gateway provider",
+        },
+      );
+    }
+    if (needsRepair) {
+      return t("doctor.fixSafeIssues", {
+        count: repairableCount,
+        defaultValue: repairableCount === 1 ? "Fix 1 issue" : `Fix ${repairableCount} issues`,
       });
     }
-  };
+    return t("doctor.diagnose", { defaultValue: "Diagnose" });
+  }, [diagnosisLoading, needsRepair, pendingTempProviderSetup, repairableCount, repairing, t, tempProviderProfileId]);
 
-  useEffect(() => {
-    let cancelled = false;
-    void refreshRescueStatus(() => cancelled);
-    return () => {
-      cancelled = true;
-    };
-  }, [isConnected, isRemote, refreshRescueStatus]);
+  const buttonIcon = diagnosisLoading || repairing
+    ? <LoaderCircleIcon className="size-3.5 animate-spin" />
+    : pendingTempProviderSetup
+      ? <WrenchIcon className="size-3.5" />
+    : needsRepair
+      ? <WrenchIcon className="size-3.5" />
+      : <StethoscopeIcon className="size-3.5" />;
 
-  const visibleRuntimeState: RescueBotRuntimeState =
-    rescueState.pendingAction || rescueState.statusChecking
-      ? "checking"
-      : rescueState.runtimeState;
-
-  const primaryAction = getPrimaryRescueAction(rescueState.runtimeState);
-  const primaryActionLabel = (() => {
-    if (primaryAction === "activate") {
-      return t("doctor.rescueBotActivate", { defaultValue: "Play" });
-    }
-    return t("doctor.rescueBotDeactivate", { defaultValue: "Pause" });
-  })();
-  const primaryActionBusyLabel = (() => {
-    if (primaryAction === "activate") {
-      return t("doctor.activatingRescueBot", { defaultValue: "Starting..." });
-    }
-    return t("doctor.deactivatingRescueBot", { defaultValue: "Pausing..." });
-  })();
-  const statusLabel = (() => {
-    switch (visibleRuntimeState) {
-      case "active":
-        return t("doctor.rescueBotStateActive", { defaultValue: "Helper is enabled" });
-      case "configured_inactive":
-        return t("doctor.rescueBotStateInactive", {
-          defaultValue: "Helper is paused",
-        });
-      case "checking":
-        return t("doctor.rescueBotChecking", { defaultValue: "Checking helper status" });
-      case "error":
-        return t("doctor.rescueBotStateError", {
-          defaultValue: "Helper needs attention",
-        });
-      default:
-        return t("doctor.rescueBotStateUnset", {
-          defaultValue: "Helper is not set up",
-        });
-    }
-  })();
-
-  const statusProgress = useRotatingLine(
-    rescueState.pendingAction !== null || rescueState.statusChecking,
-    useMemo(() => buildStatusProgressLines(), []),
+  const actionDisabled = busy || (isRemote && !isConnected);
+  const helperText = statusLine ?? (
+    pendingTempProviderSetup?.reason
+    ?? (needsRepair
+      ? diagnosis?.summary.recommendedAction ?? null
+      : t("doctor.primaryRecoveryHint", {
+          defaultValue: "Run OpenClaw Doctor first, then merge the current checklist into one report.",
+        }))
   );
-  const checkProgress = useRotatingLine(
-    primaryState.checkLoading,
-    useMemo(() => buildCheckProgressLines(), []),
-  );
-  const fixProgress = useRotatingLine(
-    primaryState.repairing,
-    useMemo(
-      () => buildFixProgressLines(primaryState.checkResult?.sections ?? []),
-      [primaryState.checkResult],
-    ),
-  );
-  const rescueHeaderProgress =
-    fixProgress
-    ?? checkProgress
-    ?? statusProgress;
-  const rescueHeaderProgressValue = rescueHeaderProgress
-    ? (rescueHeaderProgress.index + 1) / rescueHeaderProgress.total
-    : getIdleRescueProgress(visibleRuntimeState);
 
-  const primaryRecoveryVisible = shouldShowPrimaryRecovery(rescueState.runtimeState);
-  const iconOnlyPrimaryAction = isIconOnlyPrimaryRescueAction(rescueState.runtimeState);
-  const primaryActionIcon = getPrimaryRescueActionIcon(rescueState.runtimeState);
-  const actionsDisabled =
-    rescueState.statusChecking
-    || rescueState.pendingAction !== null
-    || (isRemote && !isConnected);
+  const handlePrimaryAction = useCallback(() => {
+    if (pendingTempProviderSetup) {
+      setTempProviderDialogOpen(true);
+      return;
+    }
+    void (needsRepair ? runRepair() : runDiagnosis());
+  }, [needsRepair, pendingTempProviderSetup, runDiagnosis, runRepair]);
+
+  const handleTempProviderSaved = useCallback((profile: ModelProfile) => {
+    setTempProviderProfileId(profile.id);
+    setTempProviderDialogOpen(false);
+    setError(null);
+    setRepairResult(null);
+    setStatusLine(
+      t("doctor.tempProviderSaved", {
+        defaultValue: "Temporary gateway provider saved. Resuming repair...",
+      }),
+    );
+    void runRepair(profile.id);
+  }, [runRepair, t]);
 
   return (
     <section>
@@ -658,80 +341,23 @@ export function Doctor(_: DoctorProps) {
         <CardHeader className="pb-0">
           <div className="flex flex-col items-center gap-3 text-center">
             <RescueAsciiHeader
-              state={visibleRuntimeState}
-              title={statusLabel}
-              progress={rescueHeaderProgressValue}
-              animateProgress={Boolean(rescueHeaderProgress)}
+              state={botState}
+              title={buttonLabel}
+              progress={busy ? statusProgress : diagnosis ? (needsRepair ? 0.86 : 1) : 0.16}
+              animateProgress={busy}
+              animateFace={busy}
             />
             <div className="flex items-center justify-center gap-2">
-              {iconOnlyPrimaryAction ? (
-                <Button
-                  variant="ghost"
-                  size="icon-sm"
-                  onClick={() => void runRescueAction(primaryAction)}
-                  disabled={actionsDisabled}
-                  aria-label={rescueState.pendingAction === primaryAction ? primaryActionBusyLabel : primaryActionLabel}
-                  title={rescueState.pendingAction === primaryAction ? primaryActionBusyLabel : primaryActionLabel}
-                  className={
-                    primaryAction === "deactivate"
-                      ? "text-muted-foreground hover:bg-destructive/10 hover:text-destructive transition-colors"
-                      : "text-muted-foreground hover:bg-emerald-500/10 hover:text-emerald-700 dark:hover:text-emerald-300 transition-colors"
-                  }
-                >
-                  {rescueState.pendingAction === primaryAction || rescueState.statusChecking ? (
-                    <LoaderCircleIcon className="size-3.5 animate-spin" />
-                  ) : primaryActionIcon === "pause" ? (
-                    <PauseIcon className="size-3.5" />
-                  ) : (
-                    <PlayIcon className="size-3.5" />
-                  )}
-                </Button>
-              ) : null}
-              <Popover>
-                <PopoverTrigger asChild>
-                  <Button
-                    variant="ghost"
-                    size="icon-sm"
-                    disabled={actionsDisabled}
-                    aria-label={t("doctor.rescueBotMore", {
-                      defaultValue: "More options",
-                    })}
-                    title={t("doctor.rescueBotMore", {
-                      defaultValue: "More options",
-                    })}
-                  >
-                    <MoreHorizontalIcon className="size-3.5" />
-                  </Button>
-                </PopoverTrigger>
-                <PopoverContent align="end" className="w-56 p-3">
-                  <div className="grid gap-2">
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      className="justify-start"
-                      onClick={() => {
-                        void refreshRescueStatus();
-                      }}
-                      disabled={actionsDisabled}
-                    >
-                      <RefreshCwIcon className="size-3.5" />
-                      {t("doctor.refresh", { defaultValue: "Check status" })}
-                    </Button>
-                    {rescueState.configured ? (
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        className="justify-start text-muted-foreground hover:text-destructive"
-                        onClick={() => void runRescueAction("unset")}
-                        disabled={actionsDisabled}
-                      >
-                        <Trash2Icon className="size-3.5" />
-                        {t("doctor.unset", { defaultValue: "Remove setup" })}
-                      </Button>
-                    ) : null}
-                  </div>
-                </PopoverContent>
-              </Popover>
+              <Button
+                variant={pendingTempProviderSetup || needsRepair ? "default" : "outline"}
+                size="sm"
+                onClick={handlePrimaryAction}
+                disabled={actionDisabled}
+                className="gap-2"
+              >
+                {buttonIcon}
+                <span>{buttonLabel}</span>
+              </Button>
               <Button
                 variant="ghost"
                 size="icon-sm"
@@ -743,103 +369,65 @@ export function Doctor(_: DoctorProps) {
                 <FileTextIcon className="size-3.5" />
               </Button>
             </div>
-            <div className="max-w-md text-sm text-muted-foreground">
-              {t("doctor.rescueBotHint", {
-                defaultValue:
-                  "Safe checks and guided fixes before touching your main gateway.",
-              })}
+            <div className="h-5 max-w-md overflow-hidden text-sm text-muted-foreground">
+              {helperText ? (
+                <span key={helperText} className="inline-block whitespace-nowrap transition-opacity duration-300 animate-pulse">
+                  {helperText}
+                </span>
+              ) : null}
             </div>
           </div>
         </CardHeader>
         <CardContent className="space-y-4">
-          {rescueState.error ? (
+          {error ? (
             <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
-              <div>{rescueState.error}</div>
+              <div>{error}</div>
               <div className="mt-2">
                 <Button variant="outline" size="sm" onClick={() => openLogs("gateway")}>
-                  {t("doctor.viewGatewayLogs", {
-                    defaultValue: "View Gateway Logs",
-                  })}
+                  {t("doctor.viewGatewayLogs", { defaultValue: "View Gateway Logs" })}
                 </Button>
               </div>
             </div>
           ) : null}
 
-          {primaryRecoveryVisible ? (
-            <div className="border-t border-border/50 pt-4">
-              <div className="flex items-center justify-between gap-3 flex-wrap">
-                <div>
-                  <h3 className="text-sm font-medium text-foreground/90">
-                    {t("doctor.primaryRecoveryTitle", {
-                      defaultValue: "Check Primary Agent",
-                    })}
-                  </h3>
-                  <p className="mt-1 text-sm text-muted-foreground">
-                    {t("doctor.primaryRecoveryHint", {
-                      defaultValue:
-                        "Run a structured recovery check across gateway, models, tools, agents, and channels.",
-                    })}
-                  </p>
-                </div>
-                <Button
-                  variant="ghost"
-                  size="icon-sm"
-                  onClick={handleCheckPrimaryViaRescue}
-                  disabled={primaryState.checkLoading || primaryState.repairing || (isRemote && !isConnected)}
-                  aria-label={t("doctor.primaryCheckNow", { defaultValue: "Check Primary Agent" })}
-                  title={t("doctor.primaryCheckNow", { defaultValue: "Check Primary Agent" })}
-                  className="text-muted-foreground hover:text-foreground"
-                >
-                  {primaryState.checkLoading
-                    ? <LoaderCircleIcon className="size-3.5 animate-spin" />
-                    : <StethoscopeIcon className="size-3.5" />}
+          {pendingTempProviderSetup ? (
+            <div className="rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-3 text-sm">
+              <div className="font-medium text-foreground">
+                {t("doctor.tempProviderActionRequired", {
+                  defaultValue: "Temporary gateway needs a provider before repair can continue.",
+                })}
+              </div>
+              <div className="mt-1 text-muted-foreground">
+                {pendingTempProviderSetup.reason}
+              </div>
+              <div className="mt-3">
+                <Button size="sm" onClick={() => setTempProviderDialogOpen(true)}>
+                  {t(
+                    tempProviderProfileId ? "doctor.editTempProvider" : "doctor.configureTempProvider",
+                    {
+                      defaultValue: tempProviderProfileId
+                        ? "Edit temp gateway provider"
+                        : "Configure temp gateway provider",
+                    },
+                  )}
                 </Button>
               </div>
-
-              {primaryState.checkLoading && checkProgress?.line ? (
-                <div className="mt-4 h-5 overflow-hidden text-sm text-muted-foreground">
-                  <span
-                    key={checkProgress.line}
-                    className="inline-block whitespace-nowrap transition-opacity duration-300 animate-pulse"
-                  >
-                    {checkProgress.line}
-                  </span>
-                </div>
-              ) : null}
-
-              {primaryState.checkError ? (
-                <div className="mt-3 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
-                  <div>{primaryState.checkError}</div>
-                  <div className="mt-2">
-                    <Button variant="outline" size="sm" onClick={() => openLogs("gateway")}>
-                      {t("doctor.viewGatewayLogs", {
-                        defaultValue: "View Gateway Logs",
-                      })}
-                    </Button>
-                  </div>
-                </div>
-              ) : null}
-
-              {primaryState.checkResult ? (
-                <DoctorRecoveryOverview
-                  diagnosis={primaryState.checkResult}
-                  checkLoading={primaryState.checkLoading}
-                  repairing={primaryState.repairing}
-                  progressLine={fixProgress?.line ?? null}
-                  repairResult={primaryState.repairResult}
-                  repairError={primaryState.repairError}
-                  onRepairAll={() => void handleRepairPrimaryViaRescue()}
-                  onRepairIssue={(issueId) => void handleRepairPrimaryViaRescue([issueId])}
-                />
-              ) : null}
             </div>
-          ) : (
-            <div className="rounded-md border border-border/50 bg-muted/20 px-3 py-3 text-sm text-muted-foreground">
-              {t("doctor.primaryRecoveryActivateHint", {
-                defaultValue: "Enable the helper to unlock the primary recovery check.",
-              })}
-            </div>
-          )}
+          ) : null}
+
+          {diagnosis ? (
+            <DoctorRecoveryOverview
+              diagnosis={diagnosis}
+              checkLoading={diagnosisLoading}
+              repairing={repairing}
+              progressLine={null}
+              repairResult={repairResult}
+              repairError={null}
+              onRepairAll={() => void runRepair()}
+              onRepairIssue={(_issueId) => void runRepair()}
+              showRepairActions={false}
+            />
+          ) : null}
         </CardContent>
       </Card>
 
@@ -848,6 +436,12 @@ export function Doctor(_: DoctorProps) {
         onOpenChange={setLogsOpen}
         source={logsSource}
         onSourceChange={setLogsSource}
+      />
+      <DoctorTempProviderDialog
+        open={tempProviderDialogOpen}
+        onOpenChange={setTempProviderDialogOpen}
+        initialProfileId={tempProviderProfileId}
+        onSaved={handleTempProviderSaved}
       />
     </section>
   );

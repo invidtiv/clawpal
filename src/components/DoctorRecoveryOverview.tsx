@@ -1,4 +1,5 @@
 import { WrenchIcon } from "lucide-react";
+import { useMemo } from "react";
 import { useTranslation } from "react-i18next";
 
 import type {
@@ -20,6 +21,7 @@ interface DoctorRecoveryOverviewProps {
   repairError: string | null;
   onRepairAll: () => void;
   onRepairIssue: (issueId: string) => void;
+  showRepairActions?: boolean;
 }
 
 function hasDocGuidance(target: {
@@ -31,7 +33,6 @@ function hasDocGuidance(target: {
   return !!(
     target.rootCauseHypotheses?.length
     || target.fixSteps?.length
-    || target.citations?.length
     || target.versionAwareness
   );
 }
@@ -55,6 +56,32 @@ function statusBadgeClass(
   return "";
 }
 
+function shouldShowSectionStatusBadge(
+  summaryStatus: RescuePrimaryDiagnosisResult["status"],
+  sectionStatus: RescuePrimaryDiagnosisResult["status"],
+) {
+  if (sectionStatus === "healthy" || sectionStatus === "inactive") {
+    return true;
+  }
+  return sectionStatus !== summaryStatus;
+}
+
+function shouldShowItemStatusBadge(
+  sectionStatus: RescuePrimaryDiagnosisResult["status"],
+  itemStatus: RescuePrimarySectionItem["status"],
+) {
+  if (itemStatus === "ok" || itemStatus === "info") {
+    return true;
+  }
+  if (sectionStatus === "broken" && itemStatus === "error") {
+    return false;
+  }
+  if (sectionStatus === "degraded" && itemStatus === "warn") {
+    return false;
+  }
+  return true;
+}
+
 export function DoctorRecoveryOverview({
   diagnosis,
   checkLoading,
@@ -64,13 +91,46 @@ export function DoctorRecoveryOverview({
   repairError,
   onRepairAll,
   onRepairIssue,
+  showRepairActions = true,
 }: DoctorRecoveryOverviewProps) {
   const { t } = useTranslation();
   const fixableCount = diagnosis.summary.fixableIssueCount;
-  const fixText = t("doctor.fixSafeIssues", {
-    count: fixableCount,
-    defaultValue: fixableCount === 1 ? "Fix 1 issue" : `Fix ${fixableCount} issues`,
-  });
+  const isOptimizeIntent = diagnosis.summary.status === "degraded";
+  const fixText = isOptimizeIntent
+    ? t(
+      fixableCount === 1 ? "doctor.optimizeOneIssue" : "doctor.optimizeManyIssues",
+      {
+        count: fixableCount,
+        defaultValue: fixableCount === 1 ? "Optimize 1 issue" : `Optimize ${fixableCount} issues`,
+      },
+    )
+    : t("doctor.fixSafeIssues", {
+      count: fixableCount,
+      defaultValue: fixableCount === 1 ? "Fix 1 issue" : `Fix ${fixableCount} issues`,
+    });
+  const summaryHypothesis = diagnosis.summary.rootCauseHypotheses?.[0] ?? null;
+  const summaryFixSteps = useMemo(
+    () => (diagnosis.summary.fixSteps ?? []).slice(0, 3),
+    [diagnosis.summary.fixSteps],
+  );
+  const visibleSections = useMemo(
+    () => diagnosis.sections
+      .map((section) => {
+        if (section.key !== "gateway") {
+          return section;
+        }
+        return {
+          ...section,
+          items: section.items.filter((item) => item.issueId !== "primary.gateway.unhealthy"),
+        };
+      })
+      .filter((section) => section.items.length > 0),
+    [diagnosis.sections],
+  );
+  const affectedSections = useMemo(
+    () => visibleSections.filter((section) => section.status !== "healthy"),
+    [visibleSections],
+  );
   const translateStatus = (
     status: RescuePrimaryDiagnosisResult["status"] | RescuePrimarySectionItem["status"],
   ) => {
@@ -92,7 +152,7 @@ export function DoctorRecoveryOverview({
   return (
     <div className="mt-4 space-y-4">
       <Card className="border-border/60 bg-muted/20">
-        <CardHeader className="pb-3">
+        <CardHeader className={cn("pb-3", !showRepairActions && "pb-2")}>
           <div className="flex items-start justify-between gap-3">
             <div className="space-y-1">
               <CardTitle className="text-base">{diagnosis.summary.headline}</CardTitle>
@@ -108,16 +168,30 @@ export function DoctorRecoveryOverview({
             </Badge>
           </div>
         </CardHeader>
-        <CardContent className="space-y-3">
-          <div className="flex items-center gap-2">
-            <Button
-              size="sm"
-              onClick={onRepairAll}
-              disabled={checkLoading || repairing || fixableCount === 0}
-            >
-              <WrenchIcon className="mr-1.5 size-3.5" />
-              {fixText}
-            </Button>
+        <CardContent className={cn("space-y-3", !showRepairActions && "space-y-2 pt-0")}>
+          <div className={cn("flex flex-wrap items-center gap-2", !showRepairActions && "justify-between gap-3")}>
+            {showRepairActions ? (
+              <Button
+                size="sm"
+                onClick={onRepairAll}
+                disabled={checkLoading || repairing || fixableCount === 0}
+              >
+                <WrenchIcon className="mr-1.5 size-3.5" />
+                {fixText}
+              </Button>
+            ) : null}
+            {!showRepairActions && affectedSections.length > 0 ? (
+              <div className="flex flex-wrap gap-2 text-xs text-muted-foreground">
+                {affectedSections.map((section) => (
+                  <span
+                    key={section.key}
+                    className="rounded-full border border-border/60 bg-background/80 px-2 py-1"
+                  >
+                    {section.title}
+                  </span>
+                ))}
+              </div>
+            ) : null}
           </div>
           {progressLine ? (
             <div className="h-5 overflow-hidden text-sm text-muted-foreground">
@@ -131,30 +205,46 @@ export function DoctorRecoveryOverview({
           ) : null}
           {repairResult ? (
             <div className="text-sm text-muted-foreground">
-              {t("doctor.repairSummaryInline", {
-                defaultValue:
-                  "Fixed {{applied}} issue(s), skipped {{skipped}}, failed {{failed}}.",
+              {t(
+                isOptimizeIntent ? "doctor.optimizeSummaryInline" : "doctor.repairSummaryInline",
+                {
+                  defaultValue: isOptimizeIntent
+                    ? "Optimized {{applied}} issue(s), skipped {{skipped}}, failed {{failed}}."
+                    : "Fixed {{applied}} issue(s), skipped {{skipped}}, failed {{failed}}.",
                 applied: repairResult.appliedIssueIds.length,
                 skipped: repairResult.skippedIssueIds.length,
                 failed: repairResult.failedIssueIds.length,
-              })}
+                },
+              )}
             </div>
           ) : null}
           {repairError ? (
             <div className="text-sm text-destructive">{repairError}</div>
           ) : null}
+          {showRepairActions && affectedSections.length > 0 ? (
+            <div className="flex flex-wrap gap-2 text-xs text-muted-foreground">
+              {affectedSections.map((section) => (
+                <span
+                  key={section.key}
+                  className="rounded-full border border-border/60 bg-background/80 px-2 py-1"
+                >
+                  {section.title}
+                </span>
+              ))}
+            </div>
+          ) : null}
           {hasDocGuidance(diagnosis.summary) ? (
             <div className="rounded-md border border-border/60 bg-background/70 p-3 text-sm">
               <div className="space-y-2">
-                {diagnosis.summary.rootCauseHypotheses?.map((hypothesis) => (
-                  <div key={hypothesis.title}>
-                    <div className="font-medium">{hypothesis.title}</div>
-                    <div className="text-muted-foreground">{hypothesis.reason}</div>
+                {summaryHypothesis ? (
+                  <div>
+                    <div className="font-medium">{summaryHypothesis.title}</div>
+                    <div className="text-muted-foreground">{summaryHypothesis.reason}</div>
                   </div>
-                ))}
-                {diagnosis.summary.fixSteps?.length ? (
+                ) : null}
+                {summaryFixSteps.length ? (
                   <div className="space-y-1">
-                    {diagnosis.summary.fixSteps.map((step, index) => (
+                    {summaryFixSteps.map((step, index) => (
                       <div key={`${step}-${index}`} className="text-muted-foreground">
                         {step}
                       </div>
@@ -166,21 +256,6 @@ export function DoctorRecoveryOverview({
                     {diagnosis.summary.versionAwareness}
                   </div>
                 ) : null}
-                {diagnosis.summary.citations?.length ? (
-                  <div className="flex flex-wrap gap-2 text-xs">
-                    {diagnosis.summary.citations.map((citation, index) => (
-                      <a
-                        key={`${citation.url}-${index}`}
-                        className="text-primary underline underline-offset-4"
-                        href={citation.url}
-                        target="_blank"
-                        rel="noreferrer"
-                      >
-                        {citation.section || citation.url}
-                      </a>
-                    ))}
-                  </div>
-                ) : null}
               </div>
             </div>
           ) : null}
@@ -188,7 +263,7 @@ export function DoctorRecoveryOverview({
       </Card>
 
       <div className="grid gap-3">
-        {diagnosis.sections.map((section) => (
+        {visibleSections.map((section) => (
           <Card key={section.key} className="gap-2 py-4">
             <details
               open={section.status !== "healthy" ? true : undefined}
@@ -201,14 +276,16 @@ export function DoctorRecoveryOverview({
                       <CardTitle className="text-sm">{section.title}</CardTitle>
                       <p className="text-sm text-muted-foreground">{section.summary}</p>
                     </div>
-                    <div className="flex items-center gap-2">
-                      <Badge
-                        variant={section.status === "broken" ? "destructive" : "outline"}
-                        className={statusBadgeClass(section.status)}
-                      >
-                        {translateStatus(section.status)}
-                      </Badge>
-                    </div>
+                    {shouldShowSectionStatusBadge(diagnosis.summary.status, section.status) ? (
+                      <div className="flex items-center gap-2">
+                        <Badge
+                          variant={section.status === "broken" ? "destructive" : "outline"}
+                          className={statusBadgeClass(section.status)}
+                        >
+                          {translateStatus(section.status)}
+                        </Badge>
+                      </div>
+                    ) : null}
                   </div>
                 </CardHeader>
               </summary>
@@ -237,21 +314,6 @@ export function DoctorRecoveryOverview({
                             {section.versionAwareness}
                           </div>
                         ) : null}
-                        {section.citations?.length ? (
-                          <div className="flex flex-wrap gap-2 text-xs">
-                            {section.citations.map((citation, index) => (
-                              <a
-                                key={`${citation.url}-${index}`}
-                                className="text-primary underline underline-offset-4"
-                                href={citation.url}
-                                target="_blank"
-                                rel="noreferrer"
-                              >
-                                {citation.section || citation.url}
-                              </a>
-                            ))}
-                          </div>
-                        ) : null}
                       </div>
                     </div>
                   ) : null}
@@ -270,7 +332,7 @@ export function DoctorRecoveryOverview({
                           ) : null}
                         </div>
                         <div className="flex items-center gap-2">
-                          {item.autoFixable && item.issueId ? (
+                          {showRepairActions && item.autoFixable && item.issueId ? (
                             <Button
                               variant="outline"
                               size="sm"
@@ -278,15 +340,19 @@ export function DoctorRecoveryOverview({
                               onClick={() => onRepairIssue(item.issueId!)}
                               disabled={checkLoading || repairing}
                             >
-                              {t("doctor.fix", { defaultValue: "Fix" })}
+                              {item.status === "warn" || item.status === "info"
+                                ? t("doctor.optimize", { defaultValue: "Optimize" })
+                                : t("doctor.fix", { defaultValue: "Fix" })}
                             </Button>
                           ) : null}
-                          <Badge
-                            variant={itemBadgeVariant(item.status)}
-                            className={cn("text-[10px]", statusBadgeClass(item.status))}
-                          >
-                            {translateStatus(item.status)}
-                          </Badge>
+                          {shouldShowItemStatusBadge(section.status, item.status) ? (
+                            <Badge
+                              variant={itemBadgeVariant(item.status)}
+                              className={cn("text-[10px]", statusBadgeClass(item.status))}
+                            >
+                              {translateStatus(item.status)}
+                            </Badge>
+                          ) : null}
                         </div>
                       </div>
                     </div>

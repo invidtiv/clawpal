@@ -64,6 +64,19 @@ export function normalizeRescueManageResultAfterAction(
   };
 }
 
+export function buildOptimisticRescueStatePatch(action: RescueBotAction): {
+  runtimeState: RescueBotRuntimeState;
+  active: boolean;
+} | null {
+  if (action !== "deactivate") {
+    return null;
+  }
+  return {
+    runtimeState: "configured_inactive",
+    active: false,
+  };
+}
+
 export function shouldRefreshStatusAfterAction(
   action: RescueBotAction,
 ): boolean {
@@ -99,6 +112,7 @@ export function buildStatusProgressLines(): string[] {
 export function buildCheckProgressLines(): string[] {
   return [
     "Checking gateway configuration",
+    "Running openclaw doctor",
     "Checking models and credentials",
     "Checking tool execution policies",
     "Checking agent definitions",

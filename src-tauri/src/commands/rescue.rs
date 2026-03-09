@@ -55,7 +55,9 @@ pub async fn remote_manage_rescue_bot(
     };
     let (already_configured, existing_port) =
         resolve_remote_rescue_profile_state(&pool, &host_id, &profile).await?;
-    let should_configure = !already_configured || action == RescueBotAction::Set;
+    let should_configure = !already_configured
+        || action == RescueBotAction::Set
+        || action == RescueBotAction::Activate;
     let rescue_port = if should_configure {
         rescue_port.unwrap_or_else(|| clawpal_core::doctor::suggest_rescue_port(main_port))
     } else {
@@ -117,7 +119,7 @@ pub async fn remote_manage_rescue_bot(
         RescueBotAction::Activate | RescueBotAction::Set | RescueBotAction::Deactivate => true,
         RescueBotAction::Status => already_configured,
     };
-    let status_output = commands
+    let mut status_output = commands
         .iter()
         .rev()
         .find(|result| {
@@ -127,6 +129,27 @@ pub async fn remote_manage_rescue_bot(
                 .any(|window| window[0] == "gateway" && window[1] == "status")
         })
         .map(|result| &result.output);
+    if action == RescueBotAction::Activate {
+        let active_now = status_output
+            .map(|output| infer_rescue_bot_runtime_state(true, Some(output), None) == "active")
+            .unwrap_or(false);
+        if !active_now {
+            let probe_status = build_gateway_status_command(&profile, true);
+            if let Ok(result) = run_remote_rescue_bot_command(&pool, &host_id, probe_status).await {
+                commands.push(result);
+                status_output = commands
+                    .iter()
+                    .rev()
+                    .find(|result| {
+                        result
+                            .command
+                            .windows(2)
+                            .any(|window| window[0] == "gateway" && window[1] == "status")
+                    })
+                    .map(|result| &result.output);
+            }
+        }
+    }
     let runtime_state = infer_rescue_bot_runtime_state(configured, status_output, None);
     let active = runtime_state == "active";
 

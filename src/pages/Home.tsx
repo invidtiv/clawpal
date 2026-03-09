@@ -568,15 +568,13 @@ export function Home({
             )}
             {showAvailableUpdateBadge && (
               <>
-                <Badge className="bg-primary/10 text-primary border border-primary/20">
-                  {t('home.available', { version: latestReleaseVersion })}
-                </Badge>
                 <Button
                   size="xs"
                   variant="outline"
+                  className="h-8 rounded-full border border-primary/20 bg-primary/10 px-3 text-primary hover:bg-primary/15 hover:text-primary"
                   onClick={() => ua.openUrl("https://github.com/openclaw/openclaw/releases")}
                 >
-                  {t('home.view')}
+                  {t('home.available', { version: latestReleaseVersion })}
                 </Button>
                 <Button
                   size="xs"

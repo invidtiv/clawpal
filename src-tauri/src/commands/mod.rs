@@ -37,6 +37,7 @@ pub mod cron;
 pub mod discover_local;
 pub mod discovery;
 pub mod doctor;
+pub mod doctor_assistant;
 pub mod gateway;
 pub mod logs;
 pub mod overview;
@@ -61,6 +62,8 @@ pub use discover_local::*;
 pub use discovery::*;
 #[allow(unused_imports)]
 pub use doctor::*;
+#[allow(unused_imports)]
+pub use doctor_assistant::*;
 #[allow(unused_imports)]
 pub use gateway::*;
 #[allow(unused_imports)]
@@ -269,7 +272,16 @@ pub struct RescuePrimaryRepairStep {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct RescuePrimaryPendingAction {
+    pub kind: String,
+    pub reason: String,
+    pub temp_provider_profile_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RescuePrimaryRepairResult {
+    pub status: String,
     pub attempted_at: String,
     pub target_profile: String,
     pub rescue_profile: String,
@@ -277,6 +289,7 @@ pub struct RescuePrimaryRepairResult {
     pub applied_issue_ids: Vec<String>,
     pub skipped_issue_ids: Vec<String>,
     pub failed_issue_ids: Vec<String>,
+    pub pending_action: Option<RescuePrimaryPendingAction>,
     pub steps: Vec<RescuePrimaryRepairStep>,
     pub before: RescuePrimaryDiagnosisResult,
     pub after: RescuePrimaryDiagnosisResult,
@@ -1178,7 +1191,9 @@ pub async fn manage_rescue_bot(
             .map(|cfg| clawpal_core::doctor::resolve_gateway_port_from_config(&cfg))
             .unwrap_or(18789);
         let (already_configured, existing_port) = resolve_local_rescue_profile_state(&profile)?;
-        let should_configure = !already_configured || action == RescueBotAction::Set;
+        let should_configure = !already_configured
+            || action == RescueBotAction::Set
+            || action == RescueBotAction::Activate;
         let rescue_port = if should_configure {
             rescue_port.unwrap_or_else(|| clawpal_core::doctor::suggest_rescue_port(main_port))
         } else {
@@ -1240,7 +1255,7 @@ pub async fn manage_rescue_bot(
             RescueBotAction::Activate | RescueBotAction::Set | RescueBotAction::Deactivate => true,
             RescueBotAction::Status => already_configured,
         };
-        let status_output = commands
+        let mut status_output = commands
             .iter()
             .rev()
             .find(|result| {
@@ -1250,6 +1265,27 @@ pub async fn manage_rescue_bot(
                     .any(|window| window[0] == "gateway" && window[1] == "status")
             })
             .map(|result| &result.output);
+        if action == RescueBotAction::Activate {
+            let active_now = status_output
+                .map(|output| infer_rescue_bot_runtime_state(true, Some(output), None) == "active")
+                .unwrap_or(false);
+            if !active_now {
+                let probe_status = build_gateway_status_command(&profile, true);
+                if let Ok(result) = run_local_rescue_bot_command(probe_status) {
+                    commands.push(result);
+                    status_output = commands
+                        .iter()
+                        .rev()
+                        .find(|result| {
+                            result
+                                .command
+                                .windows(2)
+                                .any(|window| window[0] == "gateway" && window[1] == "status")
+                        })
+                        .map(|result| &result.output);
+                }
+            }
+        }
         let runtime_state = infer_rescue_bot_runtime_state(configured, status_output, None);
         let active = runtime_state == "active";
 
@@ -1441,9 +1477,20 @@ fn normalize_profile_name(raw: Option<&str>, fallback: &str) -> String {
 }
 
 fn build_profile_command(profile: &str, args: &[&str]) -> Vec<String> {
-    let mut command = vec!["--profile".to_string(), profile.to_string()];
+    let mut command = Vec::new();
+    if !profile.eq_ignore_ascii_case("primary") {
+        command.extend(["--profile".to_string(), profile.to_string()]);
+    }
     command.extend(args.iter().map(|item| (*item).to_string()));
     command
+}
+
+fn build_gateway_status_command(profile: &str, use_probe: bool) -> Vec<String> {
+    if use_probe {
+        build_profile_command(profile, &["gateway", "status", "--json"])
+    } else {
+        build_profile_command(profile, &["gateway", "status", "--no-probe", "--json"])
+    }
 }
 
 fn command_detail(output: &OpenclawCommandOutput) -> String {
@@ -1620,6 +1667,12 @@ fn classify_rescue_issue_section(issue: &RescuePrimaryIssue) -> &'static str {
     "gateway"
 }
 
+fn has_unreadable_primary_config_issue(issues: &[RescuePrimaryIssue]) -> bool {
+    issues
+        .iter()
+        .any(|issue| issue.code == "primary.config.unreadable")
+}
+
 fn config_item(id: &str, label: &str, status: &str, detail: String) -> RescuePrimarySectionItem {
     RescuePrimarySectionItem {
         id: id.to_string(),
@@ -1771,7 +1824,7 @@ fn build_rescue_primary_sections(
                 .push(config_item(
                     &format!("{key}.config.unavailable"),
                     "Configuration unavailable",
-                    "inactive",
+                    if key == "gateway" { "warn" } else { "inactive" },
                     "Configuration could not be read for this target".into(),
                 ));
         }
@@ -1865,7 +1918,13 @@ fn build_rescue_primary_summary(
 ) -> RescuePrimarySummary {
     let selected_fix_issue_ids = issues
         .iter()
-        .filter(|issue| issue.source == "primary" && issue.auto_fixable)
+        .filter(|issue| {
+            clawpal_core::doctor::is_repairable_primary_issue(
+                &issue.source,
+                &issue.id,
+                issue.auto_fixable,
+            )
+        })
         .map(|issue| issue.id.clone())
         .collect::<Vec<_>>();
     let fixable_issue_count = selected_fix_issue_ids.len();
@@ -1883,14 +1942,32 @@ fn build_rescue_primary_summary(
         .find(|section| section.status == "broken")
         .or_else(|| sections.iter().find(|section| section.status == "degraded"))
         .or_else(|| sections.iter().find(|section| section.status == "healthy"));
+    if has_unreadable_primary_config_issue(issues) && status == "degraded" {
+        return RescuePrimarySummary {
+            status: status.to_string(),
+            headline: "Configuration needs attention".into(),
+            recommended_action: if fixable_issue_count > 0 {
+                format!(
+                    "Apply {} optimization(s) and re-run recovery",
+                    fixable_issue_count
+                )
+            } else {
+                "Repair the OpenClaw configuration before the next check".into()
+            },
+            fixable_issue_count,
+            selected_fix_issue_ids,
+            root_cause_hypotheses: Vec::new(),
+            fix_steps: Vec::new(),
+            confidence: None,
+            citations: Vec::new(),
+            version_awareness: None,
+        };
+    }
     let (headline, recommended_action) = match priority_section {
         Some(section) if section.status == "broken" => (
             format!("{} needs attention first", section.title),
             if fixable_issue_count > 0 {
-                format!(
-                    "Apply {} safe fix(es) and re-run recovery",
-                    fixable_issue_count
-                )
+                format!("Apply {} fix(es) and re-run recovery", fixable_issue_count)
             } else {
                 format!("Review {} findings and fix them manually", section.title)
             },
@@ -1899,7 +1976,7 @@ fn build_rescue_primary_summary(
             format!("{} has recommended improvements", section.title),
             if fixable_issue_count > 0 {
                 format!(
-                    "Apply {} safe fix(es) to stabilize the target",
+                    "Apply {} optimization(s) to stabilize the target",
                     fixable_issue_count
                 )
             } else {
@@ -2323,14 +2400,33 @@ fn build_rescue_primary_diagnosis(
         ok: primary_gateway_ok,
         detail: gateway_output_detail(primary_gateway_status),
     });
+    if config.is_none() {
+        issues.push(clawpal_core::doctor::DoctorIssue {
+            id: "primary.config.unreadable".into(),
+            code: "primary.config.unreadable".into(),
+            severity: if primary_gateway_ok {
+                "warn".into()
+            } else {
+                "error".into()
+            },
+            message: "Primary configuration could not be read".into(),
+            auto_fixable: false,
+            fix_hint: Some(
+                "Repair openclaw.json parsing errors and re-run the primary recovery check".into(),
+            ),
+            source: "primary".into(),
+        });
+    }
     if !primary_gateway_ok {
         issues.push(clawpal_core::doctor::DoctorIssue {
             id: "primary.gateway.unhealthy".into(),
             code: "primary.gateway.unhealthy".into(),
             severity: "error".into(),
             message: "Primary gateway is not healthy".into(),
-            auto_fixable: false,
-            fix_hint: Some("Inspect gateway logs and restart primary gateway".into()),
+            auto_fixable: true,
+            fix_hint: Some(
+                "Restart primary gateway and inspect gateway logs if it stays unhealthy".into(),
+            ),
             source: "primary".into(),
         });
     }
@@ -2387,19 +2483,13 @@ fn diagnose_primary_via_rescue_local(
         .unwrap_or_default();
     let (rescue_configured, rescue_port) = resolve_local_rescue_profile_state(rescue_profile)?;
     let rescue_gateway_status = if rescue_configured {
-        let command = build_profile_command(
-            rescue_profile,
-            &["gateway", "status", "--no-probe", "--json"],
-        );
+        let command = build_gateway_status_command(rescue_profile, false);
         Some(run_openclaw_dynamic(&command)?)
     } else {
         None
     };
     let primary_doctor_output = run_local_primary_doctor_with_fallback(target_profile)?;
-    let primary_gateway_command = build_profile_command(
-        target_profile,
-        &["gateway", "status", "--no-probe", "--json"],
-    );
+    let primary_gateway_command = build_gateway_status_command(target_profile, true);
     let primary_gateway_output = run_openclaw_dynamic(&primary_gateway_command)?;
     let runtime_checks = collect_local_rescue_runtime_checks(config.as_ref());
 
@@ -2444,20 +2534,14 @@ async fn diagnose_primary_via_rescue_remote(
     let (rescue_configured, rescue_port) =
         resolve_remote_rescue_profile_state(pool, host_id, rescue_profile).await?;
     let rescue_gateway_status = if rescue_configured {
-        let command = build_profile_command(
-            rescue_profile,
-            &["gateway", "status", "--no-probe", "--json"],
-        );
+        let command = build_gateway_status_command(rescue_profile, false);
         Some(run_remote_openclaw_dynamic(pool, host_id, command).await?)
     } else {
         None
     };
     let primary_doctor_output =
         run_remote_primary_doctor_with_fallback(pool, host_id, target_profile).await?;
-    let primary_gateway_command = build_profile_command(
-        target_profile,
-        &["gateway", "status", "--no-probe", "--json"],
-    );
+    let primary_gateway_command = build_gateway_status_command(target_profile, true);
     let primary_gateway_output =
         run_remote_openclaw_dynamic(pool, host_id, primary_gateway_command).await?;
     let runtime_checks = collect_remote_rescue_runtime_checks(pool, host_id, config.as_ref()).await;
@@ -2492,7 +2576,7 @@ async fn diagnose_primary_via_rescue_remote(
     Ok(apply_doc_guidance_to_diagnosis(diagnosis, Some(guidance)))
 }
 
-fn collect_safe_primary_issue_ids(
+fn collect_repairable_primary_issue_ids(
     diagnosis: &RescuePrimaryDiagnosisResult,
     requested_ids: &[String],
 ) -> (Vec<String>, Vec<String>) {
@@ -2509,7 +2593,7 @@ fn collect_safe_primary_issue_ids(
             source: issue.source.clone(),
         })
         .collect();
-    clawpal_core::doctor::collect_safe_primary_issue_ids(&issues, requested_ids)
+    clawpal_core::doctor::collect_repairable_primary_issue_ids(&issues, requested_ids)
 }
 
 fn build_primary_issue_fix_command(
@@ -2521,6 +2605,38 @@ fn build_primary_issue_fix_command(
     Some((title, build_profile_command(target_profile, &tail_refs)))
 }
 
+fn build_primary_doctor_fix_command(target_profile: &str) -> Vec<String> {
+    build_profile_command(target_profile, &["doctor", "--fix", "--yes"])
+}
+
+fn should_run_primary_doctor_fix(diagnosis: &RescuePrimaryDiagnosisResult) -> bool {
+    if diagnosis.status != "healthy" {
+        return true;
+    }
+
+    diagnosis
+        .sections
+        .iter()
+        .any(|section| section.status != "healthy")
+}
+
+fn should_refresh_rescue_helper_permissions(
+    diagnosis: &RescuePrimaryDiagnosisResult,
+    selected_issue_ids: &[String],
+) -> bool {
+    let selected = selected_issue_ids.iter().cloned().collect::<HashSet<_>>();
+    diagnosis.issues.iter().any(|issue| {
+        (selected.is_empty() || selected.contains(&issue.id))
+            && clawpal_core::doctor::is_primary_rescue_permission_issue(
+                &issue.source,
+                &issue.id,
+                &issue.code,
+                &issue.message,
+                issue.fix_hint.as_deref(),
+            )
+    })
+}
+
 fn build_step_detail(command: &[String], output: &OpenclawCommandOutput) -> String {
     if output.exit_code == 0 {
         return command_detail(output);
@@ -2528,16 +2644,18 @@ fn build_step_detail(command: &[String], output: &OpenclawCommandOutput) -> Stri
     command_failure_message(command, output)
 }
 
-fn run_local_profile_restart_with_fallback(
+fn run_local_gateway_restart_with_fallback(
     profile: &str,
     steps: &mut Vec<RescuePrimaryRepairStep>,
+    id_prefix: &str,
+    title_prefix: &str,
 ) -> Result<bool, String> {
     let restart_command = build_profile_command(profile, &["gateway", "restart"]);
     let restart_output = run_openclaw_dynamic(&restart_command)?;
     let restart_ok = restart_output.exit_code == 0;
     steps.push(RescuePrimaryRepairStep {
-        id: "primary.gateway.restart".into(),
-        title: "Restart primary gateway".into(),
+        id: format!("{id_prefix}.restart"),
+        title: format!("Restart {title_prefix}"),
         ok: restart_ok,
         detail: build_step_detail(&restart_command, &restart_output),
         command: Some(restart_command.clone()),
@@ -2553,8 +2671,8 @@ fn run_local_profile_restart_with_fallback(
     let stop_command = build_profile_command(profile, &["gateway", "stop"]);
     let stop_output = run_openclaw_dynamic(&stop_command)?;
     steps.push(RescuePrimaryRepairStep {
-        id: "primary.gateway.stop".into(),
-        title: "Stop primary gateway (restart fallback)".into(),
+        id: format!("{id_prefix}.stop"),
+        title: format!("Stop {title_prefix} (restart fallback)"),
         ok: stop_output.exit_code == 0,
         detail: build_step_detail(&stop_command, &stop_output),
         command: Some(stop_command),
@@ -2564,8 +2682,8 @@ fn run_local_profile_restart_with_fallback(
     let start_output = run_openclaw_dynamic(&start_command)?;
     let start_ok = start_output.exit_code == 0;
     steps.push(RescuePrimaryRepairStep {
-        id: "primary.gateway.start".into(),
-        title: "Start primary gateway (restart fallback)".into(),
+        id: format!("{id_prefix}.start"),
+        title: format!("Start {title_prefix} (restart fallback)"),
         ok: start_ok,
         detail: build_step_detail(&start_command, &start_output),
         command: Some(start_command),
@@ -2573,19 +2691,65 @@ fn run_local_profile_restart_with_fallback(
     Ok(start_ok)
 }
 
-async fn run_remote_profile_restart_with_fallback(
+fn run_local_rescue_permission_refresh(
+    rescue_profile: &str,
+    steps: &mut Vec<RescuePrimaryRepairStep>,
+) -> Result<(), String> {
+    for (index, command) in
+        clawpal_core::doctor::build_rescue_permission_baseline_commands(rescue_profile)
+            .into_iter()
+            .enumerate()
+    {
+        let output = run_openclaw_dynamic(&command)?;
+        steps.push(RescuePrimaryRepairStep {
+            id: format!("rescue.permissions.{}", index + 1),
+            title: "Update recovery helper permissions".into(),
+            ok: output.exit_code == 0,
+            detail: build_step_detail(&command, &output),
+            command: Some(command),
+        });
+    }
+    let _ = run_local_gateway_restart_with_fallback(
+        rescue_profile,
+        steps,
+        "rescue.gateway",
+        "recovery helper",
+    )?;
+    Ok(())
+}
+
+fn run_local_primary_doctor_fix(
+    profile: &str,
+    steps: &mut Vec<RescuePrimaryRepairStep>,
+) -> Result<bool, String> {
+    let command = build_primary_doctor_fix_command(profile);
+    let output = run_openclaw_dynamic(&command)?;
+    let ok = output.exit_code == 0;
+    steps.push(RescuePrimaryRepairStep {
+        id: "primary.doctor.fix".into(),
+        title: "Run openclaw doctor --fix".into(),
+        ok,
+        detail: build_step_detail(&command, &output),
+        command: Some(command),
+    });
+    Ok(ok)
+}
+
+async fn run_remote_gateway_restart_with_fallback(
     pool: &SshConnectionPool,
     host_id: &str,
     profile: &str,
     steps: &mut Vec<RescuePrimaryRepairStep>,
+    id_prefix: &str,
+    title_prefix: &str,
 ) -> Result<bool, String> {
     let restart_command = build_profile_command(profile, &["gateway", "restart"]);
     let restart_output =
         run_remote_openclaw_dynamic(pool, host_id, restart_command.clone()).await?;
     let restart_ok = restart_output.exit_code == 0;
     steps.push(RescuePrimaryRepairStep {
-        id: "primary.gateway.restart".into(),
-        title: "Restart primary gateway".into(),
+        id: format!("{id_prefix}.restart"),
+        title: format!("Restart {title_prefix}"),
         ok: restart_ok,
         detail: build_step_detail(&restart_command, &restart_output),
         command: Some(restart_command.clone()),
@@ -2601,8 +2765,8 @@ async fn run_remote_profile_restart_with_fallback(
     let stop_command = build_profile_command(profile, &["gateway", "stop"]);
     let stop_output = run_remote_openclaw_dynamic(pool, host_id, stop_command.clone()).await?;
     steps.push(RescuePrimaryRepairStep {
-        id: "primary.gateway.stop".into(),
-        title: "Stop primary gateway (restart fallback)".into(),
+        id: format!("{id_prefix}.stop"),
+        title: format!("Stop {title_prefix} (restart fallback)"),
         ok: stop_output.exit_code == 0,
         detail: build_step_detail(&stop_command, &stop_output),
         command: Some(stop_command),
@@ -2612,13 +2776,64 @@ async fn run_remote_profile_restart_with_fallback(
     let start_output = run_remote_openclaw_dynamic(pool, host_id, start_command.clone()).await?;
     let start_ok = start_output.exit_code == 0;
     steps.push(RescuePrimaryRepairStep {
-        id: "primary.gateway.start".into(),
-        title: "Start primary gateway (restart fallback)".into(),
+        id: format!("{id_prefix}.start"),
+        title: format!("Start {title_prefix} (restart fallback)"),
         ok: start_ok,
         detail: build_step_detail(&start_command, &start_output),
         command: Some(start_command),
     });
     Ok(start_ok)
+}
+
+async fn run_remote_rescue_permission_refresh(
+    pool: &SshConnectionPool,
+    host_id: &str,
+    rescue_profile: &str,
+    steps: &mut Vec<RescuePrimaryRepairStep>,
+) -> Result<(), String> {
+    for (index, command) in
+        clawpal_core::doctor::build_rescue_permission_baseline_commands(rescue_profile)
+            .into_iter()
+            .enumerate()
+    {
+        let output = run_remote_openclaw_dynamic(pool, host_id, command.clone()).await?;
+        steps.push(RescuePrimaryRepairStep {
+            id: format!("rescue.permissions.{}", index + 1),
+            title: "Update recovery helper permissions".into(),
+            ok: output.exit_code == 0,
+            detail: build_step_detail(&command, &output),
+            command: Some(command),
+        });
+    }
+    let _ = run_remote_gateway_restart_with_fallback(
+        pool,
+        host_id,
+        rescue_profile,
+        steps,
+        "rescue.gateway",
+        "recovery helper",
+    )
+    .await?;
+    Ok(())
+}
+
+async fn run_remote_primary_doctor_fix(
+    pool: &SshConnectionPool,
+    host_id: &str,
+    profile: &str,
+    steps: &mut Vec<RescuePrimaryRepairStep>,
+) -> Result<bool, String> {
+    let command = build_primary_doctor_fix_command(profile);
+    let output = run_remote_openclaw_dynamic(pool, host_id, command.clone()).await?;
+    let ok = output.exit_code == 0;
+    steps.push(RescuePrimaryRepairStep {
+        id: "primary.doctor.fix".into(),
+        title: "Run openclaw doctor --fix".into(),
+        ok,
+        detail: build_step_detail(&command, &output),
+        command: Some(command),
+    });
+    Ok(ok)
 }
 
 fn repair_primary_via_rescue_local(
@@ -2628,11 +2843,15 @@ fn repair_primary_via_rescue_local(
 ) -> Result<RescuePrimaryRepairResult, String> {
     let attempted_at = format_timestamp_from_unix(unix_timestamp_secs());
     let before = diagnose_primary_via_rescue_local(target_profile, rescue_profile)?;
-    let (selected_issue_ids, mut skipped_issue_ids) =
-        collect_safe_primary_issue_ids(&before, &issue_ids);
+    let (selected_issue_ids, skipped_issue_ids) =
+        collect_repairable_primary_issue_ids(&before, &issue_ids);
     let mut applied_issue_ids = Vec::new();
     let mut failed_issue_ids = Vec::new();
+    let mut deferred_issue_ids = Vec::new();
     let mut steps = Vec::new();
+    let should_run_doctor_fix = should_run_primary_doctor_fix(&before);
+    let should_refresh_rescue_permissions =
+        should_refresh_rescue_helper_permissions(&before, &selected_issue_ids);
 
     if !before.rescue_configured {
         steps.push(RescuePrimaryRepairStep {
@@ -2647,6 +2866,7 @@ fn repair_primary_via_rescue_local(
         });
         let after = before.clone();
         return Ok(RescuePrimaryRepairResult {
+            status: "completed".into(),
             attempted_at,
             target_profile: target_profile.to_string(),
             rescue_profile: rescue_profile.to_string(),
@@ -2654,30 +2874,48 @@ fn repair_primary_via_rescue_local(
             applied_issue_ids,
             skipped_issue_ids,
             failed_issue_ids,
+            pending_action: None,
             steps,
             before,
             after,
         });
     }
 
-    if selected_issue_ids.is_empty() {
+    if selected_issue_ids.is_empty() && !should_run_doctor_fix {
         steps.push(RescuePrimaryRepairStep {
             id: "repair.noop".into(),
-            title: "No safe auto-fixes available".into(),
+            title: "No automatic repairs available".into(),
             ok: true,
-            detail: "No auto-fixable primary issues were selected".into(),
+            detail: "No primary issues were selected for repair".into(),
             command: None,
         });
     } else {
+        if should_refresh_rescue_permissions {
+            run_local_rescue_permission_refresh(rescue_profile, &mut steps)?;
+        }
+        if should_run_doctor_fix {
+            let _ = run_local_primary_doctor_fix(target_profile, &mut steps)?;
+        }
+        let mut gateway_recovery_requested = false;
         for issue_id in &selected_issue_ids {
+            if clawpal_core::doctor::is_primary_gateway_recovery_issue(issue_id) {
+                gateway_recovery_requested = true;
+                continue;
+            }
             let Some((title, command)) = build_primary_issue_fix_command(target_profile, issue_id)
             else {
-                skipped_issue_ids.push(issue_id.clone());
+                deferred_issue_ids.push(issue_id.clone());
                 steps.push(RescuePrimaryRepairStep {
                     id: format!("repair.{issue_id}"),
-                    title: "Skip unsupported issue fix".into(),
-                    ok: false,
-                    detail: format!("No safe repair mapping for issue \"{issue_id}\""),
+                    title: "Delegate issue to openclaw doctor --fix".into(),
+                    ok: should_run_doctor_fix,
+                    detail: if should_run_doctor_fix {
+                        format!(
+                            "No direct repair mapping for issue \"{issue_id}\"; relying on openclaw doctor --fix and recheck"
+                        )
+                    } else {
+                        format!("No repair mapping for issue \"{issue_id}\"")
+                    },
                     command: None,
                 });
                 continue;
@@ -2697,17 +2935,40 @@ fn repair_primary_via_rescue_local(
                 failed_issue_ids.push(issue_id.clone());
             }
         }
-    }
-
-    if !applied_issue_ids.is_empty() {
-        let restart_ok = run_local_profile_restart_with_fallback(target_profile, &mut steps)?;
-        if !restart_ok {
-            failed_issue_ids.push("primary.gateway.restart".into());
+        if gateway_recovery_requested || !selected_issue_ids.is_empty() || should_run_doctor_fix {
+            let restart_ok = run_local_gateway_restart_with_fallback(
+                target_profile,
+                &mut steps,
+                "primary.gateway",
+                "primary gateway",
+            )?;
+            if gateway_recovery_requested {
+                if restart_ok {
+                    applied_issue_ids.push("primary.gateway.unhealthy".into());
+                } else {
+                    failed_issue_ids.push("primary.gateway.unhealthy".into());
+                }
+            } else if !restart_ok {
+                failed_issue_ids.push("primary.gateway.restart".into());
+            }
         }
     }
 
     let after = diagnose_primary_via_rescue_local(target_profile, rescue_profile)?;
+    let remaining_issue_ids = after
+        .issues
+        .iter()
+        .map(|issue| issue.id.as_str())
+        .collect::<HashSet<_>>();
+    for issue_id in deferred_issue_ids {
+        if remaining_issue_ids.contains(issue_id.as_str()) {
+            failed_issue_ids.push(issue_id);
+        } else {
+            applied_issue_ids.push(issue_id);
+        }
+    }
     Ok(RescuePrimaryRepairResult {
+        status: "completed".into(),
         attempted_at,
         target_profile: target_profile.to_string(),
         rescue_profile: rescue_profile.to_string(),
@@ -2715,6 +2976,7 @@ fn repair_primary_via_rescue_local(
         applied_issue_ids,
         skipped_issue_ids,
         failed_issue_ids,
+        pending_action: None,
         steps,
         before,
         after,
@@ -2731,11 +2993,15 @@ async fn repair_primary_via_rescue_remote(
     let attempted_at = format_timestamp_from_unix(unix_timestamp_secs());
     let before =
         diagnose_primary_via_rescue_remote(pool, host_id, target_profile, rescue_profile).await?;
-    let (selected_issue_ids, mut skipped_issue_ids) =
-        collect_safe_primary_issue_ids(&before, &issue_ids);
+    let (selected_issue_ids, skipped_issue_ids) =
+        collect_repairable_primary_issue_ids(&before, &issue_ids);
     let mut applied_issue_ids = Vec::new();
     let mut failed_issue_ids = Vec::new();
+    let mut deferred_issue_ids = Vec::new();
     let mut steps = Vec::new();
+    let should_run_doctor_fix = should_run_primary_doctor_fix(&before);
+    let should_refresh_rescue_permissions =
+        should_refresh_rescue_helper_permissions(&before, &selected_issue_ids);
 
     if !before.rescue_configured {
         steps.push(RescuePrimaryRepairStep {
@@ -2750,6 +3016,7 @@ async fn repair_primary_via_rescue_remote(
         });
         let after = before.clone();
         return Ok(RescuePrimaryRepairResult {
+            status: "completed".into(),
             attempted_at,
             target_profile: target_profile.to_string(),
             rescue_profile: rescue_profile.to_string(),
@@ -2757,30 +3024,49 @@ async fn repair_primary_via_rescue_remote(
             applied_issue_ids,
             skipped_issue_ids,
             failed_issue_ids,
+            pending_action: None,
             steps,
             before,
             after,
         });
     }
 
-    if selected_issue_ids.is_empty() {
+    if selected_issue_ids.is_empty() && !should_run_doctor_fix {
         steps.push(RescuePrimaryRepairStep {
             id: "repair.noop".into(),
-            title: "No safe auto-fixes available".into(),
+            title: "No automatic repairs available".into(),
             ok: true,
-            detail: "No auto-fixable primary issues were selected".into(),
+            detail: "No primary issues were selected for repair".into(),
             command: None,
         });
     } else {
+        if should_refresh_rescue_permissions {
+            run_remote_rescue_permission_refresh(pool, host_id, rescue_profile, &mut steps).await?;
+        }
+        if should_run_doctor_fix {
+            let _ =
+                run_remote_primary_doctor_fix(pool, host_id, target_profile, &mut steps).await?;
+        }
+        let mut gateway_recovery_requested = false;
         for issue_id in &selected_issue_ids {
+            if clawpal_core::doctor::is_primary_gateway_recovery_issue(issue_id) {
+                gateway_recovery_requested = true;
+                continue;
+            }
             let Some((title, command)) = build_primary_issue_fix_command(target_profile, issue_id)
             else {
-                skipped_issue_ids.push(issue_id.clone());
+                deferred_issue_ids.push(issue_id.clone());
                 steps.push(RescuePrimaryRepairStep {
                     id: format!("repair.{issue_id}"),
-                    title: "Skip unsupported issue fix".into(),
-                    ok: false,
-                    detail: format!("No safe repair mapping for issue \"{issue_id}\""),
+                    title: "Delegate issue to openclaw doctor --fix".into(),
+                    ok: should_run_doctor_fix,
+                    detail: if should_run_doctor_fix {
+                        format!(
+                            "No direct repair mapping for issue \"{issue_id}\"; relying on openclaw doctor --fix and recheck"
+                        )
+                    } else {
+                        format!("No repair mapping for issue \"{issue_id}\"")
+                    },
                     command: None,
                 });
                 continue;
@@ -2800,20 +3086,44 @@ async fn repair_primary_via_rescue_remote(
                 failed_issue_ids.push(issue_id.clone());
             }
         }
-    }
-
-    if !applied_issue_ids.is_empty() {
-        let restart_ok =
-            run_remote_profile_restart_with_fallback(pool, host_id, target_profile, &mut steps)
-                .await?;
-        if !restart_ok {
-            failed_issue_ids.push("primary.gateway.restart".into());
+        if gateway_recovery_requested || !selected_issue_ids.is_empty() || should_run_doctor_fix {
+            let restart_ok = run_remote_gateway_restart_with_fallback(
+                pool,
+                host_id,
+                target_profile,
+                &mut steps,
+                "primary.gateway",
+                "primary gateway",
+            )
+            .await?;
+            if gateway_recovery_requested {
+                if restart_ok {
+                    applied_issue_ids.push("primary.gateway.unhealthy".into());
+                } else {
+                    failed_issue_ids.push("primary.gateway.unhealthy".into());
+                }
+            } else if !restart_ok {
+                failed_issue_ids.push("primary.gateway.restart".into());
+            }
         }
     }
 
     let after =
         diagnose_primary_via_rescue_remote(pool, host_id, target_profile, rescue_profile).await?;
+    let remaining_issue_ids = after
+        .issues
+        .iter()
+        .map(|issue| issue.id.as_str())
+        .collect::<HashSet<_>>();
+    for issue_id in deferred_issue_ids {
+        if remaining_issue_ids.contains(issue_id.as_str()) {
+            failed_issue_ids.push(issue_id);
+        } else {
+            applied_issue_ids.push(issue_id);
+        }
+    }
     Ok(RescuePrimaryRepairResult {
+        status: "completed".into(),
         attempted_at,
         target_profile: target_profile.to_string(),
         rescue_profile: rescue_profile.to_string(),
@@ -2821,6 +3131,7 @@ async fn repair_primary_via_rescue_remote(
         applied_issue_ids,
         skipped_issue_ids,
         failed_issue_ids,
+        pending_action: None,
         steps,
         before,
         after,
@@ -2892,16 +3203,47 @@ fn is_rescue_cleanup_noop(
 
 fn run_local_rescue_bot_command(command: Vec<String>) -> Result<RescueBotCommandResult, String> {
     let output = run_openclaw_dynamic(&command)?;
+    if is_gateway_status_command_output_incompatible(&output, &command) {
+        let fallback = strip_gateway_status_json_flag(&command);
+        if fallback != command {
+            let fallback_output = run_openclaw_dynamic(&fallback)?;
+            return Ok(RescueBotCommandResult {
+                command: fallback,
+                output: fallback_output,
+            });
+        }
+    }
     Ok(RescueBotCommandResult { command, output })
 }
 
+fn is_gateway_status_command_output_incompatible(
+    output: &OpenclawCommandOutput,
+    command: &[String],
+) -> bool {
+    if output.exit_code == 0 {
+        return false;
+    }
+    if !command.iter().any(|arg| arg == "--json") {
+        return false;
+    }
+    clawpal_core::doctor::doctor_json_option_unsupported(&output.stderr, &output.stdout)
+}
+
+fn strip_gateway_status_json_flag(command: &[String]) -> Vec<String> {
+    command
+        .iter()
+        .filter(|arg| arg.as_str() != "--json")
+        .cloned()
+        .collect()
+}
+
 fn run_local_primary_doctor_with_fallback(profile: &str) -> Result<OpenclawCommandOutput, String> {
-    let json_command = build_profile_command(profile, &["doctor", "--json"]);
+    let json_command = build_profile_command(profile, &["doctor", "--json", "--yes"]);
     let output = run_openclaw_dynamic(&json_command)?;
     if output.exit_code != 0
         && clawpal_core::doctor::doctor_json_option_unsupported(&output.stderr, &output.stdout)
     {
-        let plain_command = build_profile_command(profile, &["doctor"]);
+        let plain_command = build_profile_command(profile, &["doctor", "--yes"]);
         return run_openclaw_dynamic(&plain_command);
     }
     Ok(output)
@@ -6020,16 +6362,65 @@ mod rescue_bot_tests {
                 "19789",
                 "--json",
             ],
-            vec!["--profile", "rescue", "gateway", "install"],
-            vec!["--profile", "rescue", "gateway", "restart"],
             vec![
                 "--profile",
                 "rescue",
-                "gateway",
-                "status",
-                "--no-probe",
+                "config",
+                "set",
+                "tools.profile",
+                "\"full\"",
                 "--json",
             ],
+            vec![
+                "--profile",
+                "rescue",
+                "config",
+                "set",
+                "tools.sessions.visibility",
+                "\"all\"",
+                "--json",
+            ],
+            vec![
+                "--profile",
+                "rescue",
+                "config",
+                "set",
+                "tools.allow",
+                "[\"*\"]",
+                "--json",
+            ],
+            vec![
+                "--profile",
+                "rescue",
+                "config",
+                "set",
+                "tools.exec.host",
+                "\"gateway\"",
+                "--json",
+            ],
+            vec![
+                "--profile",
+                "rescue",
+                "config",
+                "set",
+                "tools.exec.security",
+                "\"full\"",
+                "--json",
+            ],
+            vec![
+                "--profile",
+                "rescue",
+                "config",
+                "set",
+                "tools.exec.ask",
+                "\"off\"",
+                "--json",
+            ],
+            vec!["--profile", "rescue", "gateway", "stop"],
+            vec!["--profile", "rescue", "gateway", "uninstall"],
+            vec!["--profile", "rescue", "gateway", "install"],
+            vec!["--profile", "rescue", "gateway", "start"],
+            vec!["--profile", "rescue", "gateway", "status", "--json"],
         ]
         .into_iter()
         .map(|items| items.into_iter().map(String::from).collect::<Vec<_>>())
@@ -6042,6 +6433,60 @@ mod rescue_bot_tests {
         let commands =
             build_rescue_bot_command_plan(RescueBotAction::Activate, "rescue", 19789, false);
         let expected = vec![
+            vec![
+                "--profile",
+                "rescue",
+                "config",
+                "set",
+                "tools.profile",
+                "\"full\"",
+                "--json",
+            ],
+            vec![
+                "--profile",
+                "rescue",
+                "config",
+                "set",
+                "tools.sessions.visibility",
+                "\"all\"",
+                "--json",
+            ],
+            vec![
+                "--profile",
+                "rescue",
+                "config",
+                "set",
+                "tools.allow",
+                "[\"*\"]",
+                "--json",
+            ],
+            vec![
+                "--profile",
+                "rescue",
+                "config",
+                "set",
+                "tools.exec.host",
+                "\"gateway\"",
+                "--json",
+            ],
+            vec![
+                "--profile",
+                "rescue",
+                "config",
+                "set",
+                "tools.exec.security",
+                "\"full\"",
+                "--json",
+            ],
+            vec![
+                "--profile",
+                "rescue",
+                "config",
+                "set",
+                "tools.exec.ask",
+                "\"off\"",
+                "--json",
+            ],
             vec!["--profile", "rescue", "gateway", "install"],
             vec!["--profile", "rescue", "gateway", "restart"],
             vec![
@@ -6184,6 +6629,68 @@ mod rescue_bot_tests {
     }
 
     #[test]
+    fn test_gateway_command_output_incompatible_matches_unknown_json_option() {
+        let output = OpenclawCommandOutput {
+            stdout: String::new(),
+            stderr: "error: unknown option '--json'".into(),
+            exit_code: 1,
+        };
+        let command = vec![
+            "--profile",
+            "rescue",
+            "gateway",
+            "status",
+            "--no-probe",
+            "--json",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect::<Vec<String>>();
+        assert!(is_gateway_status_command_output_incompatible(
+            &output, &command
+        ));
+    }
+
+    #[test]
+    fn test_rescue_config_command_output_incompatible_matches_unknown_json_option() {
+        let output = OpenclawCommandOutput {
+            stdout: String::new(),
+            stderr: "error: unknown option '--json'".into(),
+            exit_code: 1,
+        };
+        let command = vec![
+            "--profile",
+            "rescue",
+            "config",
+            "set",
+            "tools.profile",
+            "full",
+            "--json",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect::<Vec<String>>();
+        assert!(is_gateway_status_command_output_incompatible(
+            &output, &command
+        ));
+    }
+
+    #[test]
+    fn test_strip_gateway_status_json_flag_keeps_other_args() {
+        let command = vec!["gateway", "status", "--json", "--no-probe", "extra"]
+            .into_iter()
+            .map(String::from)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            strip_gateway_status_json_flag(&command),
+            vec!["gateway", "status", "--no-probe", "extra"]
+                .into_iter()
+                .map(String::from)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
     fn test_parse_doctor_issues_reads_camel_case_fields() {
         let report = serde_json::json!({
             "issues": [
@@ -6262,7 +6769,7 @@ mod rescue_bot_tests {
     }
 
     #[test]
-    fn test_collect_safe_primary_issue_ids_filters_non_primary_and_non_fixable() {
+    fn test_collect_repairable_primary_issue_ids_filters_non_primary_only() {
         let diagnosis = RescuePrimaryDiagnosisResult {
             status: "degraded".into(),
             checked_at: "2026-02-25T00:00:00Z".into(),
@@ -6315,7 +6822,7 @@ mod rescue_bot_tests {
             ],
         };
 
-        let (selected, skipped) = collect_safe_primary_issue_ids(
+        let (selected, skipped) = collect_repairable_primary_issue_ids(
             &diagnosis,
             &[
                 "field.agents".into(),
@@ -6323,8 +6830,8 @@ mod rescue_bot_tests {
                 "rescue.gateway.unhealthy".into(),
             ],
         );
-        assert_eq!(selected, vec!["field.agents"]);
-        assert_eq!(skipped, vec!["field.port", "rescue.gateway.unhealthy"]);
+        assert_eq!(selected, vec!["field.agents", "field.port"]);
+        assert_eq!(skipped, vec!["rescue.gateway.unhealthy"]);
     }
 
     #[test]
@@ -6333,19 +6840,177 @@ mod rescue_bot_tests {
             .expect("field.port should have safe fix command");
         assert_eq!(
             command,
+            vec!["config", "set", "gateway.port", "18789", "--json"]
+                .into_iter()
+                .map(String::from)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_build_primary_doctor_fix_command_for_profile() {
+        let command = build_primary_doctor_fix_command("primary");
+        assert_eq!(
+            command,
+            vec!["doctor", "--fix", "--yes"]
+                .into_iter()
+                .map(String::from)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_build_gateway_status_command_uses_probe_for_primary_diagnosis_only() {
+        assert_eq!(
+            build_gateway_status_command("primary", true),
+            vec!["gateway", "status", "--json"]
+                .into_iter()
+                .map(String::from)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            build_gateway_status_command("rescue", false),
             vec![
                 "--profile",
-                "primary",
-                "config",
-                "set",
-                "gateway.port",
-                "18789",
+                "rescue",
+                "gateway",
+                "status",
+                "--no-probe",
                 "--json"
             ]
             .into_iter()
             .map(String::from)
             .collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn test_build_profile_command_omits_primary_profile_flag() {
+        assert_eq!(
+            build_profile_command("primary", &["doctor", "--json", "--yes"]),
+            vec!["doctor", "--json", "--yes"]
+                .into_iter()
+                .map(String::from)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            build_profile_command("rescue", &["gateway", "status", "--no-probe", "--json"]),
+            vec![
+                "--profile",
+                "rescue",
+                "gateway",
+                "status",
+                "--no-probe",
+                "--json"
+            ]
+            .into_iter()
+            .map(String::from)
+            .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_should_run_primary_doctor_fix_for_non_healthy_sections() {
+        let mut diagnosis = RescuePrimaryDiagnosisResult {
+            status: "degraded".into(),
+            checked_at: "2026-03-08T00:00:00Z".into(),
+            target_profile: "primary".into(),
+            rescue_profile: "rescue".into(),
+            rescue_configured: true,
+            rescue_port: Some(19789),
+            summary: RescuePrimarySummary {
+                status: "degraded".into(),
+                headline: "Review recommendations".into(),
+                recommended_action: "Review recommendations".into(),
+                fixable_issue_count: 0,
+                selected_fix_issue_ids: Vec::new(),
+                root_cause_hypotheses: Vec::new(),
+                fix_steps: Vec::new(),
+                confidence: None,
+                citations: Vec::new(),
+                version_awareness: None,
+            },
+            sections: vec![
+                RescuePrimarySectionResult {
+                    key: "gateway".into(),
+                    title: "Gateway".into(),
+                    status: "healthy".into(),
+                    summary: "Gateway is healthy".into(),
+                    docs_url: String::new(),
+                    items: Vec::new(),
+                    root_cause_hypotheses: Vec::new(),
+                    fix_steps: Vec::new(),
+                    confidence: None,
+                    citations: Vec::new(),
+                    version_awareness: None,
+                },
+                RescuePrimarySectionResult {
+                    key: "channels".into(),
+                    title: "Channels".into(),
+                    status: "inactive".into(),
+                    summary: "Channels are inactive".into(),
+                    docs_url: String::new(),
+                    items: Vec::new(),
+                    root_cause_hypotheses: Vec::new(),
+                    fix_steps: Vec::new(),
+                    confidence: None,
+                    citations: Vec::new(),
+                    version_awareness: None,
+                },
+            ],
+            checks: Vec::new(),
+            issues: Vec::new(),
+        };
+
+        assert!(should_run_primary_doctor_fix(&diagnosis));
+
+        diagnosis.status = "healthy".into();
+        diagnosis.summary.status = "healthy".into();
+        diagnosis.sections[1].status = "degraded".into();
+        assert!(should_run_primary_doctor_fix(&diagnosis));
+
+        diagnosis.sections[1].status = "healthy".into();
+        assert!(!should_run_primary_doctor_fix(&diagnosis));
+    }
+
+    #[test]
+    fn test_should_refresh_rescue_helper_permissions_when_permission_issue_is_selected() {
+        let diagnosis = RescuePrimaryDiagnosisResult {
+            status: "degraded".into(),
+            checked_at: "2026-03-08T00:00:00Z".into(),
+            target_profile: "primary".into(),
+            rescue_profile: "rescue".into(),
+            rescue_configured: true,
+            rescue_port: Some(19789),
+            summary: RescuePrimarySummary {
+                status: "degraded".into(),
+                headline: "Tools have recommended improvements".into(),
+                recommended_action: "Apply 1 optimization".into(),
+                fixable_issue_count: 1,
+                selected_fix_issue_ids: vec!["tools.allowlist.review".into()],
+                root_cause_hypotheses: Vec::new(),
+                fix_steps: Vec::new(),
+                confidence: None,
+                citations: Vec::new(),
+                version_awareness: None,
+            },
+            sections: Vec::new(),
+            checks: Vec::new(),
+            issues: vec![RescuePrimaryIssue {
+                id: "tools.allowlist.review".into(),
+                code: "tools.allowlist.review".into(),
+                severity: "warn".into(),
+                message: "Allowlist blocks rescue helper access".into(),
+                auto_fixable: true,
+                fix_hint: Some("Expand tools.allow and sessions visibility".into()),
+                source: "primary".into(),
+            }],
+        };
+
+        assert!(should_refresh_rescue_helper_permissions(
+            &diagnosis,
+            &["tools.allowlist.review".into()],
+        ));
     }
 
     #[test]
@@ -6477,8 +7142,62 @@ mod rescue_bot_tests {
         assert_eq!(sections[2].status, "degraded");
         assert_eq!(sections[3].status, "degraded");
         assert_eq!(summary.status, "broken");
-        assert_eq!(summary.fixable_issue_count, 1);
-        assert_eq!(summary.selected_fix_issue_ids, vec!["field.agents"]);
+        assert_eq!(summary.fixable_issue_count, 3);
+        assert_eq!(
+            summary.selected_fix_issue_ids,
+            vec![
+                "primary.gateway.unhealthy",
+                "field.agents",
+                "tools.allowlist.review"
+            ]
+        );
+        assert!(summary.headline.contains("Gateway"));
+        assert!(summary.recommended_action.contains("Apply 3 fix(es)"));
+    }
+
+    #[test]
+    fn test_build_rescue_primary_summary_marks_unreadable_config_as_degraded_when_gateway_is_healthy(
+    ) {
+        let checks = vec![RescuePrimaryCheckItem {
+            id: "primary.gateway.status".into(),
+            title: "Primary gateway status".into(),
+            ok: true,
+            detail: "running=true, healthy=true, port=18789".into(),
+        }];
+
+        let sections = build_rescue_primary_sections(None, &checks, &[]);
+        let summary = build_rescue_primary_summary(&sections, &[]);
+
+        assert_eq!(summary.status, "degraded");
+        assert!(
+            summary.headline.contains("Configuration")
+                || summary.headline.contains("Gateway")
+                || summary.headline.contains("recommended")
+        );
+    }
+
+    #[test]
+    fn test_build_rescue_primary_summary_marks_unreadable_config_and_gateway_down_as_broken() {
+        let checks = vec![RescuePrimaryCheckItem {
+            id: "primary.gateway.status".into(),
+            title: "Primary gateway status".into(),
+            ok: false,
+            detail: "Gateway is not running".into(),
+        }];
+        let issues = vec![RescuePrimaryIssue {
+            id: "primary.gateway.unhealthy".into(),
+            code: "primary.gateway.unhealthy".into(),
+            severity: "error".into(),
+            message: "Primary gateway is not healthy".into(),
+            auto_fixable: true,
+            fix_hint: Some("Restart primary gateway".into()),
+            source: "primary".into(),
+        }];
+
+        let sections = build_rescue_primary_sections(None, &checks, &issues);
+        let summary = build_rescue_primary_summary(&sections, &issues);
+
+        assert_eq!(summary.status, "broken");
         assert!(summary.headline.contains("Gateway"));
     }
 
@@ -8971,19 +9690,35 @@ async fn run_remote_rescue_bot_command(
     host_id: &str,
     command: Vec<String>,
 ) -> Result<RescueBotCommandResult, String> {
+    let output = run_remote_openclaw_raw(pool, host_id, &command).await?;
+    if is_gateway_status_command_output_incompatible(&output, &command) {
+        let fallback_command = strip_gateway_status_json_flag(&command);
+        if fallback_command != command {
+            let fallback_output = run_remote_openclaw_raw(pool, host_id, &fallback_command).await?;
+            return Ok(RescueBotCommandResult {
+                command: fallback_command,
+                output: fallback_output,
+            });
+        }
+    }
+    Ok(RescueBotCommandResult { command, output })
+}
+
+async fn run_remote_openclaw_raw(
+    pool: &SshConnectionPool,
+    host_id: &str,
+    command: &[String],
+) -> Result<OpenclawCommandOutput, String> {
     let mut remote_cmd = String::from("openclaw");
-    for arg in &command {
+    for arg in command {
         remote_cmd.push(' ');
         remote_cmd.push_str(&shell_escape(arg));
     }
     let raw = pool.exec_login(host_id, &remote_cmd).await?;
-    Ok(RescueBotCommandResult {
-        command,
-        output: OpenclawCommandOutput {
-            stdout: raw.stdout,
-            stderr: raw.stderr,
-            exit_code: raw.exit_code as i32,
-        },
+    Ok(OpenclawCommandOutput {
+        stdout: raw.stdout,
+        stderr: raw.stderr,
+        exit_code: raw.exit_code as i32,
     })
 }
 
@@ -9002,12 +9737,12 @@ async fn run_remote_primary_doctor_with_fallback(
     host_id: &str,
     profile: &str,
 ) -> Result<OpenclawCommandOutput, String> {
-    let json_command = build_profile_command(profile, &["doctor", "--json"]);
+    let json_command = build_profile_command(profile, &["doctor", "--json", "--yes"]);
     let output = run_remote_openclaw_dynamic(pool, host_id, json_command).await?;
     if output.exit_code != 0
         && clawpal_core::doctor::doctor_json_option_unsupported(&output.stderr, &output.stdout)
     {
-        let plain_command = build_profile_command(profile, &["doctor"]);
+        let plain_command = build_profile_command(profile, &["doctor", "--yes"]);
         return run_remote_openclaw_dynamic(pool, host_id, plain_command).await;
     }
     Ok(output)

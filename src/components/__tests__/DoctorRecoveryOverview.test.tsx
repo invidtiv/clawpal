@@ -8,7 +8,7 @@ import type { RescuePrimaryDiagnosisResult } from "@/lib/types";
 import { DoctorRecoveryOverview } from "../DoctorRecoveryOverview";
 
 describe("DoctorRecoveryOverview", () => {
-  test("renders a single global fix surface above sections", async () => {
+  test("renders a concise summary first and keeps the section checklist visible by default", async () => {
     await i18n.changeLanguage("en");
     const diagnosis: RescuePrimaryDiagnosisResult = {
       status: "broken",
@@ -20,7 +20,7 @@ describe("DoctorRecoveryOverview", () => {
       summary: {
         status: "broken",
         headline: "Gateway needs attention first",
-        recommendedAction: "Apply 1 safe fix and re-run recovery",
+        recommendedAction: "Apply 1 fix and re-run recovery",
         fixableIssueCount: 1,
         selectedFixIssueIds: ["field.agents"],
         rootCauseHypotheses: [
@@ -119,19 +119,156 @@ describe("DoctorRecoveryOverview", () => {
     );
 
     expect(html).toContain("Gateway needs attention first");
-    expect(html).toContain("Apply 1 safe fix and re-run recovery");
+    expect(html).toContain("Apply 1 fix and re-run recovery");
     expect(html).toContain("Fix 1 issue");
     expect(html).toContain("Agents");
-    expect(html).toContain("Gateway");
     expect(html).toContain("Agent defaults are missing");
     expect(html).toContain("The primary profile has no agents.defaults.model binding.");
     expect(html).toContain("Set agents.defaults.model to a valid provider/model pair.");
     expect(html).toContain("Guidance matches OpenClaw 2026.3.x.");
-    expect(html).toContain("docs.openclaw.ai/agents");
+    expect(html).toContain("Missing agent defaults");
+    expect(html).toContain("Gateway port");
     expect(html.match(/Fix 1 issue/g)?.length ?? 0).toBe(1);
     expect(html).not.toContain("Open Gateway docs");
-    expect(html).toContain("text-emerald-700");
     expect(html).toContain("<details open");
-    expect(html).toContain("<details");
+  });
+
+  test("uses optimize wording for degraded recommendations", async () => {
+    await i18n.changeLanguage("en");
+    const diagnosis: RescuePrimaryDiagnosisResult = {
+      status: "degraded",
+      checkedAt: "2026-03-07T00:00:00Z",
+      targetProfile: "primary",
+      rescueProfile: "rescue",
+      rescueConfigured: true,
+      rescuePort: 19789,
+      summary: {
+        status: "degraded",
+        headline: "Gateway has recommended improvements",
+        recommendedAction: "Apply 2 optimizations to stabilize the target",
+        fixableIssueCount: 2,
+        selectedFixIssueIds: ["tools.allowlist.review", "channel.policy.review"],
+        rootCauseHypotheses: [],
+        fixSteps: [],
+        confidence: undefined,
+        citations: [],
+        versionAwareness: undefined,
+      },
+      sections: [
+        {
+          key: "gateway",
+          title: "Gateway",
+          status: "degraded",
+          summary: "Gateway has 2 recommended changes",
+          docsUrl: "https://docs.openclaw.ai/gateway/security/index",
+          rootCauseHypotheses: [],
+          fixSteps: [],
+          confidence: undefined,
+          citations: [],
+          versionAwareness: undefined,
+          items: [
+            {
+              id: "tools.allowlist.review",
+              label: "Review helper permissions",
+              status: "warn",
+              detail: "Allowlist blocks rescue helper access",
+              autoFixable: true,
+              issueId: "tools.allowlist.review",
+            },
+          ],
+        },
+      ],
+      checks: [],
+      issues: [],
+    };
+
+    const html = renderToStaticMarkup(
+      React.createElement(I18nextProvider, {
+        i18n,
+        children: React.createElement(DoctorRecoveryOverview, {
+          diagnosis,
+          checkLoading: false,
+          repairing: false,
+          progressLine: null,
+          repairResult: null,
+          repairError: null,
+          onRepairAll: () => {},
+          onRepairIssue: () => {},
+        }),
+      }),
+    );
+
+    expect(html).toContain("Optimize 2 issues");
+    expect(html).toContain("Optimize");
+    expect(html).not.toContain("Fix 2 issues");
+  });
+
+  test("shows the broken badge once when summary, section, and item describe the same blocker", async () => {
+    await i18n.changeLanguage("en");
+    const diagnosis: RescuePrimaryDiagnosisResult = {
+      status: "broken",
+      checkedAt: "2026-03-07T00:00:00Z",
+      targetProfile: "primary",
+      rescueProfile: "rescue",
+      rescueConfigured: true,
+      rescuePort: 19789,
+      summary: {
+        status: "broken",
+        headline: "Gateway needs attention first",
+        recommendedAction: "Repair the blocking config error",
+        fixableIssueCount: 1,
+        selectedFixIssueIds: ["primary.config.unreadable"],
+        rootCauseHypotheses: [],
+        fixSteps: [],
+        confidence: undefined,
+        citations: [],
+        versionAwareness: undefined,
+      },
+      sections: [
+        {
+          key: "gateway",
+          title: "Gateway",
+          status: "broken",
+          summary: "Gateway has 1 blocking finding",
+          docsUrl: "https://docs.openclaw.ai/gateway",
+          rootCauseHypotheses: [],
+          fixSteps: [],
+          confidence: undefined,
+          citations: [],
+          versionAwareness: undefined,
+          items: [
+            {
+              id: "primary.config.unreadable",
+              label: "Primary configuration could not be read",
+              status: "error",
+              detail: "Repair the syntax error in ~/.openclaw/openclaw.json",
+              autoFixable: true,
+              issueId: "primary.config.unreadable",
+            },
+          ],
+        },
+      ],
+      checks: [],
+      issues: [],
+    };
+
+    const html = renderToStaticMarkup(
+      React.createElement(I18nextProvider, {
+        i18n,
+        children: React.createElement(DoctorRecoveryOverview, {
+          diagnosis,
+          checkLoading: false,
+          repairing: false,
+          progressLine: null,
+          repairResult: null,
+          repairError: null,
+          onRepairAll: () => {},
+          onRepairIssue: () => {},
+        }),
+      }),
+    );
+
+    expect(html.match(/>Broken</g)?.length ?? 0).toBe(1);
+    expect(html).toContain("Primary configuration could not be read");
   });
 });

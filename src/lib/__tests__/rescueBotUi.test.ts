@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test";
 import type { RescueBotManageResult } from "@/lib/types";
 import type { RescuePrimarySectionResult } from "@/lib/types";
 import {
+  buildOptimisticRescueStatePatch,
   buildCheckProgressLines,
   buildFixProgressLines,
   buildStatusProgressLines,
@@ -65,6 +66,14 @@ describe("rescueBotUi", () => {
     });
   });
 
+  test("builds an optimistic paused patch before deactivate finishes", () => {
+    expect(buildOptimisticRescueStatePatch("deactivate")).toEqual({
+      runtimeState: "configured_inactive",
+      active: false,
+    });
+    expect(buildOptimisticRescueStatePatch("activate")).toBeNull();
+  });
+
   test("skips immediate status refresh after deactivate so the UI stays paused", () => {
     expect(shouldRefreshStatusAfterAction("activate")).toBe(true);
     expect(shouldRefreshStatusAfterAction("set")).toBe(true);
@@ -91,6 +100,7 @@ describe("rescueBotUi", () => {
   test("builds a fixed single-line check progress sequence", () => {
     expect(buildCheckProgressLines()).toEqual([
       "Checking gateway configuration",
+      "Running openclaw doctor",
       "Checking models and credentials",
       "Checking tool execution policies",
       "Checking agent definitions",

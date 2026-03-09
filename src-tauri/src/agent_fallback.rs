@@ -218,6 +218,35 @@ fn rules_fallback(
             }],
         };
     }
+    if lower.contains("russh exec timed out") || lower.contains("exec timed out after") {
+        return GuidanceBody {
+            summary: "远程修复命令执行超时，ClawPal 暂时无法确认最终结果。".to_string(),
+            actions: vec![
+                "先打开 Gateway Logs，查看最近一次修复是否已经完成。".to_string(),
+                "再检查主配置文件和 gateway status，确认 Gateway 是否已恢复健康。".to_string(),
+                "如果仍未恢复，再把 ClawPal / Helper / Gateway 日志交给开发者分析。".to_string(),
+            ],
+            structured_actions: vec![
+                GuidanceAction {
+                    label: "查看 Gateway Logs".to_string(),
+                    action_type: "view_logs".to_string(),
+                    tool: None,
+                    args: None,
+                    invoke_type: None,
+                    context: Some("remote repair timeout".to_string()),
+                },
+                GuidanceAction {
+                    label: "让 AI 继续排查".to_string(),
+                    action_type: "doctor_handoff".to_string(),
+                    tool: None,
+                    args: None,
+                    invoke_type: None,
+                    context: Some("Remote repair command timed out".to_string()),
+                },
+            ],
+        };
+    }
+
     if lower.contains("not connected to remote")
         || lower.contains("ssh")
         || lower.contains("connection refused")
@@ -263,6 +292,31 @@ fn rules_fallback(
                     context: Some(format!("SSH 连接失败: {target_hint}")),
                 },
             ],
+        };
+    }
+
+    if operation == "diagnoseDoctorAssistant" || operation == "repairDoctorAssistant" {
+        let verb = if operation == "repairDoctorAssistant" {
+            "修复"
+        } else {
+            "诊断"
+        };
+        return GuidanceBody {
+            summary: format!(
+                "Doctor 页面{verb}在 `{transport}` 环境执行失败，请打开日志并交给开发者分析。"
+            ),
+            actions: vec![
+                "打开 Gateway Logs，查看最近一次启动或修复失败输出。".to_string(),
+                "一并收集 ClawPal / Helper / Gateway 日志，交给开发者分析。".to_string(),
+            ],
+            structured_actions: vec![GuidanceAction {
+                label: "让 AI 继续排查".to_string(),
+                action_type: "doctor_handoff".to_string(),
+                tool: None,
+                args: None,
+                invoke_type: None,
+                context: Some(format!("Doctor 页面{verb}失败: {transport}")),
+            }],
         };
     }
 

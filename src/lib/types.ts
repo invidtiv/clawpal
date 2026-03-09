@@ -638,7 +638,14 @@ export interface RescuePrimaryRepairStep {
   command?: string[];
 }
 
+export interface RescuePrimaryPendingAction {
+  kind: "tempProviderSetup";
+  reason: string;
+  tempProviderProfileId?: string | null;
+}
+
 export interface RescuePrimaryRepairResult {
+  status: "completed" | "needsTempProviderSetup";
   attemptedAt: string;
   targetProfile: string;
   rescueProfile: string;
@@ -646,6 +653,7 @@ export interface RescuePrimaryRepairResult {
   appliedIssueIds: string[];
   skippedIssueIds: string[];
   failedIssueIds: string[];
+  pendingAction?: RescuePrimaryPendingAction | null;
   steps: RescuePrimaryRepairStep[];
   before: RescuePrimaryDiagnosisResult;
   after: RescuePrimaryDiagnosisResult;

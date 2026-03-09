@@ -8,8 +8,24 @@ import { InstanceContext } from "@/lib/instance-context";
 import { Doctor } from "../Doctor";
 
 describe("Doctor page rescue header", () => {
-  test("centers the LED bot, keeps icon controls underneath, and uses icon-only primary checks", async () => {
+  test("centers the LED bot, shows diagnose button and logs icon", async () => {
     await i18n.changeLanguage("en");
+    const storage = new Map<string, string>();
+    const originalWindow = (globalThis as { window?: unknown }).window;
+    (globalThis as { window?: unknown }).window = {
+      localStorage: {
+        getItem: (key: string) => storage.get(key) ?? null,
+        setItem: (key: string, value: string) => {
+          storage.set(key, value);
+        },
+        removeItem: (key: string) => {
+          storage.delete(key);
+        },
+        clear: () => {
+          storage.clear();
+        },
+      },
+    };
 
     const html = renderToStaticMarkup(
       React.createElement(I18nextProvider, {
@@ -36,20 +52,13 @@ describe("Doctor page rescue header", () => {
 
     expect(html).toContain("flex flex-col items-center");
     expect(html).toContain("data-led-bot=\"wide-console\"");
-    expect(html).toContain("More options");
     expect(html).toContain("aria-label=\"Open logs\"");
-    expect(html).toContain("aria-label=\"Play\"");
-    expect(html).not.toContain(">Enable<");
-    expect(html).not.toContain("Port");
-    expect(html).not.toContain("Enable the helper when you want a safe sidecar for diagnosis and repair.");
+    expect(html).toContain(">Diagnose<");
     expect(html).not.toContain("Rescue Bot");
     expect(html).not.toContain("Activate Rescue Bot");
-    expect(html).not.toContain("More Rescue Bot actions");
-    expect(html.indexOf("More options")).toBeLessThan(
-      html.indexOf("Safe checks and guided fixes before touching your main gateway."),
-    );
-    expect(i18n.t("doctor.primaryRecoveryTitle")).toBe("Check Primary Agent");
-    expect(i18n.t("doctor.primaryCheckNow")).toBe("Check Primary Agent");
-    expect(html).not.toContain(">Check Primary Agent<");
+    expect(i18n.t("doctor.diagnose")).toBe("Diagnose");
+    expect(i18n.t("doctor.configureTempProvider")).toBe("Configure temp gateway provider");
+
+    (globalThis as { window?: unknown }).window = originalWindow;
   });
 });

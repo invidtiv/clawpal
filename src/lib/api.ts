@@ -176,6 +176,16 @@ export const api = {
     invoke("refresh_discord_guild_channels", {}),
   restartGateway: (): Promise<boolean> =>
     invoke("restart_gateway", {}),
+  diagnoseDoctorAssistant: (): Promise<RescuePrimaryDiagnosisResult> =>
+    invoke("diagnose_doctor_assistant", {}),
+  repairDoctorAssistant: (
+    tempProviderProfileId?: string,
+    currentDiagnosis?: RescuePrimaryDiagnosisResult,
+  ): Promise<RescuePrimaryRepairResult> =>
+    invoke("repair_doctor_assistant", {
+      tempProviderProfileId: tempProviderProfileId ?? null,
+      currentDiagnosis: currentDiagnosis ?? null,
+    }),
   manageRescueBot: (action: RescueBotAction, profile?: string, rescuePort?: number): Promise<RescueBotManageResult> =>
     invoke("manage_rescue_bot", { action, profile: profile ?? null, rescuePort: rescuePort ?? null }),
   getRescueBotStatus: (profile?: string, rescuePort?: number): Promise<RescueBotManageResult> =>
@@ -241,6 +251,18 @@ export const api = {
     invoke("remote_list_bindings", { hostId }),
   remoteRestartGateway: (hostId: string): Promise<boolean> =>
     invoke("remote_restart_gateway", { hostId }),
+  remoteDiagnoseDoctorAssistant: (hostId: string): Promise<RescuePrimaryDiagnosisResult> =>
+    invoke("remote_diagnose_doctor_assistant", { hostId }),
+  remoteRepairDoctorAssistant: (
+    hostId: string,
+    tempProviderProfileId?: string,
+    currentDiagnosis?: RescuePrimaryDiagnosisResult,
+  ): Promise<RescuePrimaryRepairResult> =>
+    invoke("remote_repair_doctor_assistant", {
+      hostId,
+      tempProviderProfileId: tempProviderProfileId ?? null,
+      currentDiagnosis: currentDiagnosis ?? null,
+    }),
   remoteManageRescueBot: (hostId: string, action: RescueBotAction, profile?: string, rescuePort?: number): Promise<RescueBotManageResult> =>
     invoke("remote_manage_rescue_bot", { hostId, action, profile: profile ?? null, rescuePort: rescuePort ?? null }),
   remoteGetRescueBotStatus: (hostId: string, profile?: string, rescuePort?: number): Promise<RescueBotManageResult> =>

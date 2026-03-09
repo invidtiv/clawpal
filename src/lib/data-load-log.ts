@@ -50,7 +50,9 @@ export function inferDataLoadPage(method: string): string {
     return "cron";
   }
   if (
-    method === "getRescueBotStatus"
+    method === "diagnoseDoctorAssistant"
+    || method === "repairDoctorAssistant"
+    || method === "getRescueBotStatus"
     || method === "diagnosePrimaryViaRescue"
     || method === "repairPrimaryViaRescue"
   ) {
