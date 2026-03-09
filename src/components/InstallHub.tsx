@@ -15,6 +15,7 @@ import { SshFormWidget } from "@/components/SshFormWidget";
 import { hasGuidanceEmitted } from "@/lib/use-api";
 import { isAlreadyExplainedGuidanceError, withGuidance } from "@/lib/guidance";
 import { api } from "@/lib/api";
+import { clearRemotePersistenceScope, ensureRemotePersistenceScope } from "@/lib/instance-persistence";
 import type {
   InstallSession,
   SshConfigHostSuggestion,
@@ -47,6 +48,59 @@ const EMPTY_DIAGNOSTIC_LOGS: InstallHubDiagnosticLogs = {
   gatewayLog: "",
   gatewayErrorLog: "",
 };
+
+export function InstallHubEntryCards({
+  onConnectRemote,
+  onConnectDocker,
+  onConnectWsl2,
+}: {
+  onConnectRemote: () => void;
+  onConnectDocker: () => void;
+  onConnectWsl2: () => void;
+}) {
+  const { t } = useTranslation();
+
+  return (
+    <div className="grid gap-3">
+      <Button
+        variant="outline"
+        className="h-auto w-full min-w-0 flex-col items-start justify-start gap-1 px-4 py-4 text-left whitespace-normal break-words"
+        onClick={onConnectRemote}
+      >
+        <span className="w-full font-medium whitespace-normal break-words">
+          {t("installChat.tag.connectRemote")}
+        </span>
+        <span className="w-full text-xs text-muted-foreground whitespace-normal break-words">
+          {t("installChat.connectRemoteDescription")}
+        </span>
+      </Button>
+      <Button
+        variant="outline"
+        className="h-auto w-full min-w-0 flex-col items-start justify-start gap-1 px-4 py-4 text-left whitespace-normal break-words"
+        onClick={onConnectDocker}
+      >
+        <span className="w-full font-medium whitespace-normal break-words">
+          {t("installChat.tag.connectDocker")}
+        </span>
+        <span className="w-full text-xs text-muted-foreground whitespace-normal break-words">
+          {t("installChat.connectDockerDescription")}
+        </span>
+      </Button>
+      <Button
+        variant="outline"
+        className="h-auto w-full min-w-0 flex-col items-start justify-start gap-1 px-4 py-4 text-left whitespace-normal break-words"
+        onClick={onConnectWsl2}
+      >
+        <span className="w-full font-medium whitespace-normal break-words">
+          {t("installChat.tag.connectWsl2")}
+        </span>
+        <span className="w-full text-xs text-muted-foreground whitespace-normal break-words">
+          {t("installChat.connectWsl2Description")}
+        </span>
+      </Button>
+    </div>
+  );
+}
 
 export function InstallHub({
   open,
@@ -192,7 +246,7 @@ export function InstallHub({
     const guidanceError = hasGuidanceEmitted(error) || isAlreadyExplainedGuidanceError(errorText);
     setDiagnosticHostId(hostId);
     setMode("failed");
-    setRunError(guidanceError ? t("doctor.failed") : errorText);
+    setRunError(guidanceError ? t("installChat.connectionFailed") : errorText);
     setRunErrorHasGuidance(guidanceError);
     void refreshDiagnostics(hostId);
   }, [refreshDiagnostics, t]);
@@ -235,6 +289,9 @@ export function InstallHub({
         resolvedId = `${idBase}-${suffix}`;
         suffix += 1;
       }
+      if (!existingIds.has(resolvedId)) {
+        clearRemotePersistenceScope(resolvedId);
+      }
       targetHostId = resolvedId;
       const saved = await withGuidance(
         () => api.upsertSshHost({ ...host, id: resolvedId }),
@@ -253,6 +310,7 @@ export function InstallHub({
           "remote_ssh",
         );
       }
+      ensureRemotePersistenceScope(saved);
       try {
         await withGuidance(
           () => api.remoteGetInstanceStatus(saved.id),
@@ -350,7 +408,7 @@ export function InstallHub({
   };
 
   const diagnosticTargetLabel = diagnosticHostId
-    ? `remote (${diagnosticHostId})`
+    ? t("installChat.diagnosticSourceRemote", { hostId: diagnosticHostId })
     : t("instance.local");
 
   const renderDiagnosticSection = (title: string, content: string) => (
@@ -366,7 +424,7 @@ export function InstallHub({
 
   const runErrorPanel = runError ? (
     <div className="rounded-md border border-destructive/30 bg-destructive/5 text-destructive px-3 py-2 space-y-2">
-      <p className="text-sm font-medium">{t("doctor.failed")}</p>
+      <p className="text-sm font-medium">{t("installChat.connectionFailed")}</p>
       {!runErrorHasGuidance ? <p className="text-sm whitespace-pre-wrap break-words">{runError}</p> : null}
       {runErrorHasGuidance ? (
         <p className="text-sm text-muted-foreground">{t("home.fixInDoctor")}</p>
@@ -401,17 +459,19 @@ export function InstallHub({
         {t("doctor.appLog")} / {t("doctor.errorLog")} / {t("doctor.gatewayLogs")} {t("doctor.source")} {diagnosticTargetLabel}
       </p>
       {diagnosticsLoading ? (
-        <p className="text-xs text-muted-foreground animate-pulse">loading...</p>
+        <p className="text-xs text-muted-foreground animate-pulse">{t("installChat.loadingDiagnostics")}</p>
       ) : null}
       {diagnosticsError ? (
-        <p className="text-xs text-destructive">diagnostics: {diagnosticsError}</p>
+        <p className="text-xs text-destructive">
+          {t("installChat.diagnosticsError", { error: diagnosticsError })}
+        </p>
       ) : null}
       {diagnosticsVisible ? (
         <div className="space-y-2">
           {renderDiagnosticSection(t("doctor.appLog"), diagnosticLogs.appLog)}
           {renderDiagnosticSection(t("doctor.errorLog"), diagnosticLogs.errorLog)}
-          {renderDiagnosticSection(`${t("doctor.gatewayLogs")} (app)`, diagnosticLogs.gatewayLog)}
-          {renderDiagnosticSection(`${t("doctor.gatewayLogs")} (error)`, diagnosticLogs.gatewayErrorLog)}
+          {renderDiagnosticSection(t("installChat.gatewayLogsApp"), diagnosticLogs.gatewayLog)}
+          {renderDiagnosticSection(t("installChat.gatewayLogsError"), diagnosticLogs.gatewayErrorLog)}
         </div>
       ) : null}
     </div>
@@ -537,7 +597,7 @@ export function InstallHub({
                   clearRunErrorState();
                 }}
               >
-                {t("doctor.back")}
+                {t("installChat.back")}
               </Button>
             </DialogFooter>
           </div>
@@ -546,32 +606,11 @@ export function InstallHub({
             <div className="text-sm text-muted-foreground">
               {t("start.addInstanceHint")}
             </div>
-            <div className="grid gap-3 sm:grid-cols-3">
-              <Button
-                variant="outline"
-                className="h-auto flex-col items-start gap-1 px-4 py-4 text-left"
-                onClick={() => setMode("connect_ssh")}
-              >
-                <span className="font-medium">{t("installChat.tag.connectRemote")}</span>
-                <span className="text-xs text-muted-foreground">{t("installChat.connectRemoteDescription")}</span>
-              </Button>
-              <Button
-                variant="outline"
-                className="h-auto flex-col items-start gap-1 px-4 py-4 text-left"
-                onClick={() => setMode("connect_docker")}
-              >
-                <span className="font-medium">{t("installChat.tag.connectDocker")}</span>
-                <span className="text-xs text-muted-foreground">{t("installChat.connectDockerDescription")}</span>
-              </Button>
-              <Button
-                variant="outline"
-                className="h-auto flex-col items-start gap-1 px-4 py-4 text-left"
-                onClick={() => setMode("connect_wsl2")}
-              >
-                <span className="font-medium">{t("installChat.tag.connectWsl2")}</span>
-                <span className="text-xs text-muted-foreground">{t("installChat.connectWsl2Description")}</span>
-              </Button>
-            </div>
+            <InstallHubEntryCards
+              onConnectRemote={() => setMode("connect_ssh")}
+              onConnectDocker={() => setMode("connect_docker")}
+              onConnectWsl2={() => setMode("connect_wsl2")}
+            />
           </div>
         )}
       </DialogContent>

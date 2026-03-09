@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 import { useApi } from "@/lib/use-api";
+import { shouldEnableInstanceLiveReads } from "@/lib/instance-availability";
 import { cn } from "@/lib/utils";
 import type {
   CronJob,
@@ -149,20 +150,24 @@ export function Cron() {
   const lang = i18n.language;
   const ua = useApi();
   const persistedConfigSnapshot = useMemo(
-    () => readPersistedReadCache<CronConfigSnapshot>(
-      ua.instanceId,
-      "getCronConfigSnapshot",
-      [],
-    ) ?? null,
-    [ua.instanceId],
+    () => (ua.persistenceResolved && ua.persistenceScope
+      ? readPersistedReadCache<CronConfigSnapshot>(
+        ua.persistenceScope,
+        "getCronConfigSnapshot",
+        [],
+      ) ?? null
+      : null),
+    [ua.persistenceResolved, ua.persistenceScope],
   );
   const persistedRuntimeSnapshot = useMemo(
-    () => readPersistedReadCache<CronRuntimeSnapshot>(
-      ua.instanceId,
-      "getCronRuntimeSnapshot",
-      [],
-    ) ?? null,
-    [ua.instanceId],
+    () => (ua.persistenceResolved && ua.persistenceScope
+      ? readPersistedReadCache<CronRuntimeSnapshot>(
+        ua.persistenceScope,
+        "getCronRuntimeSnapshot",
+        [],
+      ) ?? null
+      : null),
+    [ua.persistenceResolved, ua.persistenceScope],
   );
   const initialCronState = useMemo(
     () => buildInitialCronState(
@@ -182,7 +187,12 @@ export function Cron() {
   const [lastSuccess, setLastSuccess] = useState<string | null>(null);
   const [filter, setFilter] = useState<CronFilter>("all");
   const [channels, setChannels] = useState<DiscordGuildChannel[]>([]);
-  const liveReadsReady = ua.instanceToken !== 0;
+  const liveReadsReady = shouldEnableInstanceLiveReads({
+    instanceToken: ua.instanceToken,
+    persistenceResolved: ua.persistenceResolved,
+    persistenceScope: ua.persistenceScope,
+    isRemote: ua.isRemote,
+  });
 
   const loadConfigSnapshot = useCallback(() => {
     if (!liveReadsReady) return;

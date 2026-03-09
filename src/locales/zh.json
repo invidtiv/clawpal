@@ -121,6 +121,13 @@
   "installChat.stepFailed": "安装步骤失败",
   "installChat.ready": "就绪",
   "installChat.notReady": "安装完成但实例未就绪",
+  "installChat.connectionFailed": "连接失败",
+  "installChat.back": "返回",
+  "installChat.loadingDiagnostics": "正在加载诊断日志...",
+  "installChat.diagnosticsError": "诊断日志读取失败：{{error}}",
+  "installChat.gatewayLogsApp": "Gateway 日志（应用）",
+  "installChat.gatewayLogsError": "Gateway 日志（错误）",
+  "installChat.diagnosticSourceRemote": "远程（{{hostId}}）",
 
   "install.docker.setupFailed": "Docker 安装失败",
   "install.docker.precheck.summary": "Docker 预检完成",

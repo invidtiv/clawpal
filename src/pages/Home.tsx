@@ -34,6 +34,7 @@ import type {
 } from "../lib/types";
 import { useApi, hasGuidanceEmitted } from "@/lib/use-api";
 import { profileToModelValue } from "@/lib/model-value";
+import { shouldEnableInstanceLiveReads } from "@/lib/instance-availability";
 import {
   applyConfigSnapshotToHomeState,
   buildInitialHomeState,
@@ -92,19 +93,29 @@ export function Home({
   const { t } = useTranslation();
   const ua = useApi();
   const persistedConfigSnapshot = useMemo(
-    () => readPersistedReadCache<InstanceConfigSnapshot>(ua.instanceId, "getInstanceConfigSnapshot", []) ?? null,
-    [ua.instanceId],
+    () => (ua.persistenceResolved && ua.persistenceScope
+      ? readPersistedReadCache<InstanceConfigSnapshot>(ua.persistenceScope, "getInstanceConfigSnapshot", []) ?? null
+      : null),
+    [ua.persistenceResolved, ua.persistenceScope],
   );
   const persistedRuntimeSnapshot = useMemo(
-    () => readPersistedReadCache<InstanceRuntimeSnapshot>(ua.instanceId, "getInstanceRuntimeSnapshot", []) ?? null,
-    [ua.instanceId],
+    () => (ua.persistenceResolved && ua.persistenceScope
+      ? readPersistedReadCache<InstanceRuntimeSnapshot>(ua.persistenceScope, "getInstanceRuntimeSnapshot", []) ?? null
+      : null),
+    [ua.persistenceResolved, ua.persistenceScope],
   );
   const persistedStatusExtra = useMemo(
-    () => readPersistedReadCache<StatusExtra>(ua.instanceId, "getStatusExtra", []) ?? null,
-    [ua.instanceId],
+    () => (ua.persistenceResolved && ua.persistenceScope
+      ? readPersistedReadCache<StatusExtra>(ua.persistenceScope, "getStatusExtra", []) ?? null
+      : null),
+    [ua.persistenceResolved, ua.persistenceScope],
   );
   const initialHomeState = useMemo(
-    () => buildInitialHomeState(persistedConfigSnapshot, persistedRuntimeSnapshot, persistedStatusExtra),
+    () => buildInitialHomeState(
+      persistedConfigSnapshot,
+      persistedRuntimeSnapshot,
+      persistedStatusExtra,
+    ),
     [persistedConfigSnapshot, persistedRuntimeSnapshot, persistedStatusExtra],
   );
   const [status, setStatus] = useState<InstanceStatus | null>(() => initialHomeState.status);
@@ -120,7 +131,12 @@ export function Home({
   // Create agent dialog
   const [showCreateAgent, setShowCreateAgent] = useState(false);
   const [showUpgradeDialog, setShowUpgradeDialog] = useState(false);
-  const liveReadsReady = ua.instanceToken !== 0;
+  const liveReadsReady = shouldEnableInstanceLiveReads({
+    instanceToken: ua.instanceToken,
+    persistenceResolved: ua.persistenceResolved,
+    persistenceScope: ua.persistenceScope,
+    isRemote: ua.isRemote,
+  });
 
   const resolveModelValue = (profileId: string | null): string | null => {
     if (!profileId) return null;
@@ -449,6 +465,11 @@ export function Home({
 
   // Update check — deferred, runs once (not in poll loop)
   useEffect(() => {
+    if (!liveReadsReady) {
+      setCheckingUpdate(false);
+      setUpdateInfo(null);
+      return;
+    }
     const instanceKey = `${ua.instanceId}#${ua.instanceToken}`;
     const latched = OPENCLAW_UPDATE_LATCH.get(instanceKey);
     const now = Date.now();
@@ -501,7 +522,7 @@ export function Home({
     return () => {
       cancelled = true;
     };
-  }, [agents, status, statusSettled, ua]);
+  }, [agents, liveReadsReady, status, statusSettled, ua]);
 
   const handleDeleteAgent = (agentId: string) => {
     if (ua.isRemote && !ua.isConnected) return;

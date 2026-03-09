@@ -79,10 +79,10 @@ const HOST_SHARED_READ_METHODS = new Set([
 
 export function resolveReadCacheScopeKey(
   instanceCacheKey: string,
-  persistenceScope: string,
+  persistenceScope: string | null,
   method: string,
 ): string {
-  if (HOST_SHARED_READ_METHODS.has(method)) {
+  if (HOST_SHARED_READ_METHODS.has(method) && persistenceScope) {
     return persistenceScope;
   }
   return instanceCacheKey;
@@ -172,15 +172,16 @@ export function primeReadCache<T>(
 export async function prewarmRemoteInstanceReadCache(
   instanceId: string,
   instanceToken: number,
+  persistenceScope: string | null,
 ) {
   const instanceCacheKey = `${instanceId}#${instanceToken}`;
-  const persistenceScope = instanceId;
   const warm = <T,>(
     method: string,
     ttlMs: number,
     loader: () => Promise<T>,
   ) => callWithReadCache(
     resolveReadCacheScopeKey(instanceCacheKey, persistenceScope, method),
+    instanceId,
     persistenceScope,
     method,
     [],
@@ -232,7 +233,8 @@ export async function prewarmRemoteInstanceReadCache(
 
 function callWithReadCache<TResult>(
   instanceCacheKey: string,
-  persistenceScope: string,
+  metricInstanceId: string,
+  persistenceScope: string | null,
   method: string,
   args: unknown[],
   ttlMs: number,
@@ -251,7 +253,7 @@ function callWithReadCache<TResult>(
         requestId: createDataLoadRequestId(method),
         resource: method,
         page,
-        instanceId: persistenceScope,
+        instanceId: metricInstanceId,
         instanceToken,
         source: "cache",
         phase: "success",
@@ -265,7 +267,7 @@ function callWithReadCache<TResult>(
         requestId: createDataLoadRequestId(method),
         resource: method,
         page,
-        instanceId: persistenceScope,
+        instanceId: metricInstanceId,
         instanceToken,
         source: "cache",
         phase: "success",
@@ -285,7 +287,7 @@ function callWithReadCache<TResult>(
     requestId,
     resource: method,
     page,
-    instanceId: persistenceScope,
+    instanceId: metricInstanceId,
     instanceToken,
     source,
     phase: "start",
@@ -307,7 +309,7 @@ function callWithReadCache<TResult>(
           requestId,
           resource: method,
           page,
-          instanceId: persistenceScope,
+          instanceId: metricInstanceId,
           instanceToken,
           source,
           phase: "success",
@@ -321,14 +323,16 @@ function callWithReadCache<TResult>(
         expiresAt: Date.now() + ttlMs,
         optimisticUntil: undefined,
       });
-      writePersistedReadCache(persistenceScope, method, args, value);
+      if (persistenceScope) {
+        writePersistedReadCache(persistenceScope, method, args, value);
+      }
       trimReadCacheIfNeeded();
       _notifyCacheSubscribers(key);
       emitDataLoadMetric({
         requestId,
         resource: method,
         page,
-        instanceId: persistenceScope,
+        instanceId: metricInstanceId,
         instanceToken,
         source,
         phase: "success",
@@ -346,7 +350,7 @@ function callWithReadCache<TResult>(
         requestId,
         resource: method,
         page,
-        instanceId: persistenceScope,
+        instanceId: metricInstanceId,
         instanceToken,
         source,
         phase: "error",
@@ -405,6 +409,8 @@ export function useApi() {
     isRemote,
     isDocker,
     isConnected,
+    persistenceScope,
+    persistenceResolved,
     channelNodes,
     discordGuildChannels,
     channelsLoading,
@@ -417,7 +423,7 @@ export function useApi() {
   const transport: "local" | "docker_local" | "remote_ssh" = isRemote
     ? "remote_ssh"
     : (isDocker ? "docker_local" : "local");
-  const persistenceScope = instanceId;
+  const persistedReadScope = persistenceScope;
 
   const explainAndWrapError = useCallback(
     async (method: string | undefined, rawError: unknown) => {
@@ -514,15 +520,16 @@ export function useApi() {
       const call = dispatch(localFn, remoteFn, method);
       return (...args: TArgs): Promise<TResult> =>
         callWithReadCache(
-          resolveReadCacheScopeKey(instanceCacheKey, persistenceScope, method),
-          persistenceScope,
+          resolveReadCacheScopeKey(instanceCacheKey, persistedReadScope, method),
+          instanceId,
+          persistedReadScope,
           method,
           args,
           ttlMs,
           () => call(...args),
         );
     },
-    [dispatch, instanceCacheKey, persistenceScope],
+    [dispatch, instanceCacheKey, instanceId, persistedReadScope],
   );
 
   const localCached = useCallback(
@@ -532,9 +539,9 @@ export function useApi() {
       fn: (...args: TArgs) => Promise<TResult>,
     ) => {
       return (...args: TArgs): Promise<TResult> =>
-        callWithReadCache(instanceCacheKey, persistenceScope, method, args, ttlMs, () => fn(...args));
+        callWithReadCache(instanceCacheKey, instanceId, persistedReadScope, method, args, ttlMs, () => fn(...args));
     },
-    [instanceCacheKey, persistenceScope],
+    [instanceCacheKey, instanceId, persistedReadScope],
   );
 
   const localGlobalCached = useCallback(
@@ -544,7 +551,7 @@ export function useApi() {
       fn: (...args: TArgs) => Promise<TResult>,
     ) => {
       return (...args: TArgs): Promise<TResult> =>
-        callWithReadCache(globalCacheKey, globalCacheKey, method, args, ttlMs, () => fn(...args));
+        callWithReadCache(globalCacheKey, globalCacheKey, globalCacheKey, method, args, ttlMs, () => fn(...args));
     },
     [globalCacheKey],
   );
@@ -557,13 +564,13 @@ export function useApi() {
       return (...args: TArgs): Promise<TResult> =>
         fn(...args).then((result) => {
           invalidateReadCacheForInstance(instanceCacheKey, methodsToInvalidate);
-          if (persistenceScope !== instanceCacheKey) {
-            invalidateReadCacheForInstance(persistenceScope, methodsToInvalidate);
+          if (persistedReadScope && persistedReadScope !== instanceCacheKey) {
+            invalidateReadCacheForInstance(persistedReadScope, methodsToInvalidate);
           }
           return result;
         });
     },
-    [instanceCacheKey, persistenceScope],
+    [instanceCacheKey, persistedReadScope],
   );
 
   const withGlobalInvalidation = useCallback(
@@ -612,6 +619,8 @@ export function useApi() {
       instanceViewToken,
       instanceToken,
       instanceCacheKey,
+      persistenceScope,
+      persistenceResolved,
       isRemote,
       isDocker,
       isConnected,
@@ -1018,6 +1027,8 @@ export function useApi() {
       instanceId,
       instanceViewToken,
       instanceCacheKey,
+      persistenceScope,
+      persistenceResolved,
       isRemote,
       isDocker,
       isConnected,

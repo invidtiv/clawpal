@@ -36,6 +36,8 @@ export const api = {
     }),
   localOpenclawConfigExists: (openclawHome: string): Promise<boolean> =>
     invoke("local_openclaw_config_exists", { openclawHome }),
+  localOpenclawCliAvailable: (): Promise<boolean> =>
+    invoke("local_openclaw_cli_available", {}),
   deleteLocalInstanceHome: (openclawHome: string): Promise<boolean> =>
     invoke("delete_local_instance_home", { openclawHome }),
   ensureAccessProfile: (instanceId: string, transport: string): Promise<EnsureAccessResult> =>

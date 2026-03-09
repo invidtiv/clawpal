@@ -22,6 +22,15 @@ import { InstanceContext } from "./lib/instance-context";
 import { api } from "./lib/api";
 import { buildCacheKey, invalidateGlobalReadCache, prewarmRemoteInstanceReadCache, subscribeToCacheKey } from "./lib/use-api";
 import { explainAndBuildGuidanceError, withGuidance } from "./lib/guidance";
+import {
+  clearRemotePersistenceScope,
+  ensureRemotePersistenceScope,
+  readRemotePersistenceScope,
+} from "./lib/instance-persistence";
+import {
+  shouldEnableInstanceLiveReads,
+  shouldEnableLocalInstanceScope,
+} from "./lib/instance-availability";
 import { readPersistedReadCache, writePersistedReadCache } from "./lib/persistent-read-cache";
 import { useFont } from "./lib/use-font";
 import { Button } from "@/components/ui/button";
@@ -646,6 +655,13 @@ export function App() {
     const hostLabel = host?.label || host?.host || hostId;
     try {
       await api.sshConnect(hostId);
+      if (host) {
+        const nextScope = ensureRemotePersistenceScope(host);
+        if (hostId === activeInstance) {
+          setPersistenceScope(nextScope);
+          setPersistenceResolved(true);
+        }
+      }
       return;
     } catch (err) {
       const raw = extractErrorText(err);
@@ -676,6 +692,13 @@ export function App() {
               hostId,
               "remote_ssh",
             );
+            if (host) {
+              const nextScope = ensureRemotePersistenceScope(host);
+              if (hostId === activeInstance) {
+                setPersistenceScope(nextScope);
+                setPersistenceResolved(true);
+              }
+            }
             return;
           } catch (passphraseErr) {
             const passphraseRaw = extractErrorText(passphraseErr);
@@ -707,7 +730,7 @@ export function App() {
         rawError: err,
       });
     }
-  }, [requestPassphrase, sshHosts, t]);
+  }, [activeInstance, requestPassphrase, sshHosts, t]);
 
   const syncRemoteAuthAfterConnect = useCallback(async (hostId: string) => {
     const now = Date.now();
@@ -898,12 +921,87 @@ export function App() {
 
   const [configVersion, setConfigVersion] = useState(0);
   const [instanceToken, setInstanceToken] = useState(0);
+  const [persistenceScope, setPersistenceScope] = useState<string | null>("local");
+  const [persistenceResolved, setPersistenceResolved] = useState(true);
 
   const isDocker = registeredInstances.some((item) => item.id === activeInstance && item.instanceType === "docker")
     || dockerInstances.some((item) => item.id === activeInstance);
   const isRemote = registeredInstances.some((item) => item.id === activeInstance && item.instanceType === "remote_ssh")
     || sshHosts.some((host) => host.id === activeInstance);
   const isConnected = !isRemote || connectionStatus[activeInstance] === "connected";
+
+  useEffect(() => {
+    let cancelled = false;
+    const activeRegistered = registeredInstances.find((item) => item.id === activeInstance);
+
+    const resolvePersistence = async () => {
+      if (isRemote) {
+        const host = sshHosts.find((item) => item.id === activeInstance) || null;
+        setPersistenceScope(host ? readRemotePersistenceScope(host) : null);
+        setPersistenceResolved(true);
+        return;
+      }
+
+      let openclawHome: string | null = null;
+      if (activeInstance === "local") {
+        openclawHome = "~";
+      } else if (isDocker) {
+        const instance = dockerInstances.find((item) => item.id === activeInstance);
+        const fallback = deriveDockerPaths(activeInstance);
+        openclawHome = instance?.openclawHome || fallback.openclawHome;
+      } else if (activeRegistered?.instanceType === "local" && activeRegistered.openclawHome) {
+        openclawHome = activeRegistered.openclawHome;
+      }
+
+      if (!openclawHome) {
+        setPersistenceScope(null);
+        setPersistenceResolved(true);
+        return;
+      }
+
+      setPersistenceResolved(false);
+      setPersistenceScope(null);
+      try {
+        const [exists, cliAvailable] = await Promise.all([
+          api.localOpenclawConfigExists(openclawHome),
+          api.localOpenclawCliAvailable(),
+        ]);
+        if (cancelled) return;
+        setPersistenceScope(
+          shouldEnableLocalInstanceScope({
+            configExists: exists,
+            cliAvailable,
+          }) ? activeInstance : null,
+        );
+      } catch (error) {
+        logDevIgnoredError("localOpenclawConfigExists", error);
+        if (cancelled) return;
+        setPersistenceScope(null);
+      } finally {
+        if (!cancelled) {
+          setPersistenceResolved(true);
+        }
+      }
+    };
+
+    void resolvePersistence();
+    return () => {
+      cancelled = true;
+    };
+  }, [activeInstance, dockerInstances, isDocker, isRemote, registeredInstances, sshHosts]);
+
+  useEffect(() => {
+    if (!isRemote || !isConnected) return;
+    const host = sshHosts.find((item) => item.id === activeInstance);
+    if (!host) return;
+    const nextScope = ensureRemotePersistenceScope(host);
+    if (persistenceScope !== nextScope) {
+      setPersistenceScope(nextScope);
+    }
+    if (!persistenceResolved) {
+      setPersistenceResolved(true);
+    }
+  }, [activeInstance, isConnected, isRemote, persistenceResolved, persistenceScope, sshHosts]);
 
   useEffect(() => {
     if (!showSshTransferSpeedUi || !isRemote || !isConnected) {
@@ -975,8 +1073,8 @@ export function App() {
 
   useEffect(() => {
     if (!isRemote || !isConnected || !instanceToken) return;
-    prewarmRemoteInstanceReadCache(activeInstance, instanceToken);
-  }, [activeInstance, instanceToken, isConnected, isRemote]);
+    prewarmRemoteInstanceReadCache(activeInstance, instanceToken, persistenceScope);
+  }, [activeInstance, instanceToken, isConnected, isRemote, persistenceScope]);
 
   // Keep active remote instance self-healed: detect dropped SSH and reconnect.
   useEffect(() => {
@@ -1072,13 +1170,18 @@ export function App() {
   // Avoid clearing on transient connection-status changes, which causes
   // Channels page to flicker between "loading" and loaded data.
   useEffect(() => {
+    if (!persistenceResolved || !persistenceScope) {
+      setChannelNodes(null);
+      setDiscordGuildChannels(null);
+      return;
+    }
     setChannelNodes(
-      readPersistedReadCache<ChannelNode[]>(activeInstance, "listChannelsMinimal", []) ?? null,
+      readPersistedReadCache<ChannelNode[]>(persistenceScope, "listChannelsMinimal", []) ?? null,
     );
     setDiscordGuildChannels(
-      readPersistedReadCache<DiscordGuildChannel[]>(activeInstance, "listDiscordGuildChannels", []) ?? null,
+      readPersistedReadCache<DiscordGuildChannel[]>(persistenceScope, "listDiscordGuildChannels", []) ?? null,
     );
-  }, [activeInstance]);
+  }, [activeInstance, persistenceResolved, persistenceScope]);
 
   const refreshChannelNodesCache = useCallback(async () => {
     setChannelsLoading(true);
@@ -1087,12 +1190,14 @@ export function App() {
         ? await api.remoteListChannelsMinimal(activeInstance)
         : await api.listChannelsMinimal();
       setChannelNodes(nodes);
-      writePersistedReadCache(activeInstance, "listChannelsMinimal", [], nodes);
+      if (persistenceScope) {
+        writePersistedReadCache(persistenceScope, "listChannelsMinimal", [], nodes);
+      }
       return nodes;
     } finally {
       setChannelsLoading(false);
     }
-  }, [activeInstance, isRemote]);
+  }, [activeInstance, isRemote, persistenceScope]);
 
   const refreshDiscordChannelsCache = useCallback(async () => {
     setDiscordChannelsLoading(true);
@@ -1101,23 +1206,34 @@ export function App() {
         ? await api.remoteListDiscordGuildChannels(activeInstance)
         : await api.listDiscordGuildChannels();
       setDiscordGuildChannels(channels);
-      writePersistedReadCache(activeInstance, "listDiscordGuildChannels", [], channels);
+      if (persistenceScope) {
+        writePersistedReadCache(persistenceScope, "listDiscordGuildChannels", [], channels);
+      }
       return channels;
     } finally {
       setDiscordChannelsLoading(false);
     }
-  }, [activeInstance, isRemote]);
+  }, [activeInstance, isRemote, persistenceScope]);
 
   // Load unified channel cache lazily when Channels tab is active.
   useEffect(() => {
-    if (route !== "channels") return;
+    if (route !== "channels" || !persistenceResolved) return;
     if (isRemote && !isConnected) return;
+    if (!shouldEnableInstanceLiveReads({
+      instanceToken,
+      persistenceResolved,
+      persistenceScope,
+      isRemote,
+    })) return;
     void Promise.allSettled([
       refreshChannelNodesCache(),
       refreshDiscordChannelsCache(),
     ]);
   }, [
     route,
+    instanceToken,
+    persistenceResolved,
+    persistenceScope,
     isRemote,
     isConnected,
     refreshChannelNodesCache,
@@ -1352,6 +1468,8 @@ export function App() {
         instanceId: activeInstance,
         instanceViewToken: activeInstance,
         instanceToken,
+        persistenceScope,
+        persistenceResolved,
         isRemote,
         isDocker,
         isConnected,
@@ -1502,6 +1620,7 @@ export function App() {
                   hostId,
                   "remote_ssh",
                 ).then(() => {
+                  clearRemotePersistenceScope(hostId);
                   closeTab(hostId);
                   refreshHosts();
                   refreshRegisteredInstances();
@@ -1541,7 +1660,7 @@ export function App() {
           {/* ── Instance mode content ── */}
           {!inStart && route === "home" && (
             <Home
-              key={`home-${activeInstance}-${configVersion}`}
+              key={`home-${activeInstance}-${configVersion}-${persistenceResolved ? "ready" : "pending"}-${persistenceScope ?? "none"}`}
               instanceLabel={openTabs.find((t) => t.id === activeInstance)?.label || activeInstance}
               showToast={showToast}
               onNavigate={(r) => navigateRoute(r as Route)}
@@ -1568,11 +1687,11 @@ export function App() {
           {!inStart && route === "cook" && !recipeId && <p>{t('config.noRecipeSelected')}</p>}
           {!inStart && route === "channels" && (
             <Channels
-              key={`channels-${activeInstance}-${configVersion}`}
+              key={`channels-${activeInstance}-${configVersion}-${persistenceResolved ? "ready" : "pending"}-${persistenceScope ?? "none"}`}
               showToast={showToast}
             />
           )}
-          {!inStart && route === "cron" && <Cron key={`cron-${activeInstance}-${configVersion}`} />}
+          {!inStart && route === "cron" && <Cron key={`cron-${activeInstance}-${configVersion}-${persistenceResolved ? "ready" : "pending"}-${persistenceScope ?? "none"}`} />}
           {!inStart && route === "history" && <History key={`history-${activeInstance}-${configVersion}`} />}
           {!inStart && route === "doctor" && (
             <Doctor key={activeInstance} />

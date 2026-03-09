@@ -3490,6 +3490,11 @@ pub fn local_openclaw_config_exists(openclaw_home: String) -> Result<bool, Strin
 }
 
 #[tauri::command]
+pub fn local_openclaw_cli_available() -> Result<bool, String> {
+    Ok(run_openclaw_raw(&["--version"]).is_ok())
+}
+
+#[tauri::command]
 pub fn delete_local_instance_home(openclaw_home: String) -> Result<bool, String> {
     let home = openclaw_home.trim();
     if home.is_empty() {

@@ -35,6 +35,8 @@ describe("Doctor page rescue header", () => {
             instanceId: "local",
             instanceViewToken: "local",
             instanceToken: 0,
+            persistenceScope: "local",
+            persistenceResolved: true,
             isRemote: false,
             isDocker: false,
             isConnected: true,

@@ -10,6 +10,7 @@ import type {
   ModelProfile,
 } from "../lib/types";
 import { useApi, hasGuidanceEmitted } from "@/lib/use-api";
+import { shouldEnableInstanceLiveReads } from "@/lib/instance-availability";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -74,12 +75,16 @@ export function Channels({
   const { t } = useTranslation();
   const ua = useApi();
   const persistedConfigSnapshot = useMemo(
-    () => readPersistedReadCache<ChannelsConfigSnapshot>(ua.instanceId, "getChannelsConfigSnapshot", []) ?? null,
-    [ua.instanceId],
+    () => (ua.persistenceResolved && ua.persistenceScope
+      ? readPersistedReadCache<ChannelsConfigSnapshot>(ua.persistenceScope, "getChannelsConfigSnapshot", []) ?? null
+      : null),
+    [ua.persistenceResolved, ua.persistenceScope],
   );
   const persistedRuntimeSnapshot = useMemo(
-    () => readPersistedReadCache<ChannelsRuntimeSnapshot>(ua.instanceId, "getChannelsRuntimeSnapshot", []) ?? null,
-    [ua.instanceId],
+    () => (ua.persistenceResolved && ua.persistenceScope
+      ? readPersistedReadCache<ChannelsRuntimeSnapshot>(ua.persistenceScope, "getChannelsRuntimeSnapshot", []) ?? null
+      : null),
+    [ua.persistenceResolved, ua.persistenceScope],
   );
   const initialChannelsState = useMemo(
     () => buildInitialChannelsState(persistedConfigSnapshot, persistedRuntimeSnapshot),
@@ -101,7 +106,12 @@ export function Channels({
     peerId: string;
     guildId?: string;
   } | null>(null);
-  const liveReadsReady = ua.instanceToken !== 0;
+  const liveReadsReady = shouldEnableInstanceLiveReads({
+    instanceToken: ua.instanceToken,
+    persistenceResolved: ua.persistenceResolved,
+    persistenceScope: ua.persistenceScope,
+    isRemote: ua.isRemote,
+  });
 
   const loadChannelsConfig = useCallback(async () => {
     if (!liveReadsReady) return;

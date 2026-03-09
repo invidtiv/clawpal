@@ -122,6 +122,13 @@
   "installChat.stepFailed": "Install step failed",
   "installChat.ready": "Ready",
   "installChat.notReady": "Install completed but instance is not ready",
+  "installChat.connectionFailed": "Connection failed",
+  "installChat.back": "Back",
+  "installChat.loadingDiagnostics": "Loading diagnostics...",
+  "installChat.diagnosticsError": "Diagnostics: {{error}}",
+  "installChat.gatewayLogsApp": "Gateway Logs (app)",
+  "installChat.gatewayLogsError": "Gateway Logs (error)",
+  "installChat.diagnosticSourceRemote": "remote ({{hostId}})",
 
   "install.docker.setupFailed": "Docker setup failed",
   "install.docker.precheck.summary": "Docker precheck completed",

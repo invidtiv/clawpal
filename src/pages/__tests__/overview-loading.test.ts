@@ -86,6 +86,34 @@ describe("overview-loading helpers", () => {
     expect(initial.version).toBe("2026.3.2");
   });
 
+  test("allows a disconnected remote instance to reuse its own persisted home cache", () => {
+    const initial = buildInitialHomeState(
+      {
+        globalDefaultModel: "config/model",
+        fallbackModels: ["config/fallback"],
+        agents: [{ id: "config-agent", model: null, channels: [], online: false }],
+      },
+      {
+        status: { healthy: true, activeAgents: 3 },
+        agents: [{ id: "runtime-agent", model: null, channels: [], online: true }],
+        globalDefaultModel: "runtime/model",
+        fallbackModels: ["runtime/fallback"],
+      },
+      { openclawVersion: "2026.3.2" },
+    );
+
+    expect(initial.status).toEqual({
+      healthy: true,
+      activeAgents: 3,
+      globalDefaultModel: "runtime/model",
+      fallbackModels: ["runtime/fallback"],
+    });
+    expect(initial.agents).toEqual([{ id: "runtime-agent", model: null, channels: [], online: true }]);
+    expect(initial.statusSettled).toBe(true);
+    expect(initial.version).toBe("2026.3.2");
+    expect(initial.statusExtra).toEqual({ openclawVersion: "2026.3.2" });
+  });
+
   test("keeps visible runtime state when a config snapshot arrives after runtime cache", () => {
     const next = applyConfigSnapshotToHomeState(
       {

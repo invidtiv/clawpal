@@ -19,6 +19,8 @@ describe("Channels page cached discord rendering", () => {
             instanceId: "ssh:hetzner",
             instanceViewToken: "ssh:hetzner",
             instanceToken: 1,
+            persistenceScope: "ssh-scope:ssh:hetzner:test",
+            persistenceResolved: true,
             isRemote: true,
             isDocker: false,
             isConnected: true,
