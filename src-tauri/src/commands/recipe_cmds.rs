@@ -1,3 +1,5 @@
+use super::*;
+
 use crate::models::resolve_paths;
 use crate::recipe::load_recipes_with_fallback;
 
