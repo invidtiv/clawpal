@@ -117,8 +117,8 @@ fn shell_escape(s: &str) -> String {
 }
 
 use crate::recipe::{
-    build_candidate_config_from_template, collect_change_paths, format_diff,
-    ApplyResult, PreviewResult,
+    build_candidate_config_from_template, collect_change_paths, format_diff, ApplyResult,
+    PreviewResult,
 };
 
 #[derive(Debug, Serialize, Deserialize)]
