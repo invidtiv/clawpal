@@ -41,7 +41,7 @@
 - [ ] 拆分 `src/App.tsx`（约 1,787 行）为路由/功能模块
 - [ ] 拆分 `src-tauri/src/commands/mod.rs`（约 10,546 行）为领域模块
 - [ ] 收口 GUI / core / remote helper 边界
-- [ ] 为高风险模块补 `docs/architecture/<module>.md`
+- [x] 为高风险模块补 `docs/architecture/` 说明（overview.md, commands.md）
 - [ ] 补 command contract tests
 
 ### Phase 4: 机制固化
@@ -49,7 +49,7 @@
 独立 PR。
 
 - [ ] CI gate 强制 PR 验证证据
-- [ ] 关键目录加 CODEOWNERS
+- [x] 关键目录加 CODEOWNERS
 - [ ] 高风险调用链加约束测试
 - [ ] Runbook 增加失败诊断和回滚路径
 - [ ] 建立每周熵治理 checklist
