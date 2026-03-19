@@ -77,7 +77,7 @@ jobs:
           printf "%b" "$DETAILS" > /tmp/commit_details.txt
           echo "max_lines=${MAX_LINES}" >> "$GITHUB_OUTPUT"
 
-      # ── Gate 2: Frontend bundle size ≤ 512 KB (gzip) ──
+      # ── Gate 2: Frontend bundle size ≤ 350 KB (gzip) ──
       - name: Check bundle size
         id: bundle_size
         run: |
@@ -92,7 +92,7 @@ jobs:
           done
           GZIP_KB=$(( GZIP_BYTES / 1024 ))
 
-          LIMIT_KB=512
+          LIMIT_KB=350
           if [ "$GZIP_KB" -gt "$LIMIT_KB" ]; then
             PASS="false"
           else
@@ -156,9 +156,9 @@ jobs:
           # Extract structured metrics from METRIC: lines
           RSS_MB=$(echo "$OUTPUT" | grep -oP 'METRIC:rss_mb=\K[0-9.]+' || echo "N/A")
           VMS_MB=$(echo "$OUTPUT" | grep -oP 'METRIC:vms_mb=\K[0-9.]+' || echo "N/A")
-          CMD_P50=$(echo "$OUTPUT" | grep -oP 'METRIC:cmd_p50_ms=\K[0-9]+' || echo "N/A")
-          CMD_P95=$(echo "$OUTPUT" | grep -oP 'METRIC:cmd_p95_ms=\K[0-9]+' || echo "N/A")
-          CMD_MAX=$(echo "$OUTPUT" | grep -oP 'METRIC:cmd_max_ms=\K[0-9]+' || echo "N/A")
+          CMD_P50=$(echo "$OUTPUT" | grep -oP 'METRIC:cmd_p50_us=\K[0-9]+' || echo "N/A")
+          CMD_P95=$(echo "$OUTPUT" | grep -oP 'METRIC:cmd_p95_us=\K[0-9]+' || echo "N/A")
+          CMD_MAX=$(echo "$OUTPUT" | grep -oP 'METRIC:cmd_max_us=\K[0-9]+' || echo "N/A")
           UPTIME=$(echo "$OUTPUT" | grep -oP 'METRIC:uptime_secs=\K[0-9.]+' || echo "N/A")
 
           echo "passed=${PASSED}" >> "$GITHUB_OUTPUT"
@@ -166,9 +166,9 @@ jobs:
           echo "exit_code=${EXIT_CODE}" >> "$GITHUB_OUTPUT"
           echo "rss_mb=${RSS_MB}" >> "$GITHUB_OUTPUT"
           echo "vms_mb=${VMS_MB}" >> "$GITHUB_OUTPUT"
-          echo "cmd_p50=${CMD_P50}" >> "$GITHUB_OUTPUT"
-          echo "cmd_p95=${CMD_P95}" >> "$GITHUB_OUTPUT"
-          echo "cmd_max=${CMD_MAX}" >> "$GITHUB_OUTPUT"
+          echo "cmd_p50_us=${CMD_P50}" >> "$GITHUB_OUTPUT"
+          echo "cmd_p95_us=${CMD_P95}" >> "$GITHUB_OUTPUT"
+          echo "cmd_max_us=${CMD_MAX}" >> "$GITHUB_OUTPUT"
           echo "uptime=${UPTIME}" >> "$GITHUB_OUTPUT"
 
           if [ "$EXIT_CODE" -ne 0 ]; then
@@ -181,30 +181,58 @@ jobs:
       - name: Check large files
         id: large_files
         run: |
+          # Auto-scan ALL source files >300 lines and assign targets
+          # Target = min(current_lines * 0.6, current_lines - 200) rounded to nearest 100, floor 500
+          DETAILS=""
+          OVER_TARGET=0
+          TOTAL_LARGE=0
+
+          # Manually tracked key files with specific targets
+          declare -A OVERRIDES
+          OVERRIDES["src-tauri/src/commands/mod.rs"]=300
+          OVERRIDES["src/App.tsx"]=500
+          OVERRIDES["src-tauri/src/commands/doctor_assistant.rs"]=3000
+          OVERRIDES["src-tauri/src/commands/rescue.rs"]=2000
+          OVERRIDES["src-tauri/src/commands/profiles.rs"]=1500
+          OVERRIDES["src-tauri/src/cli_runner.rs"]=1200
+          OVERRIDES["src-tauri/src/commands/credentials.rs"]=1000
+
+          while IFS= read -r LINE; do
+            LINES=$(echo "$LINE" | awk '{print $1}')
+            FILE=$(echo "$LINE" | awk '{print $2}')
+            [ "$LINES" -le 300 ] 2>/dev/null && continue
+
+            SHORT=$(echo "$FILE" | sed 's|src-tauri/src/||;s|src/||')
+
+            # Use override if available, otherwise auto-calculate
+            if [ -n "${OVERRIDES[$FILE]+x}" ]; then
+              TARGET=${OVERRIDES[$FILE]}
+            else
+              # Target: 60% of current, rounded to nearest 100, floor 500
+              TARGET=$(( (LINES * 60 / 100 + 50) / 100 * 100 ))
+              [ "$TARGET" -lt 500 ] && TARGET=500
+            fi
+
+            if [ "$LINES" -gt 500 ]; then
+              TOTAL_LARGE=$((TOTAL_LARGE + 1))
+            fi
+
+            if [ "$LINES" -gt "$TARGET" ]; then
+              DETAILS="${DETAILS}| \`${SHORT}\` | ${LINES} | ≤ ${TARGET} | ⚠️ |\n"
+              OVER_TARGET=$((OVER_TARGET + 1))
+            else
+              DETAILS="${DETAILS}| \`${SHORT}\` | ${LINES} | ≤ ${TARGET} | ✅ |\n"
+            fi
+          done < <(find src/ src-tauri/src/ \( -name '*.ts' -o -name '*.tsx' -o -name '*.rs' \) -exec wc -l {} + 2>/dev/null | grep -v total | sort -rn)
+
           MOD_LINES=$(wc -l < src-tauri/src/commands/mod.rs 2>/dev/null || echo 0)
           APP_LINES=$(wc -l < src/App.tsx 2>/dev/null || echo 0)
-
-          DETAILS="| \`commands/mod.rs\` | ${MOD_LINES} | ≤ 2000 |"
-          if [ "$MOD_LINES" -gt 2000 ]; then
-            DETAILS="${DETAILS} ⚠️ |"
-          else
-            DETAILS="${DETAILS} ✅ |"
-          fi
-
-          DETAILS="${DETAILS}\n| \`App.tsx\` | ${APP_LINES} | ≤ 500 |"
-          if [ "$APP_LINES" -gt 500 ]; then
-            DETAILS="${DETAILS} ⚠️ |"
-          else
-            DETAILS="${DETAILS} ✅ |"
-          fi
-
-          LARGE_COUNT=$(find src/ src-tauri/src/ \( -name '*.ts' -o -name '*.tsx' -o -name '*.rs' \) -exec wc -l {} + 2>/dev/null | \
-            grep -v total | awk '$1 > 500 {count++} END {print count+0}')
 
           printf "%b" "$DETAILS" > /tmp/large_file_details.txt
           echo "mod_lines=${MOD_LINES}" >> "$GITHUB_OUTPUT"
           echo "app_lines=${APP_LINES}" >> "$GITHUB_OUTPUT"
-          echo "large_count=${LARGE_COUNT}" >> "$GITHUB_OUTPUT"
+          echo "large_count=${TOTAL_LARGE}" >> "$GITHUB_OUTPUT"
+          echo "over_target=${OVER_TARGET}" >> "$GITHUB_OUTPUT"
 
       # ── Gate 4b: Command perf E2E (local) ──
       - name: Run command perf E2E
@@ -421,7 +449,14 @@ jobs:
           if [ "${{ steps.bundle_size.outputs.pass }}" = "false" ]; then
             OVERALL="❌ Some gates failed"; GATE_FAIL=1
           fi
+          if [ "${{ steps.bundle_size.outputs.init_gzip_kb }}" -gt 180 ] 2>/dev/null; then
+            OVERALL="❌ Some gates failed"; GATE_FAIL=1
+          fi
           if [ "${{ steps.perf_tests.outputs.pass }}" = "false" ]; then
+            OVERALL="❌ Some gates failed"; GATE_FAIL=1
+          fi
+          CMD_P50="${{ steps.perf_tests.outputs.cmd_p50_us }}"
+          if [ "$CMD_P50" != "N/A" ] && [ "$CMD_P50" -gt 1000 ]; then
             OVERALL="❌ Some gates failed"; GATE_FAIL=1
           fi
           if [ "${{ steps.cmd_perf.outputs.pass }}" = "false" ]; then
@@ -430,11 +465,17 @@ jobs:
           if [ "${{ steps.home_perf.outputs.pass }}" = "false" ]; then
             OVERALL="❌ Some gates failed"; GATE_FAIL=1
           fi
+          for PROBE_VAL in "${{ steps.home_perf.outputs.status_ms }}" "${{ steps.home_perf.outputs.version_ms }}" "${{ steps.home_perf.outputs.agents_ms }}" "${{ steps.home_perf.outputs.models_ms }}"; do
+            if [ "$PROBE_VAL" != "N/A" ] && [ "$PROBE_VAL" -gt 200 ] 2>/dev/null; then
+              OVERALL="❌ Some gates failed"; GATE_FAIL=1
+            fi
+          done
           if [ "${{ steps.remote_perf.outputs.pass }}" = "false" ]; then
             OVERALL="❌ Some gates failed"; GATE_FAIL=1
           fi
 
           BUNDLE_ICON=$( [ "${{ steps.bundle_size.outputs.pass }}" = "true" ] && echo "✅" || echo "❌" )
+          MOCK_LATENCY="${{ env.PERF_MOCK_LATENCY_MS || '50' }}"
           COMMIT_ICON=$( [ "${{ steps.commit_size.outputs.fail }}" = "0" ] && echo "✅" || echo "❌" )
 
           cat > /tmp/metrics_comment.md << COMMENTEOF
@@ -457,18 +498,18 @@ jobs:
           |--------|-------|-------|--------|
           | JS bundle (raw) | ${{ steps.bundle_size.outputs.raw_kb }} KB | — | — |
           | JS bundle (gzip) | ${{ steps.bundle_size.outputs.gzip_kb }} KB | ≤ ${{ steps.bundle_size.outputs.limit_kb }} KB | ${BUNDLE_ICON} |
-          | JS initial load (gzip) | ${{ steps.bundle_size.outputs.init_gzip_kb }} KB | — | ℹ️ |
+          | JS initial load (gzip) | ${{ steps.bundle_size.outputs.init_gzip_kb }} KB | ≤ 180 KB | $( [ "${{ steps.bundle_size.outputs.init_gzip_kb }}" -le 180 ] && echo "✅" || echo "❌" ) |
 
           ### Perf Metrics E2E  $( [ "${{ steps.perf_tests.outputs.pass }}" = "true" ] && echo "✅" || echo "❌" )
 
           | Metric | Value | Limit | Status |
           |--------|-------|-------|--------|
           | Tests | ${{ steps.perf_tests.outputs.passed }} passed, ${{ steps.perf_tests.outputs.failed }} failed | 0 failures | $( [ "${{ steps.perf_tests.outputs.failed }}" = "0" ] && echo "✅" || echo "❌" ) |
-          | RSS (test process) | ${{ steps.perf_tests.outputs.rss_mb }} MB | ≤ 80 MB | $( echo "${{ steps.perf_tests.outputs.rss_mb }}" | awk '{print ($1 <= 80) ? "✅" : "❌"}' ) |
+          | RSS (test process) | ${{ steps.perf_tests.outputs.rss_mb }} MB | ≤ 20 MB | $( echo "${{ steps.perf_tests.outputs.rss_mb }}" | awk '{print ($1 <= 80) ? "✅" : "❌"}' ) |
           | VMS (test process) | ${{ steps.perf_tests.outputs.vms_mb }} MB | — | ℹ️ |
-          | Command P50 latency | ${{ steps.perf_tests.outputs.cmd_p50 }} ms | — | ℹ️ |
-          | Command P95 latency | ${{ steps.perf_tests.outputs.cmd_p95 }} ms | ≤ 100 ms | $( echo "${{ steps.perf_tests.outputs.cmd_p95 }}" | awk '{print ($1 <= 100) ? "✅" : "❌"}' ) |
-          | Command max latency | ${{ steps.perf_tests.outputs.cmd_max }} ms | — | ℹ️ |
+          | Command P50 latency | ${{ steps.perf_tests.outputs.cmd_p50_us }} µs | ≤ 1000 µs | $( echo "${{ steps.perf_tests.outputs.cmd_p50_us }}" | awk '{print ($1 != "N/A" && $1 <= 1000) ? "✅" : "❌"}' ) |
+          | Command P95 latency | ${{ steps.perf_tests.outputs.cmd_p95_us }} µs | ≤ 5000 µs | $( echo "${{ steps.perf_tests.outputs.cmd_p95_us }}" | awk '{print ($1 != "N/A" && $1 <= 5000) ? "✅" : "❌"}' ) |
+          | Command max latency | ${{ steps.perf_tests.outputs.cmd_max_us }} µs | ≤ 50000 µs | $( echo "${{ steps.perf_tests.outputs.cmd_max_us }}" | awk '{print ($1 != "N/A" && $1 <= 50000) ? "✅" : "❌"}' ) |
 
           ### Command Perf (local)  $( [ "${{ steps.cmd_perf.outputs.pass }}" = "true" ] && echo "✅" || echo "❌" )
 
@@ -480,9 +521,9 @@ jobs:
 
           <details><summary>Local command timings</summary>
 
-          | Command | P50 | P95 | Max |
-          |---------|-----|-----|-----|
-          $(cat /tmp/local_cmd_perf.txt 2>/dev/null | awk -F: '{printf "| %s | %s | %s | %s |\n", $2, $4, $5, $6}' | sed 's/p50=//;s/p95=//;s/max=//;s/avg=[0-9]*//;s/count=[0-9]*://' || echo "| N/A | N/A | N/A | N/A |")
+          | Command | P50 (µs) | P95 (µs) | Max (µs) |
+          |---------|----------|----------|----------|
+          $(cat /tmp/local_cmd_perf.txt 2>/dev/null | awk -F: '{printf "| %s | %s | %s | %s |\n", $2, $4, $5, $6}' | sed 's/p50_us=//;s/p95_us=//;s/max_us=//;s/avg_us=[0-9]*//;s/count=[0-9]*://' || echo "| N/A | N/A | N/A | N/A |")
 
           </details>
 
@@ -491,7 +532,7 @@ jobs:
           | Metric | Value | Status |
           |--------|-------|--------|
           | SSH transport | $( [ "${{ steps.remote_perf.outputs.pass }}" = "true" ] && echo "OK" || echo "FAILED" ) | $( [ "${{ steps.remote_perf.outputs.pass }}" = "true" ] && echo "✅" || echo "❌" ) |
-          | Command failures | ${{ steps.remote_perf.outputs.cmd_fail_count }}/${{ steps.remote_perf.outputs.total_runs }} runs | $( [ "${{ steps.remote_perf.outputs.cmd_fail_count }}" = "0" ] && echo "✅" || echo "⚠️ expected in Docker" ) |
+          | Command failures | ${{ steps.remote_perf.outputs.cmd_fail_count }}/${{ steps.remote_perf.outputs.total_runs }} runs | $( [ "${{ steps.remote_perf.outputs.cmd_fail_count }}" = "0" ] && echo "✅" || echo "ℹ️ Docker (no gateway)" ) |
 
           <details><summary>Remote command timings (via Docker SSH)</summary>
 
@@ -501,22 +542,23 @@ jobs:
 
           </details>
 
-                    ### Home Page Render Probes  $( [ "${{ steps.home_perf.outputs.pass }}" = "true" ] && echo "✅" || echo "❌" )
+                    ### Home Page Render Probes (mock IPC ${MOCK_LATENCY}ms, cache-first render)  $( [ "${{ steps.home_perf.outputs.pass }}" = "true" ] && echo "✅" || echo "❌" )
 
           | Probe | Value | Limit | Status |
           |-------|-------|-------|--------|
-          | status | ${{ steps.home_perf.outputs.status_ms }} ms | — | ℹ️ |
-          | version | ${{ steps.home_perf.outputs.version_ms }} ms | — | ℹ️ |
-          | agents | ${{ steps.home_perf.outputs.agents_ms }} ms | — | ℹ️ |
-          | models | ${{ steps.home_perf.outputs.models_ms }} ms | — | ℹ️ |
-          | settled | ${{ steps.home_perf.outputs.settled_ms }} ms | < 5000 ms | $( echo "${{ steps.home_perf.outputs.settled_ms }}" | awk '{print ($1 != "N/A" && $1 < 5000) ? "✅" : "❌"}' ) |
+          | status | ${{ steps.home_perf.outputs.status_ms }} ms | ≤ 200 ms | $( echo "${{ steps.home_perf.outputs.status_ms }}" | awk '{print ($1 != "N/A" && $1 <= 200) ? "✅" : "❌"}' ) |
+          | version | ${{ steps.home_perf.outputs.version_ms }} ms | ≤ 200 ms | $( echo "${{ steps.home_perf.outputs.version_ms }}" | awk '{print ($1 != "N/A" && $1 <= 200) ? "✅" : "❌"}' ) |
+          | agents | ${{ steps.home_perf.outputs.agents_ms }} ms | ≤ 200 ms | $( echo "${{ steps.home_perf.outputs.agents_ms }}" | awk '{print ($1 != "N/A" && $1 <= 200) ? "✅" : "❌"}' ) |
+          | models | ${{ steps.home_perf.outputs.models_ms }} ms | ≤ 300 ms | $( echo "${{ steps.home_perf.outputs.models_ms }}" | awk '{print ($1 != "N/A" && $1 <= 300) ? "✅" : "❌"}' ) |
+          | settled | ${{ steps.home_perf.outputs.settled_ms }} ms | ≤ 1000 ms | $( echo "${{ steps.home_perf.outputs.settled_ms }}" | awk '{print ($1 != "N/A" && $1 <= 1000) ? "✅" : "❌"}' ) |
 
-          ### Code Readability (informational)
+          ### Code Readability
 
           | File | Lines | Target | Status |
           |------|-------|--------|--------|
           ${LARGE_FILE_DETAILS}
-          | Files > 500 lines | ${{ steps.large_files.outputs.large_count }} | trend ↓ | ℹ️ |
+          | **Files > 500 lines** | **${{ steps.large_files.outputs.large_count }}** | **trend ↓** | $( [ "${{ steps.large_files.outputs.large_count }}" -le 28 ] && echo "✅" || echo "⚠️" ) |
+          | Files over target | ${{ steps.large_files.outputs.over_target }} | 0 | $( [ "${{ steps.large_files.outputs.over_target }}" = "0" ] && echo "✅" || echo "⚠️" ) |
 
           ---
           > 📊 Metrics defined in [\`docs/architecture/metrics.md\`](../blob/${{ github.head_ref }}/docs/architecture/metrics.md)
