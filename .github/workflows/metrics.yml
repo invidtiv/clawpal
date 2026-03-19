@@ -603,6 +603,13 @@ jobs:
 
           echo "gate_fail=${GATE_FAIL}" >> "$GITHUB_OUTPUT"
 
+      - name: Save comment as artifact (for fork PRs)
+        uses: actions/upload-artifact@v4
+        with:
+          name: metrics-comment
+          path: /tmp/metrics_comment.md
+          retention-days: 1
+
       - name: Find existing metrics comment
         uses: peter-evans/find-comment@v3
         id: fc

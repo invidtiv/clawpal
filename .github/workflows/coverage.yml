@@ -113,7 +113,17 @@ jobs:
               f.write('body<<EOF\n')
               f.write(body + '\n')
               f.write('EOF\n')
+
+          with open('/tmp/coverage_comment.md', 'w') as f:
+              f.write(body)
           PYEOF
+
+      - name: Save comment as artifact (for fork PRs)
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-comment
+          path: /tmp/coverage_comment.md
+          retention-days: 1
 
       - name: Find existing comment
         uses: peter-evans/find-comment@v3
