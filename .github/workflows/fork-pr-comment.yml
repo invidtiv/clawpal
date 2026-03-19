@@ -52,6 +52,8 @@ jobs:
             }
 
       - name: Download artifact
+        id: download
+        continue-on-error: true
         uses: actions/download-artifact@v4
         with:
           name: ${{ steps.meta.outputs.artifact }}
@@ -60,12 +62,14 @@ jobs:
           path: /tmp/comment
 
       - name: Find comment file
+        if: steps.download.outcome == 'success'
         id: file
         run: |
           FILE=$(find /tmp/comment -name '*.md' | head -1)
           echo "path=${FILE}" >> "$GITHUB_OUTPUT"
 
       - name: Find existing comment
+        if: steps.download.outcome == 'success'
         uses: peter-evans/find-comment@v3
         id: fc
         with:
@@ -74,6 +78,7 @@ jobs:
           body-includes: ${{ steps.meta.outputs.marker }}
 
       - name: Create or update comment
+        if: steps.download.outcome == 'success'
         uses: peter-evans/create-or-update-comment@v4
         with:
           comment-id: ${{ steps.fc.outputs.comment-id }}
