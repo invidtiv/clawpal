@@ -100,6 +100,19 @@ pub async fn run_openclaw_remote(
     run_openclaw_remote_with_env(pool, host_id, args, None).await
 }
 
+/// Default timeout for remote openclaw commands (preview, apply, config).
+const REMOTE_CMD_TIMEOUT_SECS: u64 = 30;
+/// Longer timeout for commands that may trigger network I/O (install, bootstrap, upgrade).
+const REMOTE_CMD_TIMEOUT_LONG_SECS: u64 = 180;
+
+/// Returns the appropriate timeout based on the first arg.
+fn remote_command_timeout_secs(args: &[&str]) -> u64 {
+    match args.first().copied() {
+        Some("install" | "bootstrap" | "upgrade" | "setup") => REMOTE_CMD_TIMEOUT_LONG_SECS,
+        _ => REMOTE_CMD_TIMEOUT_SECS,
+    }
+}
+
 pub async fn run_openclaw_remote_with_env(
     pool: &SshConnectionPool,
     host_id: &str,
@@ -107,7 +120,19 @@ pub async fn run_openclaw_remote_with_env(
     env: Option<&HashMap<String, String>>,
 ) -> Result<CliOutput, String> {
     let cmd_str = build_remote_openclaw_command(args, env);
-    let result = pool.exec_login(host_id, &cmd_str).await?;
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(remote_command_timeout_secs(args)),
+        pool.exec_login(host_id, &cmd_str),
+    )
+    .await
+    .map_err(|_| {
+        format!(
+            "Remote command timed out after {}s: openclaw {}",
+            remote_command_timeout_secs(args),
+            args.join(" ")
+        )
+    })?
+    .map_err(|e| e.to_string())?;
     Ok(CliOutput {
         stdout: result.stdout,
         stderr: result.stderr,
@@ -3187,7 +3212,11 @@ pub async fn remote_apply_queued_commands_with_services(
     }
 
     queues.clear(&host_id);
-    let _ = pool.exec_login(&host_id, "openclaw gateway restart").await;
+    let _ = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        pool.exec_login(&host_id, "openclaw gateway restart"),
+    )
+    .await;
 
     Ok(ApplyQueueResult {
         ok: true,

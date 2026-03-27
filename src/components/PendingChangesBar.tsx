@@ -48,6 +48,7 @@ export function PendingChangesBar({ onApplied, onDiscarded, showToast }: Pending
   // Apply state
   const [applying, setApplying] = useState(false);
   const [applyError, setApplyError] = useState("");
+  const applyInFlightRef = useRef(false);
 
   // Discard dialog
   const [showDiscard, setShowDiscard] = useState(false);
@@ -111,11 +112,21 @@ export function PendingChangesBar({ onApplied, onDiscarded, showToast }: Pending
   }, [api, showToast]);
 
   const handleApply = useCallback(() => {
+    if (applyInFlightRef.current) return;
+    applyInFlightRef.current = true;
     setApplying(true);
     setApplyError("");
+    const safetyTimeout = setTimeout(() => {
+      // Unblock the UI after 30s so the user isn't stuck, but keep the
+      // in-flight guard until the request actually settles to prevent
+      // a second apply from racing.
+      setApplying(false);
+      refreshCount();
+    }, 30_000);
     api
       .applyQueuedCommands()
       .then((result) => {
+        clearTimeout(safetyTimeout);
         if (result.ok) {
           setShowPreview(false);
           setExpanded(false);
@@ -131,8 +142,14 @@ export function PendingChangesBar({ onApplied, onDiscarded, showToast }: Pending
           }
         }
       })
-      .catch((e) => setApplyError(String(e)))
-      .finally(() => setApplying(false));
+      .catch((e) => {
+        clearTimeout(safetyTimeout);
+        setApplyError(String(e));
+      })
+      .finally(() => {
+        applyInFlightRef.current = false;
+        setApplying(false);
+      });
   }, [api, refreshCount, showToast, onApplied, t]);
 
   const handleDiscard = useCallback(() => {
