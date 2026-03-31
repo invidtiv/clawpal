@@ -175,7 +175,6 @@ export function App() {
   });
 
   const {
-    profileSyncStatus,
     showSshTransferSpeedUi,
     sshTransferStats,
     doctorNavPulse,
@@ -417,7 +416,6 @@ export function App() {
         </nav>
 
         <SidebarFooter
-          profileSyncStatus={profileSyncStatus}
           showSshTransferSpeedUi={showSshTransferSpeedUi}
           isRemote={isRemote}
           isConnected={isConnected}
@@ -472,6 +470,11 @@ export function App() {
               globalMode
               section="profiles"
               onOpenDoctor={openDoctor}
+              onConnectDevice={(hostId) => (
+                connectWithPassphraseFallback(hostId)
+                  .then(() => true)
+                  .catch(() => false)
+              )}
               onDataChange={bumpConfigVersion}
             />
           )}
@@ -481,6 +484,11 @@ export function App() {
               globalMode
               section="preferences"
               onOpenDoctor={openDoctor}
+              onConnectDevice={(hostId) => (
+                connectWithPassphraseFallback(hostId)
+                  .then(() => true)
+                  .catch(() => false)
+              )}
               onDataChange={bumpConfigVersion}
               hasAppUpdate={appUpdateAvailable}
               onAppUpdateSeen={() => setAppUpdateAvailable(false)}

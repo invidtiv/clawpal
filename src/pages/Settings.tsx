@@ -11,6 +11,7 @@ import type { FormEvent } from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import { hasGuidanceEmitted, useApi } from "@/lib/use-api";
+import { api } from "@/lib/api";
 import { isAlreadyExplainedGuidanceError } from "@/lib/guidance";
 import { useTheme } from "@/lib/use-theme";
 import { useFont } from "@/lib/use-font";
@@ -21,6 +22,7 @@ import type {
   ModelProfile,
   ProviderAuthSuggestion,
   ResolvedApiKey,
+  SshHost,
 } from "@/lib/types";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 import { BugReportSettings } from "@/components/BugReportSettings";
@@ -56,11 +58,14 @@ import {
   AlertDialogTitle,
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
+import { PlusIcon, RefreshCwIcon } from "lucide-react";
 
 
 const MODEL_CATALOG_CACHE_TTL_MS = 5 * 60_000;
 let modelCatalogCache: { value: ModelCatalogProvider[]; expiresAt: number } | null = null;
 let profilesExtractedOnce = false;
+let syncSelectionSessionCache: string[] = [];
+let syncStatusSessionCache: Record<string, "idle" | "syncing" | "success" | "failed"> = {};
 const PROVIDER_FALLBACK_OPTIONS = [
   "openai",
   "openai-codex",
@@ -83,6 +88,7 @@ export function Settings({
   globalMode = false,
   section = "all",
   onOpenDoctor,
+  onConnectDevice,
 }: {
   onDataChange?: () => void;
   hasAppUpdate?: boolean;
@@ -90,6 +96,7 @@ export function Settings({
   globalMode?: boolean;
   section?: "all" | "profiles" | "preferences";
   onOpenDoctor?: () => void;
+  onConnectDevice?: (hostId: string) => Promise<boolean>;
 }) {
   const { t, i18n } = useTranslation();
   const ua = useApi();
@@ -101,10 +108,15 @@ export function Settings({
   const [form, setForm] = useState<ProfileForm>(emptyForm());
   const [credentialSource, setCredentialSource] = useState<CredentialSource>("manual");
   const [profileDialogOpen, setProfileDialogOpen] = useState(false);
-  const [message, setMessage] = useState("");
   const [authSuggestion, setAuthSuggestion] = useState<ProviderAuthSuggestion | null>(null);
   const [testingProfileId, setTestingProfileId] = useState<string | null>(null);
   const [showSshTransferSpeedUi, setShowSshTransferSpeedUi] = useState(false);
+  const [remoteDevices, setRemoteDevices] = useState<SshHost[]>([]);
+  const [syncDialogOpen, setSyncDialogOpen] = useState(false);
+  const [selectedSyncHostIds, setSelectedSyncHostIds] = useState<string[]>(() => [...syncSelectionSessionCache]);
+  const [syncStatusByHostId, setSyncStatusByHostId] = useState<Record<string, "idle" | "syncing" | "success" | "failed">>(() => ({ ...syncStatusSessionCache }));
+  const [hostConnectionById, setHostConnectionById] = useState<Record<string, boolean>>({});
+  const [hostConnectingById, setHostConnectingById] = useState<Record<string, boolean>>({});
 
   const [catalogRefreshed, setCatalogRefreshed] = useState(false);
 
@@ -144,6 +156,48 @@ export function Settings({
   };
 
   useEffect(refreshProfiles, [ua]);
+
+  useEffect(() => {
+    ua.listSshHosts()
+      .then((hosts) => setRemoteDevices(hosts))
+      .catch((e) => {
+        console.error("Failed to load SSH hosts:", e);
+        setRemoteDevices([]);
+      });
+  }, [ua]);
+
+  useEffect(() => {
+    if (!syncDialogOpen || remoteDevices.length === 0) return;
+    let cancelled = false;
+    Promise.all(
+      remoteDevices.map(async (device) => {
+        try {
+          const status = await ua.sshStatus(device.id);
+          const text = String(status).toLowerCase();
+          const connected = text.includes("connected") && !text.includes("disconnected") && !text.includes("no connection");
+          return [device.id, connected] as const;
+        } catch {
+          return [device.id, false] as const;
+        }
+      }),
+    ).then((pairs) => {
+      if (cancelled) return;
+      const next = Object.fromEntries(pairs);
+      setHostConnectionById(next);
+      setSelectedSyncHostIds((prev) => prev.filter((id) => next[id]));
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [remoteDevices, syncDialogOpen, ua]);
+
+  useEffect(() => {
+    syncSelectionSessionCache = selectedSyncHostIds;
+  }, [selectedSyncHostIds]);
+
+  useEffect(() => {
+    syncStatusSessionCache = syncStatusByHostId;
+  }, [syncStatusByHostId]);
 
   useEffect(() => {
     ua.getAppPreferences()
@@ -258,7 +312,7 @@ export function Settings({
 
   const saveProfile = async (authRefOverride?: string): Promise<boolean> => {
     if (!form.provider || !form.model) {
-      setMessage(t('settings.providerModelRequired'));
+      toast.error(t('settings.providerModelRequired'));
       return false;
     }
     const apiKeyOptional = form.useCustomUrl || providerSupportsOptionalApiKey(form.provider);
@@ -266,7 +320,7 @@ export function Settings({
     const envSource = credentialSource === "env";
     const manualSource = credentialSource === "manual";
     if (!ua.isRemote && manualSource && !form.apiKey && !form.id && !apiKeyOptional) {
-      setMessage(t('settings.apiKeyRequired'));
+      toast.error(t('settings.apiKeyRequired'));
       return false;
     }
     const overrideAuthRef = (authRefOverride || "").trim();
@@ -293,14 +347,15 @@ export function Settings({
     };
     try {
       await ua.upsertModelProfile(profileData);
-      setMessage(t('settings.profileSaved'));
+      toast.success(t('settings.profileSaved'));
       setForm(emptyForm());
       setProfileDialogOpen(false);
       refreshProfiles();
       onDataChange?.();
       return true;
     } catch (e) {
-      setMessage(t('settings.saveFailed', { error: String(e) }));
+      const errorText = e instanceof Error ? e.message : String(e);
+      toast.error(t('settings.saveFailed', { error: errorText }));
       return false;
     }
   };
@@ -334,14 +389,17 @@ export function Settings({
   const deleteProfile = (id: string) => {
     ua.deleteModelProfile(id)
       .then(() => {
-        setMessage(t('settings.profileDeleted'));
+        toast.success(t('settings.profileDeleted'));
         if (form.id === id) {
           setForm(emptyForm());
         }
         refreshProfiles();
         onDataChange?.();
       })
-      .catch((e) => setMessage(t('settings.deleteFailed', { error: String(e) })));
+      .catch((e) => {
+        const errorText = e instanceof Error ? e.message : String(e);
+        toast.error(t('settings.deleteFailed', { error: errorText }));
+      });
   };
 
   const toggleProfileEnabled = (profile: ModelProfile) => {
@@ -428,6 +486,59 @@ export function Settings({
 
   const showProfiles = section !== "preferences";
   const showPreferences = section !== "profiles";
+
+  const syncedDeviceCount = useMemo(() => {
+    const ids = new Set<string>();
+    for (const profile of profiles || []) {
+      const source = profile.syncSourceHostId?.trim();
+      if (source) ids.add(source);
+    }
+    return ids.size;
+  }, [profiles]);
+
+  const syncButtonText = remoteDevices.length > 0 && selectedSyncHostIds.length === 0
+    ? t("settings.syncFromDevices")
+    : t("settings.syncFromDevicesAction", { count: selectedSyncHostIds.length });
+
+  const isDeviceSyncing = useMemo(
+    () => Object.values(syncStatusByHostId).some((status) => status === "syncing"),
+    [syncStatusByHostId],
+  );
+
+  const formatSyncedAt = (value?: string) => {
+    if (!value) return "-";
+    const timestamp = Date.parse(value);
+    if (Number.isNaN(timestamp)) return value;
+    return new Date(timestamp).toLocaleString();
+  };
+
+  const runDeviceSync = useCallback(async () => {
+    if (selectedSyncHostIds.length === 0) {
+      toast.message(t("settings.syncFromDevices"));
+      return;
+    }
+
+    toast.success(t("settings.syncStarted", { count: selectedSyncHostIds.length }));
+    setSyncDialogOpen(false);
+
+    for (const hostId of selectedSyncHostIds) {
+      const device = remoteDevices.find((item) => item.id === hostId);
+      const deviceName = device?.label || hostId;
+      syncStatusSessionCache = { ...syncStatusSessionCache, [hostId]: "syncing" };
+      setSyncStatusByHostId((prev) => ({ ...prev, [hostId]: "syncing" }));
+      try {
+        await api.remoteSyncProfilesToLocalAuth(hostId, deviceName);
+        syncStatusSessionCache = { ...syncStatusSessionCache, [hostId]: "success" };
+        setSyncStatusByHostId((prev) => ({ ...prev, [hostId]: "success" }));
+      } catch (error) {
+        const errorText = error instanceof Error ? error.message : String(error);
+        syncStatusSessionCache = { ...syncStatusSessionCache, [hostId]: "failed" };
+        setSyncStatusByHostId((prev) => ({ ...prev, [hostId]: "failed" }));
+        toast.error(t("settings.syncFailedForDevice", { device: deviceName, error: errorText }));
+      }
+    }
+    refreshProfiles();
+  }, [remoteDevices, selectedSyncHostIds, ua]);
 
   const handleSshTransferSpeedUiToggle = useCallback((nextChecked: boolean) => {
     setShowSshTransferSpeedUi(nextChecked);
@@ -562,7 +673,23 @@ export function Settings({
                 <div className="flex items-center justify-between gap-2 flex-wrap">
                   <CardTitle>{t('settings.modelProfiles')}</CardTitle>
                   <div className="flex items-center gap-2 flex-wrap">
-                    <Button size="sm" onClick={openAddProfile}>{t('settings.addProfile')}</Button>
+                    <Button
+                      size="icon"
+                      variant="outline"
+                      onClick={() => setSyncDialogOpen(true)}
+                      title={t("settings.syncedDevicesCount", { count: syncedDeviceCount })}
+                      aria-label={t("settings.syncedDevicesCount", { count: syncedDeviceCount })}
+                    >
+                      <RefreshCwIcon className={`h-4 w-4 ${isDeviceSyncing ? "animate-spin" : ""}`} />
+                    </Button>
+                    <Button
+                      size="icon"
+                      onClick={openAddProfile}
+                      title={t("settings.addProfile")}
+                      aria-label={t("settings.addProfile")}
+                    >
+                      <PlusIcon className="h-4 w-4" />
+                    </Button>
                   </div>
                 </div>
               </CardHeader>
@@ -605,24 +732,43 @@ export function Settings({
                             </Badge>
                           ) : null}
                         </div>
-                        <div className="text-sm text-muted-foreground mt-1">
-                          {t('settings.credential')}: {t(`settings.credentialKind.${credential.kind}`)}
+                        <div className="flex flex-wrap items-center gap-1.5 mt-1">
+                          <Badge variant="outline" title={`${t('settings.credential')}: ${t(`settings.credentialKind.${credential.kind}`)}`}>
+                            {t(`settings.credentialKind.${credential.kind}`)}
+                          </Badge>
+                          {showCredentialRef && (
+                            <Badge
+                              variant="outline"
+                              title={`${t("settings.credentialRef")}: ${credential.authRef || "-"}`}
+                            >
+                              Ref
+                            </Badge>
+                          )}
+                          {showCredentialStatus && (
+                            <Badge
+                              variant="outline"
+                              title={`${t("settings.credentialStatus")}: ${credentialStatusText}`}
+                            >
+                              {credentialStatusText}
+                            </Badge>
+                          )}
+                          {profile.baseUrl && (
+                            <Badge variant="outline" title={`URL: ${profile.baseUrl}`}>
+                              URL
+                            </Badge>
+                          )}
+                          {(profile.syncSourceDeviceName || profile.syncSyncedAt) && (
+                            <Badge
+                              variant="outline"
+                              title={t("settings.profileSyncSource", {
+                                device: profile.syncSourceDeviceName || "-",
+                                syncedAt: formatSyncedAt(profile.syncSyncedAt),
+                              })}
+                            >
+                              {profile.syncSourceDeviceName || "-"}
+                            </Badge>
+                          )}
                         </div>
-                        {showCredentialRef && (
-                          <div className="text-sm text-muted-foreground mt-0.5">
-                            {t("settings.credentialRef")}: {credential.authRef || "-"}
-                          </div>
-                        )}
-                        {showCredentialStatus && (
-                          <div className="text-sm text-muted-foreground mt-0.5">
-                            {t("settings.credentialStatus")}: {credentialStatusText}
-                          </div>
-                        )}
-                        {profile.baseUrl && (
-                          <div className="text-sm text-muted-foreground mt-0.5">
-                            URL: {profile.baseUrl}
-                          </div>
-                        )}
                         <div className="flex gap-1.5 mt-1.5">
                           {profileUi.actions.includes("edit") ? (
                             <Button
@@ -679,9 +825,66 @@ export function Settings({
             {showPreferences && <BugReportSettings />}
           </div>
 
-      {message && (
-        <p className="text-sm text-muted-foreground mt-3">{message}</p>
-      )}
+      <Dialog open={syncDialogOpen} onOpenChange={setSyncDialogOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>{t("settings.syncDevicesTitle")}</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-2 max-h-[320px] overflow-y-auto">
+            {remoteDevices.length === 0 ? (
+              <p className="text-sm text-muted-foreground">{t("settings.noSyncDevices")}</p>
+            ) : remoteDevices.map((device) => {
+              const checked = selectedSyncHostIds.includes(device.id);
+              const connected = hostConnectionById[device.id] ?? false;
+              const connecting = hostConnectingById[device.id] ?? false;
+              const status = syncStatusByHostId[device.id] || "idle";
+              const statusText = connecting
+                ? t("settings.connecting")
+                : status === "syncing"
+                  ? t("settings.syncStatusSyncing")
+                  : status === "success"
+                    ? t("settings.syncStatusSuccess")
+                    : status === "failed"
+                      ? t("settings.syncStatusFailed")
+                      : t("settings.syncStatusIdle");
+              return (
+                <label key={device.id} className={`flex items-center justify-between gap-3 border border-border rounded-md px-3 py-2 ${connected ? "" : "opacity-70"}`}>
+                  <div className="flex items-center gap-2">
+                    <Checkbox
+                      checked={checked}
+                      disabled={connecting}
+                      onCheckedChange={async (value) => {
+                        const enabled = Boolean(value);
+                        if (!enabled) {
+                          setSelectedSyncHostIds((prev) => prev.filter((id) => id !== device.id));
+                          return;
+                        }
+                        if (!connected) {
+                          if (!onConnectDevice) return;
+                          setHostConnectingById((prev) => ({ ...prev, [device.id]: true }));
+                          const connectedNow = await onConnectDevice(device.id);
+                          setHostConnectingById((prev) => ({ ...prev, [device.id]: false }));
+                          if (!connectedNow) return;
+                          setHostConnectionById((prev) => ({ ...prev, [device.id]: true }));
+                        }
+                        setSelectedSyncHostIds((prev) => prev.includes(device.id) ? prev : [...prev, device.id]);
+                      }}
+                    />
+                    <span className={`text-sm ${connected ? "" : "text-muted-foreground"}`}>{device.label}</span>
+                  </div>
+                  <span className="text-xs text-muted-foreground">
+                    {connected || connecting ? statusText : t("settings.disconnected")}
+                  </span>
+                </label>
+              );
+            })}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setSyncDialogOpen(false)}>{t("settings.cancel")}</Button>
+            <Button onClick={runDeviceSync}>{syncButtonText}</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* Add / Edit Profile Dialog */}
       <Dialog open={profileDialogOpen} onOpenChange={(open) => {
