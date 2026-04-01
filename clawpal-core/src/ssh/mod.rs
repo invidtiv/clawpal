@@ -65,6 +65,16 @@ const RUSSH_SFTP_TIMEOUT_SECS: u64 = 30;
 #[derive(Clone)]
 struct SshHandler;
 
+fn russh_exec_timeout_secs_from_env_var(raw: Option<String>) -> u64 {
+    raw.and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|secs| *secs > 0)
+        .unwrap_or(RUSSH_EXEC_TIMEOUT_SECS)
+}
+
+fn russh_exec_timeout_secs() -> u64 {
+    russh_exec_timeout_secs_from_env_var(std::env::var("CLAWPAL_RUSSH_EXEC_TIMEOUT_SECS").ok())
+}
+
 #[async_trait::async_trait]
 impl client::Handler for SshHandler {
     type Error = russh::Error;
@@ -147,7 +157,8 @@ impl SshSession {
             .await
             .map_err(|e| SshError::CommandFailed(e.to_string()))?;
 
-        let wait_result = timeout(Duration::from_secs(RUSSH_EXEC_TIMEOUT_SECS), async {
+        let exec_timeout_secs = russh_exec_timeout_secs();
+        let wait_result = timeout(Duration::from_secs(exec_timeout_secs), async {
             let mut stdout = Vec::new();
             let mut stderr = Vec::new();
             let mut exit_code = -1;
@@ -170,9 +181,7 @@ impl SshSession {
         .await;
 
         let (stdout, stderr, exit_code) = wait_result.map_err(|_| {
-            SshError::CommandFailed(format!(
-                "russh exec timed out after {RUSSH_EXEC_TIMEOUT_SECS}s"
-            ))
+            SshError::CommandFailed(format!("russh exec timed out after {exec_timeout_secs}s"))
         })?;
 
         Ok(ExecResult {
@@ -180,6 +189,104 @@ impl SshSession {
             stderr: String::from_utf8_lossy(&stderr).trim_end().to_string(),
             exit_code,
         })
+    }
+
+    /// Execute a command and stream stdout lines as they arrive via a bounded mpsc channel.
+    ///
+    /// Returns `(receiver, join_handle)`. The receiver yields one `String` per line.
+    /// The join handle resolves to `(exit_code, stderr)` when the command completes.
+    /// For the Legacy backend, this falls back to `exec()` and sends all lines at once.
+    pub async fn exec_streaming(
+        &self,
+        cmd: &str,
+    ) -> Result<(
+        tokio::sync::mpsc::Receiver<String>,
+        tokio::task::JoinHandle<Result<(i32, String)>>,
+    )> {
+        let (tx, rx) = tokio::sync::mpsc::channel::<String>(64);
+
+        match &self.backend {
+            Backend::Legacy => {
+                // Fallback: exec all at once, then send lines
+                let result = self.exec_legacy(cmd).await?;
+                let exit_code = result.exit_code;
+                let stderr = result.stderr.clone();
+                let handle = tokio::spawn(async move {
+                    for line in result.stdout.lines() {
+                        if tx.send(line.to_string()).await.is_err() {
+                            break;
+                        }
+                    }
+                    Ok((exit_code, stderr))
+                });
+                Ok((rx, handle))
+            }
+            Backend::Russh { handle } => {
+                let handle_clone = handle.clone();
+                let mut channel = handle_clone
+                    .channel_open_session()
+                    .await
+                    .map_err(|e| SshError::Channel(e.to_string()))?;
+                channel
+                    .exec(true, cmd)
+                    .await
+                    .map_err(|e| SshError::CommandFailed(e.to_string()))?;
+
+                let exec_timeout_secs = russh_exec_timeout_secs();
+                let join = tokio::spawn(async move {
+                    let wait_result = timeout(Duration::from_secs(exec_timeout_secs), async {
+                        let mut line_buf = Vec::new();
+                        let mut stderr = Vec::new();
+                        let mut exit_code: i32 = -1;
+                        while let Some(msg) = channel.wait().await {
+                            match msg {
+                                russh::ChannelMsg::Data { data } => {
+                                    for &byte in data.as_ref() {
+                                        if byte == b'\n' {
+                                            let line =
+                                                String::from_utf8_lossy(&line_buf).to_string();
+                                            line_buf.clear();
+                                            if tx.send(line).await.is_err() {
+                                                return (exit_code, stderr);
+                                            }
+                                        } else {
+                                            line_buf.push(byte);
+                                        }
+                                    }
+                                }
+                                russh::ChannelMsg::ExtendedData { data, ext } => {
+                                    if ext == 1 {
+                                        stderr.extend_from_slice(&data);
+                                    }
+                                }
+                                russh::ChannelMsg::ExitStatus { exit_status } => {
+                                    exit_code = exit_status as i32;
+                                }
+                                _ => {}
+                            }
+                        }
+                        if !line_buf.is_empty() {
+                            let line = String::from_utf8_lossy(&line_buf).to_string();
+                            let _ = tx.send(line).await;
+                        }
+                        (exit_code, stderr)
+                    })
+                    .await;
+
+                    match wait_result {
+                        Ok((exit_code, stderr)) => Ok((
+                            exit_code,
+                            String::from_utf8_lossy(&stderr).trim_end().to_string(),
+                        )),
+                        Err(_) => Err(SshError::CommandFailed(format!(
+                            "russh exec_streaming timed out after {exec_timeout_secs}s"
+                        ))),
+                    }
+                });
+
+                Ok((rx, join))
+            }
+        }
     }
 
     pub async fn sftp_read(&self, path: &str) -> Result<Vec<u8>> {
@@ -947,5 +1054,27 @@ mod tests {
         for p in &paths {
             assert!(p.contains("id_ed25519") || p.contains("id_rsa"));
         }
+    }
+
+    #[test]
+    fn russh_exec_timeout_secs_uses_default_without_env_override() {
+        assert_eq!(
+            russh_exec_timeout_secs_from_env_var(None),
+            RUSSH_EXEC_TIMEOUT_SECS
+        );
+        assert_eq!(
+            russh_exec_timeout_secs_from_env_var(Some(String::new())),
+            RUSSH_EXEC_TIMEOUT_SECS
+        );
+        assert_eq!(
+            russh_exec_timeout_secs_from_env_var(Some("not-a-number".into())),
+            RUSSH_EXEC_TIMEOUT_SECS
+        );
+    }
+
+    #[test]
+    fn russh_exec_timeout_secs_accepts_positive_env_override() {
+        assert_eq!(russh_exec_timeout_secs_from_env_var(Some("60".into())), 60);
+        assert_eq!(russh_exec_timeout_secs_from_env_var(Some("5".into())), 5);
     }
 }

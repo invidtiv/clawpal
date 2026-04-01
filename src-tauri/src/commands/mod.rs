@@ -1,3 +1,28 @@
+/// Macro for wrapping synchronous command bodies with timing.
+/// Uses a closure to capture `?` early-returns so timing is always recorded.
+macro_rules! timed_sync {
+    ($name:expr, $body:block) => {{
+        let __start = std::time::Instant::now();
+        let __result = (|| $body)();
+        let __elapsed_us = __start.elapsed().as_micros() as u64;
+        crate::commands::perf::record_timing($name, __elapsed_us);
+        __result
+    }};
+}
+
+/// Macro for wrapping async command bodies with timing.
+/// Uses an async block to capture `?` early-returns so timing is always recorded.
+macro_rules! timed_async {
+    ($name:expr, $body:block) => {{
+        let __start = std::time::Instant::now();
+        let __result = async $body.await;
+        let __elapsed_us = __start.elapsed().as_micros() as u64;
+        crate::commands::perf::record_timing($name, __elapsed_us);
+        __result
+    }};
+}
+
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
@@ -11,6 +36,7 @@ use std::{
 };
 
 use tauri::{AppHandle, Emitter, Manager, State};
+use tauri_plugin_dialog::DialogExt;
 
 use crate::access_discovery::probe_engine::{build_probe_plan_for_local, run_probe_with_redaction};
 use crate::access_discovery::store::AccessDiscoveryStore;
@@ -25,12 +51,27 @@ use crate::openclaw_doc_resolver::{
     resolve_local_doc_guidance, resolve_remote_doc_guidance, DocCitation, DocGuidance,
     DocResolveIssue, DocResolveRequest, RootCauseHypothesis,
 };
+use crate::recipe_executor::{
+    execute_recipe as prepare_recipe_execution, ExecuteRecipeRequest, ExecuteRecipeResult,
+};
+use crate::recipe_store::{
+    Artifact as RecipeRuntimeArtifact, AuditEntry as RecipeRuntimeAuditEntry, RecipeStore,
+    ResourceClaim as RecipeRuntimeResourceClaim, Run as RecipeRuntimeRun,
+};
 use crate::ssh::{SftpEntry, SshConnectionPool, SshExecResult, SshHostConfig, SshTransferStats};
 use clawpal_core::ssh::diagnostic::{
     from_any_error, SshDiagnosticReport, SshDiagnosticStatus, SshErrorCode, SshIntent, SshStage,
 };
 
+pub mod channels;
+pub mod cli;
+pub mod credentials;
+pub mod discord;
+pub mod perf;
+pub mod version;
+
 pub mod agent;
+pub mod app_logs;
 pub mod backup;
 pub mod config;
 pub mod cron;
@@ -39,23 +80,40 @@ pub mod discovery;
 pub mod doctor;
 pub mod doctor_assistant;
 pub mod gateway;
+pub mod instance;
 pub mod logs;
+pub mod model;
 pub mod overview;
 pub mod precheck;
 pub mod preferences;
 pub mod profiles;
+pub mod recipe_cmds;
 pub mod rescue;
 pub mod sessions;
+pub mod ssh;
+pub mod upgrade;
+pub mod util;
 pub mod watchdog;
+pub mod watchdog_cmds;
 
 #[allow(unused_imports)]
 pub use agent::*;
 #[allow(unused_imports)]
+pub use app_logs::*;
+#[allow(unused_imports)]
 pub use backup::*;
+#[allow(unused_imports)]
+pub use channels::*;
+#[allow(unused_imports)]
+pub use cli::*;
 #[allow(unused_imports)]
 pub use config::*;
 #[allow(unused_imports)]
+pub use credentials::*;
+#[allow(unused_imports)]
 pub use cron::*;
+#[allow(unused_imports)]
+pub use discord::*;
 #[allow(unused_imports)]
 pub use discover_local::*;
 #[allow(unused_imports)]
@@ -67,9 +125,15 @@ pub use doctor_assistant::*;
 #[allow(unused_imports)]
 pub use gateway::*;
 #[allow(unused_imports)]
+pub use instance::*;
+#[allow(unused_imports)]
 pub use logs::*;
 #[allow(unused_imports)]
+pub use model::*;
+#[allow(unused_imports)]
 pub use overview::*;
+#[allow(unused_imports)]
+pub use perf::*;
 #[allow(unused_imports)]
 pub use precheck::*;
 #[allow(unused_imports)]
@@ -77,11 +141,23 @@ pub use preferences::*;
 #[allow(unused_imports)]
 pub use profiles::*;
 #[allow(unused_imports)]
+pub use recipe_cmds::*;
+#[allow(unused_imports)]
 pub use rescue::*;
 #[allow(unused_imports)]
 pub use sessions::*;
 #[allow(unused_imports)]
+pub use ssh::*;
+#[allow(unused_imports)]
+pub use upgrade::*;
+#[allow(unused_imports)]
+pub use util::*;
+#[allow(unused_imports)]
+pub use version::*;
+#[allow(unused_imports)]
 pub use watchdog::*;
+#[allow(unused_imports)]
+pub use watchdog_cmds::*;
 
 static REMOTE_OPENCLAW_CONFIG_PATH_CACHE: LazyLock<Mutex<HashMap<String, (String, Instant)>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -93,8 +169,22 @@ fn shell_escape(s: &str) -> String {
 }
 
 use crate::recipe::{
-    build_candidate_config_from_template, collect_change_paths, format_diff,
-    load_recipes_with_fallback, ApplyResult, PreviewResult,
+    build_candidate_config_from_template, collect_change_paths, find_recipe_with_source,
+    format_diff, load_recipes_from_source_text, load_recipes_with_fallback, validate_recipe_source,
+    ApplyResult, PreviewResult, RecipeSourceDiagnostics,
+};
+use crate::recipe_action_catalog::{
+    find_recipe_action as find_recipe_action_catalog_entry, list_recipe_actions as catalog_actions,
+    RecipeActionCatalogEntry,
+};
+use crate::recipe_adapter::export_recipe_source as export_recipe_source_document;
+use crate::recipe_library::{
+    load_bundled_recipe_descriptors, upgrade_bundled_recipe, RecipeLibraryImportResult,
+    RecipeSourceImportResult,
+};
+use crate::recipe_planner::{build_recipe_plan, build_recipe_plan_from_source_text, RecipePlan};
+use crate::recipe_workspace::{
+    approval_required_for, RecipeSourceSaveResult, RecipeWorkspace, RecipeWorkspaceEntry,
 };
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -373,7 +463,7 @@ pub struct SessionFile {
     pub size_bytes: u64,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionAnalysis {
     pub agent: String,
@@ -391,7 +481,7 @@ pub struct SessionAnalysis {
     pub kind: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentSessionAnalysis {
     pub agent: String,
@@ -451,6 +541,12 @@ pub struct DiscordGuildChannel {
     pub channel_name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_agent_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolution_warning: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub guild_resolution_warning: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub channel_resolution_warning: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -480,7 +576,11 @@ pub struct HistoryItem {
     pub source: String,
     pub can_rollback: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub rollback_of: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifacts: Vec<RecipeRuntimeArtifact>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -581,135 +681,6 @@ fn local_health_instance() -> clawpal_core::instance::Instance {
         clawpal_data_dir: crate::cli_runner::get_active_clawpal_data_override(),
         ssh_host_config: None,
     }
-}
-
-/// Returns cached catalog instantly without calling CLI. Returns empty if no cache.
-/// Refresh catalog from CLI and update cache. Returns the fresh catalog.
-/// Read Discord guild/channels from persistent cache. Fast, no subprocess.
-/// Resolve Discord guild/channel names via openclaw CLI and persist to cache.
-#[tauri::command]
-pub fn update_channel_config(
-    path: String,
-    channel_type: Option<String>,
-    mode: Option<String>,
-    allowlist: Vec<String>,
-    model: Option<String>,
-) -> Result<bool, String> {
-    if path.trim().is_empty() {
-        return Err("channel path is required".into());
-    }
-    let paths = resolve_paths();
-    let mut cfg = read_openclaw_config(&paths)?;
-    let current = serde_json::to_string_pretty(&cfg).map_err(|e| e.to_string())?;
-    set_nested_value(
-        &mut cfg,
-        &format!("{path}.type"),
-        channel_type.map(Value::String),
-    )?;
-    set_nested_value(&mut cfg, &format!("{path}.mode"), mode.map(Value::String))?;
-    let allowlist_values = allowlist.into_iter().map(Value::String).collect::<Vec<_>>();
-    set_nested_value(
-        &mut cfg,
-        &format!("{path}.allowlist"),
-        Some(Value::Array(allowlist_values)),
-    )?;
-    set_nested_value(&mut cfg, &format!("{path}.model"), model.map(Value::String))?;
-    write_config_with_snapshot(&paths, &current, &cfg, "update-channel")?;
-    Ok(true)
-}
-
-/// List current channel→agent bindings from config.
-#[tauri::command]
-pub fn delete_channel_node(path: String) -> Result<bool, String> {
-    if path.trim().is_empty() {
-        return Err("channel path is required".into());
-    }
-    let paths = resolve_paths();
-    let mut cfg = read_openclaw_config(&paths)?;
-    let current = serde_json::to_string_pretty(&cfg).map_err(|e| e.to_string())?;
-    let before = cfg.to_string();
-    set_nested_value(&mut cfg, &path, None)?;
-    if cfg.to_string() == before {
-        return Ok(false);
-    }
-    write_config_with_snapshot(&paths, &current, &cfg, "delete-channel")?;
-    Ok(true)
-}
-
-#[tauri::command]
-pub fn set_global_model(model_value: Option<String>) -> Result<bool, String> {
-    let paths = resolve_paths();
-    let mut cfg = read_openclaw_config(&paths)?;
-    let current = serde_json::to_string_pretty(&cfg).map_err(|e| e.to_string())?;
-    let model = model_value
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty());
-    // If existing model is an object (has fallbacks etc.), only update "primary" inside it
-    if let Some(existing) = cfg.pointer_mut("/agents/defaults/model") {
-        if let Some(model_obj) = existing.as_object_mut() {
-            let sync_model_value = match model.clone() {
-                Some(v) => {
-                    model_obj.insert("primary".into(), Value::String(v.clone()));
-                    Some(v)
-                }
-                None => {
-                    model_obj.remove("primary");
-                    None
-                }
-            };
-            write_config_with_snapshot(&paths, &current, &cfg, "set-global-model")?;
-            maybe_sync_main_auth_for_model_value(&paths, sync_model_value)?;
-            return Ok(true);
-        }
-    }
-    // Fallback: plain string or missing — set the whole value
-    set_nested_value(&mut cfg, "agents.defaults.model", model.map(Value::String))?;
-    write_config_with_snapshot(&paths, &current, &cfg, "set-global-model")?;
-    let model_to_sync = cfg
-        .pointer("/agents/defaults/model")
-        .and_then(read_model_value);
-    maybe_sync_main_auth_for_model_value(&paths, model_to_sync)?;
-    Ok(true)
-}
-
-#[tauri::command]
-pub fn set_agent_model(agent_id: String, model_value: Option<String>) -> Result<bool, String> {
-    if agent_id.trim().is_empty() {
-        return Err("agent id is required".into());
-    }
-    let paths = resolve_paths();
-    let mut cfg = read_openclaw_config(&paths)?;
-    let current = serde_json::to_string_pretty(&cfg).map_err(|e| e.to_string())?;
-    let value = model_value
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty());
-    set_agent_model_value(&mut cfg, &agent_id, value)?;
-    write_config_with_snapshot(&paths, &current, &cfg, "set-agent-model")?;
-    Ok(true)
-}
-
-#[tauri::command]
-pub fn set_channel_model(path: String, model_value: Option<String>) -> Result<bool, String> {
-    if path.trim().is_empty() {
-        return Err("channel path is required".into());
-    }
-    let paths = resolve_paths();
-    let mut cfg = read_openclaw_config(&paths)?;
-    let current = serde_json::to_string_pretty(&cfg).map_err(|e| e.to_string())?;
-    let value = model_value
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty());
-    set_nested_value(&mut cfg, &format!("{path}.model"), value.map(Value::String))?;
-    write_config_with_snapshot(&paths, &current, &cfg, "set-channel-model")?;
-    Ok(true)
-}
-
-#[tauri::command]
-pub fn list_model_bindings() -> Result<Vec<ModelBinding>, String> {
-    let paths = resolve_paths();
-    let cfg = read_openclaw_config(&paths)?;
-    let profiles = load_model_profiles(&paths);
-    Ok(collect_model_bindings(&cfg, &profiles))
 }
 
 fn local_cli_cache_key(suffix: &str) -> String {
@@ -876,15 +847,6 @@ mod parse_agents_cli_output_tests {
         assert!(err.contains("top-level object keys=[payload, status]"));
         assert!(err.contains("\"payload\":{\"entries\":[]}"));
     }
-}
-
-fn expand_tilde(path: &str) -> String {
-    if path.starts_with("~/") {
-        if let Some(home) = std::env::var("HOME").ok() {
-            return format!("{}{}", home, &path[1..]);
-        }
-    }
-    path.to_string()
 }
 
 fn analyze_sessions_sync() -> Result<Vec<AgentSessionAnalysis>, String> {
@@ -1227,250 +1189,2463 @@ fn preview_session_sync(agent_id: &str, session_id: &str) -> Result<Vec<Value>, 
 }
 
 #[tauri::command]
-pub fn list_recipes(source: Option<String>) -> Result<Vec<crate::recipe::Recipe>, String> {
-    let paths = resolve_paths();
-    let default_path = paths.clawpal_dir.join("recipes").join("recipes.json");
-    Ok(load_recipes_with_fallback(source, &default_path))
+pub fn list_recipes_from_source_text(
+    source_text: String,
+) -> Result<Vec<crate::recipe::Recipe>, String> {
+    load_recipes_from_source_text(&source_text)
 }
 
 #[tauri::command]
-pub async fn manage_rescue_bot(
-    action: String,
-    profile: Option<String>,
-    rescue_port: Option<u16>,
-) -> Result<RescueBotManageResult, String> {
-    let action_label = action.clone();
-    let profile_label = profile.clone().unwrap_or_else(|| "rescue".into());
-    crate::logging::log_helper(&format!(
-        "[local] manage_rescue_bot start action={} profile={}",
-        action_label, profile_label
-    ));
-    let result = tauri::async_runtime::spawn_blocking(move || {
-        let action = RescueBotAction::parse(&action)?;
-        let profile = profile
-            .as_deref()
-            .map(str::trim)
-            .filter(|p| !p.is_empty())
-            .unwrap_or("rescue")
-            .to_string();
+pub async fn pick_recipe_source_directory(app: AppHandle) -> Result<Option<String>, String> {
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    app.dialog().file().pick_folder(move |folder_path| {
+        let result = folder_path
+            .map(|path| path.into_path().map_err(|error| error.to_string()))
+            .transpose()
+            .map(|path| path.map(|value| value.to_string_lossy().to_string()));
+        let _ = sender.send(result);
+    });
 
-        let main_port = read_openclaw_config(&resolve_paths())
-            .map(|cfg| clawpal_core::doctor::resolve_gateway_port_from_config(&cfg))
-            .unwrap_or(18789);
-        let (already_configured, existing_port) = resolve_local_rescue_profile_state(&profile)?;
-        let should_configure = !already_configured
-            || action == RescueBotAction::Set
-            || action == RescueBotAction::Activate;
-        let rescue_port = if should_configure {
-            rescue_port.unwrap_or_else(|| clawpal_core::doctor::suggest_rescue_port(main_port))
-        } else {
-            existing_port
-                .or(rescue_port)
-                .unwrap_or_else(|| clawpal_core::doctor::suggest_rescue_port(main_port))
-        };
-        let min_recommended_port = main_port.saturating_add(20);
+    receiver
+        .await
+        .map_err(|_| "recipe folder picker was closed before returning a result".to_string())?
+}
 
-        if should_configure && matches!(action, RescueBotAction::Set | RescueBotAction::Activate) {
-            clawpal_core::doctor::ensure_rescue_port_spacing(main_port, rescue_port)?;
-        }
+#[tauri::command]
+pub fn list_recipe_actions() -> Result<Vec<RecipeActionCatalogEntry>, String> {
+    Ok(catalog_actions())
+}
 
-        if action == RescueBotAction::Status && !already_configured {
-            let runtime_state = infer_rescue_bot_runtime_state(false, None, None);
-            return Ok(RescueBotManageResult {
-                action: action.as_str().into(),
-                profile,
-                main_port,
-                rescue_port,
-                min_recommended_port,
-                configured: false,
-                active: false,
-                runtime_state,
-                was_already_configured: false,
-                commands: Vec::new(),
-            });
-        }
+#[tauri::command]
+pub fn validate_recipe_source_text(source_text: String) -> Result<RecipeSourceDiagnostics, String> {
+    validate_recipe_source(&source_text)
+}
 
-        let plan = build_rescue_bot_command_plan(action, &profile, rescue_port, should_configure);
-        let mut commands = Vec::new();
+#[tauri::command]
+pub fn list_recipe_workspace_entries(
+    app_handle: AppHandle,
+) -> Result<Vec<RecipeWorkspaceEntry>, String> {
+    let workspace = RecipeWorkspace::from_resolved_paths();
+    let bundled = load_bundled_recipe_descriptors(&app_handle)?;
+    workspace.describe_entries(&bundled)
+}
 
-        for command in plan {
-            let result = run_local_rescue_bot_command(command)?;
-            if result.output.exit_code != 0 {
-                if action == RescueBotAction::Status {
-                    commands.push(result);
-                    break;
-                }
-                if is_rescue_cleanup_noop(action, &result.command, &result.output) {
-                    commands.push(result);
-                    continue;
-                }
-                if action == RescueBotAction::Activate
-                    && is_gateway_restart_command(&result.command)
-                    && is_gateway_restart_timeout(&result.output)
-                {
-                    commands.push(result);
-                    run_local_gateway_restart_fallback(&profile, &mut commands)?;
-                    continue;
-                }
-                return Err(command_failure_message(&result.command, &result.output));
-            }
-            commands.push(result);
-        }
+#[tauri::command]
+pub fn read_recipe_workspace_source(slug: String) -> Result<String, String> {
+    RecipeWorkspace::from_resolved_paths().read_recipe_source(&slug)
+}
 
-        let configured = match action {
-            RescueBotAction::Unset => false,
-            RescueBotAction::Activate | RescueBotAction::Set | RescueBotAction::Deactivate => true,
-            RescueBotAction::Status => already_configured,
-        };
-        let mut status_output = commands
-            .iter()
-            .rev()
-            .find(|result| {
-                result
-                    .command
-                    .windows(2)
-                    .any(|window| window[0] == "gateway" && window[1] == "status")
-            })
-            .map(|result| &result.output);
-        if action == RescueBotAction::Activate {
-            let active_now = status_output
-                .map(|output| infer_rescue_bot_runtime_state(true, Some(output), None) == "active")
-                .unwrap_or(false);
-            if !active_now {
-                let probe_status = build_gateway_status_command(&profile, true);
-                if let Ok(result) = run_local_rescue_bot_command(probe_status) {
-                    commands.push(result);
-                    status_output = commands
-                        .iter()
-                        .rev()
-                        .find(|result| {
-                            result
-                                .command
-                                .windows(2)
-                                .any(|window| window[0] == "gateway" && window[1] == "status")
-                        })
-                        .map(|result| &result.output);
-                }
-            }
-        }
-        let runtime_state = infer_rescue_bot_runtime_state(configured, status_output, None);
-        let active = runtime_state == "active";
+#[tauri::command]
+pub fn save_recipe_workspace_source(
+    slug: String,
+    source: String,
+) -> Result<RecipeSourceSaveResult, String> {
+    RecipeWorkspace::from_resolved_paths().save_recipe_source(&slug, &source)
+}
 
-        Ok(RescueBotManageResult {
-            action: action.as_str().into(),
-            profile,
-            main_port,
-            rescue_port,
-            min_recommended_port,
-            configured,
-            active,
-            runtime_state,
-            was_already_configured: already_configured,
-            commands,
+#[tauri::command]
+pub fn import_recipe_library(root_path: String) -> Result<RecipeLibraryImportResult, String> {
+    let root = std::path::PathBuf::from(shellexpand::tilde(root_path.trim()).to_string());
+    RecipeWorkspace::from_resolved_paths().import_recipe_library(&root)
+}
+
+#[tauri::command]
+pub fn import_recipe_source(
+    source: String,
+    overwrite_existing: bool,
+) -> Result<RecipeSourceImportResult, String> {
+    crate::recipe_library::import_recipe_source(
+        &source,
+        &RecipeWorkspace::from_resolved_paths(),
+        overwrite_existing,
+    )
+}
+
+#[tauri::command]
+pub fn delete_recipe_workspace_source(slug: String) -> Result<bool, String> {
+    RecipeWorkspace::from_resolved_paths().delete_recipe_source(&slug)?;
+    Ok(true)
+}
+
+#[tauri::command]
+pub fn approve_recipe_workspace_source(slug: String) -> Result<bool, String> {
+    let workspace = RecipeWorkspace::from_resolved_paths();
+    let source = workspace.read_recipe_source(&slug)?;
+    let digest = RecipeWorkspace::source_digest(&source);
+    workspace.approve_recipe(&slug, &digest)?;
+    Ok(true)
+}
+
+#[tauri::command]
+pub fn upgrade_bundled_recipe_workspace_source(
+    app_handle: AppHandle,
+    slug: String,
+) -> Result<RecipeSourceSaveResult, String> {
+    let workspace = RecipeWorkspace::from_resolved_paths();
+    upgrade_bundled_recipe(&app_handle, &workspace, &slug)
+}
+
+#[tauri::command]
+pub fn export_recipe_source(recipe_id: String, source: Option<String>) -> Result<String, String> {
+    let recipe = find_recipe_with_source(&recipe_id, source)
+        .ok_or_else(|| format!("recipe not found: {}", recipe_id))?;
+    export_recipe_source_document(&recipe)
+}
+
+#[tauri::command]
+pub fn plan_recipe_source(
+    recipe_id: String,
+    params: Map<String, Value>,
+    source_text: String,
+) -> Result<RecipePlan, String> {
+    build_recipe_plan_from_source_text(&recipe_id, &params, &source_text)
+}
+
+#[tauri::command]
+pub fn plan_recipe(
+    recipe_id: String,
+    params: Map<String, Value>,
+    source: Option<String>,
+) -> Result<RecipePlan, String> {
+    let recipe = find_recipe_with_source(&recipe_id, source)
+        .ok_or_else(|| format!("recipe not found: {}", recipe_id))?;
+    build_recipe_plan(&recipe, &params)
+}
+
+#[tauri::command]
+pub fn list_recipe_instances() -> Result<Vec<crate::recipe_store::RecipeInstance>, String> {
+    RecipeStore::from_resolved_paths().list_instances()
+}
+
+#[tauri::command]
+pub fn list_recipe_runs(instance_id: Option<String>) -> Result<Vec<RecipeRuntimeRun>, String> {
+    let store = RecipeStore::from_resolved_paths();
+    match instance_id {
+        Some(instance_id) => store.list_runs(&instance_id),
+        None => store.list_all_runs(),
+    }
+}
+
+#[tauri::command]
+pub fn delete_recipe_runs(instance_id: Option<String>) -> Result<usize, String> {
+    RecipeStore::from_resolved_paths().delete_runs(instance_id.as_deref())
+}
+
+fn build_runtime_claims(
+    spec: &crate::execution_spec::ExecutionSpec,
+) -> Vec<RecipeRuntimeResourceClaim> {
+    spec.resources
+        .claims
+        .iter()
+        .map(|claim| RecipeRuntimeResourceClaim {
+            kind: claim.kind.clone(),
+            id: claim.id.clone(),
+            target: claim.target.clone(),
+            path: claim.path.clone(),
         })
-    })
-    .await
-    .map_err(|e| e.to_string())?;
+        .collect()
+}
 
-    match &result {
-        Ok(summary) => crate::logging::log_helper(&format!(
-            "[local] manage_rescue_bot success action={} profile={} state={} configured={} active={}",
-            action_label, summary.profile, summary.runtime_state, summary.configured, summary.active
-        )),
-        Err(error) => crate::logging::log_helper(&format!(
-            "[local] manage_rescue_bot failed action={} profile={} error={}",
-            action_label, profile_label, error
-        )),
+fn infer_recipe_id(spec: &crate::execution_spec::ExecutionSpec) -> String {
+    spec.source
+        .get("recipeId")
+        .and_then(Value::as_str)
+        .or_else(|| spec.metadata.name.as_deref())
+        .unwrap_or("recipe")
+        .to_string()
+}
+
+fn persist_recipe_run(
+    spec: &crate::execution_spec::ExecutionSpec,
+    prepared: &crate::recipe_executor::ExecuteRecipePrepared,
+    instance_id: &str,
+    status: &str,
+    summary: &str,
+    started_at: &str,
+    finished_at: &str,
+    warnings: &[String],
+    audit_trail: &[RecipeRuntimeAuditEntry],
+) -> Result<(), String> {
+    RecipeStore::from_resolved_paths()
+        .record_run(RecipeRuntimeRun {
+            id: prepared.run_id.clone(),
+            instance_id: instance_id.to_string(),
+            recipe_id: infer_recipe_id(spec),
+            execution_kind: prepared.plan.execution_kind.clone(),
+            runner: prepared.route.runner.clone(),
+            status: status.to_string(),
+            summary: summary.to_string(),
+            started_at: started_at.to_string(),
+            finished_at: Some(finished_at.to_string()),
+            artifacts: crate::recipe_executor::build_runtime_artifacts(spec, prepared),
+            resource_claims: build_runtime_claims(spec),
+            warnings: warnings.to_vec(),
+            source_origin: infer_recipe_source_origin(spec),
+            source_digest: infer_recipe_source_digest(spec),
+            workspace_path: infer_recipe_workspace_path(spec),
+            audit_trail: audit_trail.to_vec(),
+        })
+        .map(|_| ())
+}
+
+fn audit_entry_from_apply_step(
+    step: &crate::cli_runner::ApplyQueueStepResult,
+) -> RecipeRuntimeAuditEntry {
+    RecipeRuntimeAuditEntry {
+        id: step.id.clone(),
+        phase: "execute".into(),
+        kind: step.kind.clone(),
+        label: step.label.clone(),
+        status: step.status.clone(),
+        side_effect: step.side_effect,
+        started_at: step.started_at.clone(),
+        finished_at: step.finished_at.clone(),
+        target: step.target.clone(),
+        display_command: step.display_command.clone(),
+        exit_code: step.exit_code,
+        stdout_summary: step.stdout_summary.clone(),
+        stderr_summary: step.stderr_summary.clone(),
+        details: step.details.clone(),
+    }
+}
+
+fn infer_recipe_source_origin(spec: &crate::execution_spec::ExecutionSpec) -> Option<String> {
+    spec.source
+        .get("recipeSourceOrigin")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn infer_recipe_source_digest(spec: &crate::execution_spec::ExecutionSpec) -> Option<String> {
+    spec.source
+        .get("recipeSourceDigest")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn infer_recipe_workspace_path(spec: &crate::execution_spec::ExecutionSpec) -> Option<String> {
+    spec.source
+        .get("recipeWorkspacePath")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn find_recipe_run(run_id: &str) -> Result<Option<RecipeRuntimeRun>, String> {
+    RecipeStore::from_resolved_paths()
+        .list_all_runs()
+        .map(|runs| runs.into_iter().find(|run| run.id == run_id))
+}
+
+fn execute_local_cleanup_commands(commands: &[Vec<String>]) -> Vec<String> {
+    let mut warnings = Vec::new();
+    for command in commands {
+        if command.is_empty() {
+            continue;
+        }
+        match Command::new(&command[0]).args(&command[1..]).output() {
+            Ok(output) if output.status.success() => {}
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                let detail = if !stderr.is_empty() { stderr } else { stdout };
+                warnings.push(format!(
+                    "Cleanup command failed ({}): {}",
+                    command.join(" "),
+                    detail
+                ));
+            }
+            Err(error) => warnings.push(format!(
+                "Cleanup command failed to start ({}): {}",
+                command.join(" "),
+                error
+            )),
+        }
+    }
+    warnings
+}
+
+async fn execute_remote_cleanup_commands(
+    pool: &SshConnectionPool,
+    host_id: &str,
+    commands: &[Vec<String>],
+) -> Vec<String> {
+    let mut warnings = Vec::new();
+    for command in commands {
+        if command.is_empty() {
+            continue;
+        }
+        let shell_command = command
+            .iter()
+            .map(|part| shell_escape(part))
+            .collect::<Vec<_>>()
+            .join(" ");
+        match pool.exec(host_id, &shell_command).await {
+            Ok(output) if output.exit_code == 0 => {}
+            Ok(output) => {
+                let detail = if !output.stderr.trim().is_empty() {
+                    output.stderr.trim().to_string()
+                } else {
+                    output.stdout.trim().to_string()
+                };
+                warnings.push(format!(
+                    "Remote cleanup command failed ({}): {}",
+                    command.join(" "),
+                    detail
+                ));
+            }
+            Err(error) => warnings.push(format!(
+                "Remote cleanup command failed to start ({}): {}",
+                command.join(" "),
+                error
+            )),
+        }
+    }
+    warnings
+}
+
+fn cleanup_local_recipe_artifacts(artifacts: &[RecipeRuntimeArtifact]) -> Vec<String> {
+    let mut warnings = Vec::new();
+    let mut removed_drop_in = false;
+
+    for artifact in artifacts {
+        if artifact.kind != "systemdDropIn" {
+            continue;
+        }
+        let Some(path) = artifact.path.as_deref() else {
+            continue;
+        };
+        let expanded = expand_home_path(path);
+        if !expanded.exists() {
+            continue;
+        }
+        match fs::remove_file(&expanded) {
+            Ok(()) => {
+                removed_drop_in = true;
+            }
+            Err(error) => warnings.push(format!(
+                "Failed to remove drop-in artifact {}: {}",
+                expanded.display(),
+                error
+            )),
+        }
     }
 
-    result
+    let mut commands = crate::recipe_executor::build_cleanup_commands(artifacts);
+    if removed_drop_in
+        && !commands.iter().any(|command| {
+            command
+                == &vec![
+                    "systemctl".to_string(),
+                    "--user".to_string(),
+                    "daemon-reload".to_string(),
+                ]
+        })
+    {
+        commands.push(vec![
+            "systemctl".into(),
+            "--user".into(),
+            "daemon-reload".into(),
+        ]);
+    }
+    warnings.extend(execute_local_cleanup_commands(&commands));
+    warnings
 }
 
-#[tauri::command]
-pub async fn get_rescue_bot_status(
-    profile: Option<String>,
-    rescue_port: Option<u16>,
-) -> Result<RescueBotManageResult, String> {
-    manage_rescue_bot("status".to_string(), profile, rescue_port).await
-}
+async fn cleanup_remote_recipe_artifacts(
+    pool: &SshConnectionPool,
+    host_id: &str,
+    artifacts: &[RecipeRuntimeArtifact],
+) -> Vec<String> {
+    let mut warnings = Vec::new();
+    let mut removed_drop_in = false;
 
-#[tauri::command]
-pub async fn diagnose_primary_via_rescue(
-    target_profile: Option<String>,
-    rescue_profile: Option<String>,
-) -> Result<RescuePrimaryDiagnosisResult, String> {
-    let target_label = normalize_profile_name(target_profile.as_deref(), "primary");
-    let rescue_label = normalize_profile_name(rescue_profile.as_deref(), "rescue");
-    crate::logging::log_helper(&format!(
-        "[local] diagnose_primary_via_rescue start target={} rescue={}",
-        target_label, rescue_label
-    ));
-    let result = tauri::async_runtime::spawn_blocking(move || {
-        let target_profile = normalize_profile_name(target_profile.as_deref(), "primary");
-        let rescue_profile = normalize_profile_name(rescue_profile.as_deref(), "rescue");
-        diagnose_primary_via_rescue_local(&target_profile, &rescue_profile)
-    })
-    .await
-    .map_err(|e| e.to_string())?;
-
-    match &result {
-        Ok(summary) => crate::logging::log_helper(&format!(
-            "[local] diagnose_primary_via_rescue success target={} rescue={} status={} issues={}",
-            summary.target_profile,
-            summary.rescue_profile,
-            summary.summary.status,
-            summary.issues.len()
-        )),
-        Err(error) => crate::logging::log_helper(&format!(
-            "[local] diagnose_primary_via_rescue failed target={} rescue={} error={}",
-            target_label, rescue_label, error
-        )),
+    for artifact in artifacts {
+        if artifact.kind != "systemdDropIn" {
+            continue;
+        }
+        let Some(path) = artifact.path.as_deref() else {
+            continue;
+        };
+        match pool.sftp_remove(host_id, path).await {
+            Ok(()) => {
+                removed_drop_in = true;
+            }
+            Err(error) if is_remote_missing_path_error(&error) => {}
+            Err(error) => warnings.push(format!(
+                "Failed to remove remote drop-in artifact {}: {}",
+                path, error
+            )),
+        }
     }
 
-    result
+    let mut commands = crate::recipe_executor::build_cleanup_commands(artifacts);
+    if removed_drop_in
+        && !commands.iter().any(|command| {
+            command
+                == &vec![
+                    "systemctl".to_string(),
+                    "--user".to_string(),
+                    "daemon-reload".to_string(),
+                ]
+        })
+    {
+        commands.push(vec![
+            "systemctl".into(),
+            "--user".into(),
+            "daemon-reload".into(),
+        ]);
+    }
+    warnings.extend(execute_remote_cleanup_commands(pool, host_id, &commands).await);
+    warnings
 }
 
-#[tauri::command]
-pub async fn repair_primary_via_rescue(
-    target_profile: Option<String>,
-    rescue_profile: Option<String>,
-    issue_ids: Option<Vec<String>>,
-) -> Result<RescuePrimaryRepairResult, String> {
-    let target_label = normalize_profile_name(target_profile.as_deref(), "primary");
-    let rescue_label = normalize_profile_name(rescue_profile.as_deref(), "rescue");
-    let requested_issue_count = issue_ids.as_ref().map_or(0, Vec::len);
-    crate::logging::log_helper(&format!(
-        "[local] repair_primary_via_rescue start target={} rescue={} requested_issues={}",
-        target_label, rescue_label, requested_issue_count
-    ));
-    let result = tauri::async_runtime::spawn_blocking(move || {
-        let target_profile = normalize_profile_name(target_profile.as_deref(), "primary");
-        let rescue_profile = normalize_profile_name(rescue_profile.as_deref(), "rescue");
-        repair_primary_via_rescue_local(
-            &target_profile,
-            &rescue_profile,
-            issue_ids.unwrap_or_default(),
+fn cleanup_local_recipe_snapshot(snapshot: &crate::history::SnapshotMeta) -> Vec<String> {
+    if let Some(run_id) = snapshot.run_id.as_deref() {
+        match find_recipe_run(run_id) {
+            Ok(Some(run)) => return cleanup_local_recipe_artifacts(&run.artifacts),
+            Ok(None) if !snapshot.artifacts.is_empty() => {}
+            Ok(None) => {
+                return vec![format!(
+                    "No recipe runtime run found for rollback runId {}",
+                    run_id
+                )];
+            }
+            Err(error) if !snapshot.artifacts.is_empty() => {}
+            Err(error) => {
+                return vec![format!(
+                    "Failed to load recipe runtime run {} for rollback: {}",
+                    run_id, error
+                )];
+            }
+        }
+    }
+    cleanup_local_recipe_artifacts(&snapshot.artifacts)
+}
+
+async fn cleanup_remote_recipe_snapshot(
+    pool: &SshConnectionPool,
+    host_id: &str,
+    snapshot: &crate::history::SnapshotMeta,
+) -> Vec<String> {
+    if let Some(run_id) = snapshot.run_id.as_deref() {
+        match find_recipe_run(run_id) {
+            Ok(Some(run)) => {
+                return cleanup_remote_recipe_artifacts(pool, host_id, &run.artifacts).await
+            }
+            Ok(None) if !snapshot.artifacts.is_empty() => {}
+            Ok(None) => {
+                return vec![format!(
+                    "No recipe runtime run found for rollback runId {}",
+                    run_id
+                )];
+            }
+            Err(error) if !snapshot.artifacts.is_empty() => {}
+            Err(error) => {
+                return vec![format!(
+                    "Failed to load recipe runtime run {} for rollback: {}",
+                    run_id, error
+                )];
+            }
+        }
+    }
+    cleanup_remote_recipe_artifacts(pool, host_id, &snapshot.artifacts).await
+}
+
+pub(crate) const INTERNAL_SETUP_IDENTITY_COMMAND: &str = "__setup_identity__";
+pub(crate) const INTERNAL_SYSTEMD_DROPIN_WRITE_COMMAND: &str = "__systemd_dropin_write__";
+pub(crate) const INTERNAL_AGENT_PERSONA_COMMAND: &str = "__agent_persona__";
+pub(crate) const INTERNAL_MARKDOWN_DOCUMENT_WRITE_COMMAND: &str = "__markdown_document_write__";
+pub(crate) const INTERNAL_MARKDOWN_DOCUMENT_DELETE_COMMAND: &str = "__markdown_document_delete__";
+pub(crate) const INTERNAL_SET_AGENT_MODEL_COMMAND: &str = "__set_agent_model__";
+pub(crate) const INTERNAL_ENSURE_MODEL_PROFILE_COMMAND: &str = "__ensure_model_profile__";
+pub(crate) const INTERNAL_ENSURE_PROVIDER_AUTH_COMMAND: &str = "__ensure_provider_auth__";
+pub(crate) const INTERNAL_DELETE_MODEL_PROFILE_COMMAND: &str = "__delete_model_profile__";
+pub(crate) const INTERNAL_DELETE_PROVIDER_AUTH_COMMAND: &str = "__delete_provider_auth__";
+pub(crate) const INTERNAL_DELETE_AGENT_COMMAND: &str = "__delete_agent__";
+
+fn recipe_action_internal_command(
+    label: String,
+    command_name: &str,
+    payload: Value,
+) -> Result<(String, Vec<String>), String> {
+    Ok((
+        label,
+        vec![
+            command_name.to_string(),
+            serde_json::to_string(&payload).map_err(|error| error.to_string())?,
+        ],
+    ))
+}
+
+fn action_string(value: Option<&Value>) -> Option<String> {
+    value.and_then(|value| match value {
+        Value::String(text) => {
+            let trimmed = text.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        }
+        _ => None,
+    })
+}
+
+fn action_content_string(value: Option<&Value>) -> Option<String> {
+    value.and_then(|value| match value {
+        Value::String(text) => {
+            if text.trim().is_empty() {
+                None
+            } else {
+                Some(text.clone())
+            }
+        }
+        _ => None,
+    })
+}
+
+fn action_bool(value: Option<&Value>) -> bool {
+    match value {
+        Some(Value::Bool(value)) => *value,
+        Some(Value::String(value)) => value.trim().eq_ignore_ascii_case("true"),
+        _ => false,
+    }
+}
+
+fn action_string_list(value: Option<&Value>) -> Vec<String> {
+    match value {
+        Some(Value::String(value)) => value
+            .split(',')
+            .map(str::trim)
+            .filter(|item| !item.is_empty())
+            .map(str::to_string)
+            .collect(),
+        Some(Value::Array(values)) => values
+            .iter()
+            .filter_map(|value| match value {
+                Value::String(text) => {
+                    let trimmed = text.trim();
+                    if trimmed.is_empty() {
+                        None
+                    } else {
+                        Some(trimmed.to_string())
+                    }
+                }
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn config_set_value_and_flag(
+    value: &Value,
+    strict_json: bool,
+) -> Result<(String, Option<String>), String> {
+    match value {
+        Value::String(text) if !strict_json => Ok((text.clone(), None)),
+        _ => Ok((
+            serde_json::to_string(value).map_err(|error| error.to_string())?,
+            Some("--strict-json".into()),
+        )),
+    }
+}
+
+fn recipe_action_setup_identity_command(
+    agent_id: &str,
+    name: Option<&str>,
+    emoji: Option<&str>,
+    persona: Option<&str>,
+) -> (String, Vec<String>) {
+    let mut payload = Map::new();
+    payload.insert("agentId".into(), Value::String(agent_id.to_string()));
+    if let Some(name) = name.map(str::trim).filter(|value| !value.is_empty()) {
+        payload.insert("name".into(), Value::String(name.to_string()));
+    }
+    if let Some(emoji) = emoji.map(str::trim).filter(|value| !value.is_empty()) {
+        payload.insert("emoji".into(), Value::String(emoji.to_string()));
+    }
+    if let Some(persona) = persona.map(str::trim).filter(|value| !value.is_empty()) {
+        payload.insert("persona".into(), Value::String(persona.to_string()));
+    }
+    (
+        format!("Setup identity: {}", agent_id),
+        vec![
+            INTERNAL_SETUP_IDENTITY_COMMAND.to_string(),
+            Value::Object(payload).to_string(),
+        ],
+    )
+}
+
+fn recipe_action_agent_persona_command(
+    agent_id: &str,
+    persona: Option<&str>,
+    clear: bool,
+) -> Result<(String, Vec<String>), String> {
+    let mut payload = Map::new();
+    payload.insert("agentId".into(), Value::String(agent_id.to_string()));
+    if clear {
+        payload.insert("clear".into(), Value::Bool(true));
+    }
+    if let Some(persona) = persona.map(str::trim).filter(|value| !value.is_empty()) {
+        payload.insert("persona".into(), Value::String(persona.to_string()));
+    }
+    recipe_action_internal_command(
+        format!("Update persona: {}", agent_id),
+        INTERNAL_AGENT_PERSONA_COMMAND,
+        Value::Object(payload),
+    )
+}
+
+fn recipe_action_markdown_document_command(
+    label: &str,
+    command_name: &str,
+    args: &Map<String, Value>,
+) -> Result<(String, Vec<String>), String> {
+    recipe_action_internal_command(label.to_string(), command_name, Value::Object(args.clone()))
+}
+
+fn append_config_patch_commands(
+    value: &Value,
+    path: &str,
+    commands: &mut Vec<(String, Vec<String>)>,
+) -> Result<(), String> {
+    match value {
+        Value::Object(map) => {
+            for (key, nested) in map {
+                let next_path = if path.is_empty() {
+                    key.clone()
+                } else {
+                    format!("{}.{}", path, key)
+                };
+                append_config_patch_commands(nested, &next_path, commands)?;
+            }
+            Ok(())
+        }
+        _ => {
+            let full_path = if path.is_empty() {
+                ".".to_string()
+            } else {
+                path.to_string()
+            };
+            let json_value = serde_json::to_string(value).map_err(|error| error.to_string())?;
+            commands.push((
+                format!("Set {}", full_path),
+                vec![
+                    "openclaw".into(),
+                    "config".into(),
+                    "set".into(),
+                    full_path,
+                    json_value,
+                    "--json".into(),
+                ],
+            ));
+            Ok(())
+        }
+    }
+}
+
+fn channel_persona_patch(
+    channel_type: &str,
+    guild_id: Option<&str>,
+    account_id: Option<&str>,
+    peer_id: &str,
+    persona: &str,
+) -> Result<Value, String> {
+    match channel_type.trim() {
+        "discord" => {
+            let guild_id = guild_id
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| {
+                    "set_channel_persona requires guildId for discord channels".to_string()
+                })?;
+            // The openclaw config schema nests guilds under
+            // channels.discord.accounts.<account>.guilds, not under a
+            // top-level channels.discord.guilds key.
+            let account_id = account_id
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .unwrap_or("default");
+            Ok(json!({
+                "channels": {
+                    "discord": {
+                        "accounts": {
+                            account_id: {
+                                "guilds": {
+                                    guild_id: {
+                                        "channels": {
+                                            peer_id: {
+                                                "systemPrompt": persona,
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }))
+        }
+        other => Err(format!(
+            "set_channel_persona does not support channel type '{}'",
+            other
+        )),
+    }
+}
+
+/// Find which discord account owns a given guild_id by reading the config.
+fn resolve_discord_account_for_guild(guild_id: &str) -> Option<String> {
+    let paths = resolve_paths();
+    let cfg = crate::config_io::read_openclaw_config(&paths).ok()?;
+    let accounts = cfg
+        .pointer("/channels/discord/accounts")
+        .and_then(Value::as_object)?;
+    for (account_name, account_val) in accounts {
+        if let Some(guilds) = account_val.get("guilds").and_then(Value::as_object) {
+            if guilds.contains_key(guild_id) {
+                return Some(account_name.clone());
+            }
+        }
+    }
+    None
+}
+
+fn rewrite_binding_entries(
+    bindings: Vec<Value>,
+    channel_type: &str,
+    peer_id: &str,
+    agent_id: &str,
+) -> Vec<Value> {
+    let mut next: Vec<Value> = bindings
+        .into_iter()
+        .filter(|binding| {
+            let Some(matcher) = binding.get("match").and_then(Value::as_object) else {
+                return true;
+            };
+            let Some(channel) = matcher.get("channel").and_then(Value::as_str) else {
+                return true;
+            };
+            let Some(peer) = matcher.get("peer").and_then(Value::as_object) else {
+                return true;
+            };
+            let Some(existing_peer_id) = peer.get("id").and_then(Value::as_str) else {
+                return true;
+            };
+            !(channel == channel_type && existing_peer_id == peer_id)
+        })
+        .collect();
+
+    next.push(json!({
+        "agentId": agent_id,
+        "match": {
+            "channel": channel_type,
+            "peer": {
+                "kind": "channel",
+                "id": peer_id,
+            }
+        }
+    }));
+    next
+}
+
+fn remove_binding_entries(bindings: Vec<Value>, channel_type: &str, peer_id: &str) -> Vec<Value> {
+    bindings
+        .into_iter()
+        .filter(|binding| {
+            let Some(matcher) = binding.get("match").and_then(Value::as_object) else {
+                return true;
+            };
+            let Some(channel) = matcher.get("channel").and_then(Value::as_str) else {
+                return true;
+            };
+            let Some(peer) = matcher.get("peer").and_then(Value::as_object) else {
+                return true;
+            };
+            let Some(existing_peer_id) = peer.get("id").and_then(Value::as_str) else {
+                return true;
+            };
+            !(channel == channel_type && existing_peer_id == peer_id)
+        })
+        .collect()
+}
+
+fn bindings_reference_agent(bindings: &[Value], agent_id: &str) -> bool {
+    bindings
+        .iter()
+        .any(|binding| binding.get("agentId").and_then(Value::as_str) == Some(agent_id))
+}
+
+fn rewrite_agent_bindings_for_delete(
+    bindings: Vec<Value>,
+    agent_id: &str,
+    rebind_to: Option<&str>,
+) -> Vec<Value> {
+    let Some(rebind_to) = rebind_to.map(str::trim).filter(|value| !value.is_empty()) else {
+        return bindings
+            .into_iter()
+            .filter(|binding| binding.get("agentId").and_then(Value::as_str) != Some(agent_id))
+            .collect();
+    };
+
+    bindings
+        .into_iter()
+        .map(|binding| {
+            if binding.get("agentId").and_then(Value::as_str) == Some(agent_id) {
+                let mut next = binding;
+                if let Some(object) = next.as_object_mut() {
+                    object.insert("agentId".into(), Value::String(rebind_to.to_string()));
+                }
+                next
+            } else {
+                binding
+            }
+        })
+        .collect()
+}
+
+async fn resolve_model_value_for_route(
+    pool: &SshConnectionPool,
+    route: &crate::recipe_executor::ExecutionRoute,
+    profile_id: Option<&str>,
+) -> Result<Option<String>, String> {
+    let Some(profile_id) = profile_id.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    if profile_id == "__default__" {
+        return Ok(None);
+    }
+
+    let profiles = match route.runner.as_str() {
+        "remote_ssh" => {
+            let host_id = route
+                .host_id
+                .clone()
+                .ok_or_else(|| "remote execution target missing hostId".to_string())?;
+            remote_list_model_profiles_with_pool(pool, host_id).await?
+        }
+        _ => list_model_profiles()?,
+    };
+
+    resolve_model_value_from_profiles(&profiles, profile_id)
+}
+
+fn resolve_model_value_from_profiles(
+    profiles: &[ModelProfile],
+    profile_id: &str,
+) -> Result<Option<String>, String> {
+    let trimmed = profile_id.trim();
+    if trimmed.is_empty() || trimmed == "__default__" {
+        return Ok(None);
+    }
+
+    if let Some(profile) = profiles.iter().find(|profile| profile.id == trimmed) {
+        return Ok(Some(profile_to_model_value(profile)));
+    }
+
+    if profiles
+        .iter()
+        .map(profile_to_model_value)
+        .any(|model_value| model_value == trimmed)
+    {
+        return Ok(Some(trimmed.to_string()));
+    }
+
+    Err(format!(
+        "Model profile is not available on this instance: {trimmed}"
+    ))
+}
+
+fn resolve_openclaw_default_workspace_from_config(cfg: &Value) -> Option<String> {
+    cfg.pointer("/agents/defaults/workspace")
+        .or_else(|| cfg.pointer("/agents/default/workspace"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            collect_agent_overviews_from_config(cfg)
+                .into_iter()
+                .find_map(|agent| agent.workspace.filter(|value| !value.trim().is_empty()))
+        })
+}
+
+async fn expand_workspace_for_route(
+    pool: &SshConnectionPool,
+    route: &crate::recipe_executor::ExecutionRoute,
+    workspace: &str,
+) -> Result<String, String> {
+    match route.runner.as_str() {
+        "remote_ssh" => {
+            let host_id = route
+                .host_id
+                .clone()
+                .ok_or_else(|| "remote execution target missing hostId".to_string())?;
+            let home = pool.get_home_dir(&host_id).await?;
+            if workspace == "~" {
+                Ok(home)
+            } else if let Some(relative) = workspace.strip_prefix("~/") {
+                Ok(format!("{}/{}", home.trim_end_matches('/'), relative))
+            } else {
+                Ok(workspace.to_string())
+            }
+        }
+        _ => Ok(shellexpand::tilde(workspace).to_string()),
+    }
+}
+
+async fn resolve_openclaw_default_workspace_for_route(
+    pool: &SshConnectionPool,
+    route: &crate::recipe_executor::ExecutionRoute,
+) -> Result<String, String> {
+    match route.runner.as_str() {
+        "remote_ssh" => {
+            let host_id = route
+                .host_id
+                .clone()
+                .ok_or_else(|| "remote execution target missing hostId".to_string())?;
+            let (_, _, cfg) = remote_read_openclaw_config_text_and_json(pool, &host_id).await?;
+            let workspace = resolve_openclaw_default_workspace_from_config(&cfg).ok_or_else(|| {
+                "OpenClaw default workspace could not be resolved for non-interactive agent creation"
+                    .to_string()
+            })?;
+            expand_workspace_for_route(pool, route, &workspace).await
+        }
+        _ => {
+            let cfg = read_openclaw_config(&resolve_paths())?;
+            let workspace = resolve_openclaw_default_workspace_from_config(&cfg).ok_or_else(|| {
+                "OpenClaw default workspace could not be resolved for non-interactive agent creation"
+                    .to_string()
+            })?;
+            expand_workspace_for_route(pool, route, &workspace).await
+        }
+    }
+}
+
+async fn list_bindings_for_route(
+    cache: &crate::cli_runner::CliCache,
+    pool: &SshConnectionPool,
+    route: &crate::recipe_executor::ExecutionRoute,
+) -> Result<Vec<Value>, String> {
+    match route.runner.as_str() {
+        "remote_ssh" => {
+            let host_id = route
+                .host_id
+                .clone()
+                .ok_or_else(|| "remote execution target missing hostId".to_string())?;
+            remote_list_bindings_with_pool(pool, host_id).await
+        }
+        _ => list_bindings_with_cache(cache).await,
+    }
+}
+
+async fn materialize_recipe_action_commands(
+    action: &crate::execution_spec::ExecutionAction,
+    cache: &crate::cli_runner::CliCache,
+    pool: &SshConnectionPool,
+    route: &crate::recipe_executor::ExecutionRoute,
+) -> Result<Vec<(String, Vec<String>)>, String> {
+    let kind = action
+        .kind
+        .as_deref()
+        .ok_or_else(|| "legacy action is missing kind".to_string())?;
+    let args = action
+        .args
+        .as_object()
+        .ok_or_else(|| format!("legacy action '{}' is missing object args", kind))?;
+    let catalog_entry = find_recipe_action_catalog_entry(kind)
+        .ok_or_else(|| format!("recipe action '{}' is not recognized", kind))?;
+    if !catalog_entry.runner_supported {
+        return Err(format!(
+            "recipe action '{}' is documented but not supported by the Recipe runner",
+            kind
+        ));
+    }
+
+    match kind {
+        "list_agents" => Ok(vec![(
+            "List agents".into(),
+            vec![
+                "openclaw".into(),
+                "agents".into(),
+                "list".into(),
+                "--json".into(),
+            ],
+        )]),
+        "list_agent_bindings" => Ok(vec![(
+            "List agent bindings".into(),
+            vec!["openclaw".into(), "agents".into(), "bindings".into()],
+        )]),
+        "create_agent" => {
+            let agent_id = action_string(args.get("agentId"))
+                .ok_or_else(|| "create_agent requires agentId".to_string())?;
+            let model_profile_id = action_string(args.get("modelProfileId"));
+            let model_value =
+                resolve_model_value_for_route(pool, route, model_profile_id.as_deref()).await?;
+            let workspace = resolve_openclaw_default_workspace_for_route(pool, route).await?;
+
+            let mut command = vec![
+                "openclaw".into(),
+                "agents".into(),
+                "add".into(),
+                agent_id.clone(),
+                "--non-interactive".into(),
+                "--workspace".into(),
+                workspace,
+            ];
+            if let Some(model_value) = model_value {
+                command.push("--model".into());
+                command.push(model_value);
+            }
+
+            Ok(vec![(format!("Create agent: {}", agent_id), command)])
+        }
+        "delete_agent" => {
+            let agent_id = action_string(args.get("agentId"))
+                .ok_or_else(|| "delete_agent requires agentId".to_string())?;
+            let force = action_bool(args.get("force"));
+            let rebind_channels_to = action_string(args.get("rebindChannelsTo"));
+            let bindings = list_bindings_for_route(cache, pool, route).await?;
+            if !force
+                && rebind_channels_to.is_none()
+                && bindings_reference_agent(&bindings, &agent_id)
+            {
+                return Err(format!(
+                    "Agent '{}' is still referenced by at least one channel binding",
+                    agent_id
+                ));
+            }
+            recipe_action_internal_command(
+                format!("Delete agent: {}", agent_id),
+                INTERNAL_DELETE_AGENT_COMMAND,
+                json!({
+                    "agentId": agent_id,
+                    "force": force,
+                    "rebindChannelsTo": rebind_channels_to,
+                }),
+            )
+            .map(|command| vec![command])
+        }
+        "setup_identity" => {
+            let agent_id = action_string(args.get("agentId"))
+                .ok_or_else(|| "setup_identity requires agentId".to_string())?;
+            let name = action_string(args.get("name"));
+            let emoji = action_string(args.get("emoji"));
+            let persona = action_content_string(args.get("persona"));
+            if name.is_none() && emoji.is_none() && persona.is_none() {
+                return Err(
+                    "setup_identity requires at least one of name, emoji, or persona".to_string(),
+                );
+            }
+            Ok(vec![recipe_action_setup_identity_command(
+                &agent_id,
+                name.as_deref(),
+                emoji.as_deref(),
+                persona.as_deref(),
+            )])
+        }
+        "set_agent_identity" => {
+            let from_identity = action_bool(args.get("fromIdentity"));
+            let agent_id = action_string(args.get("agentId"));
+            let workspace = action_string(args.get("workspace"));
+            let name = action_string(args.get("name"));
+            let theme = action_string(args.get("theme"));
+            let emoji = action_string(args.get("emoji"));
+            let avatar = action_string(args.get("avatar"));
+
+            if from_identity {
+                if workspace.is_none() {
+                    return Err(
+                        "set_agent_identity with fromIdentity requires workspace".to_string()
+                    );
+                }
+            } else if agent_id.is_none()
+                || (name.is_none() && theme.is_none() && emoji.is_none() && avatar.is_none())
+            {
+                return Err(
+                    "set_agent_identity requires agentId and at least one of name, theme, emoji, or avatar".to_string(),
+                );
+            }
+
+            let mut command = vec!["openclaw".into(), "agents".into(), "set-identity".into()];
+            if let Some(agent_id) = &agent_id {
+                command.push("--agent".into());
+                command.push(agent_id.clone());
+            }
+            if let Some(workspace) = &workspace {
+                command.push("--workspace".into());
+                command.push(workspace.clone());
+            }
+            if from_identity {
+                command.push("--from-identity".into());
+            }
+            if let Some(name) = &name {
+                command.push("--name".into());
+                command.push(name.clone());
+            }
+            if let Some(theme) = &theme {
+                command.push("--theme".into());
+                command.push(theme.clone());
+            }
+            if let Some(emoji) = &emoji {
+                command.push("--emoji".into());
+                command.push(emoji.clone());
+            }
+            if let Some(avatar) = &avatar {
+                command.push("--avatar".into());
+                command.push(avatar.clone());
+            }
+
+            Ok(vec![(
+                action
+                    .name
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string)
+                    .unwrap_or_else(|| {
+                        agent_id
+                            .clone()
+                            .map(|agent_id| format!("Set identity: {}", agent_id))
+                            .unwrap_or_else(|| "Set identity from workspace".into())
+                    }),
+                command,
+            )])
+        }
+        "set_agent_persona" => {
+            let agent_id = action_string(args.get("agentId"))
+                .ok_or_else(|| "set_agent_persona requires agentId".to_string())?;
+            let persona = action_content_string(args.get("persona"))
+                .ok_or_else(|| "set_agent_persona requires persona".to_string())?;
+            Ok(vec![recipe_action_agent_persona_command(
+                &agent_id,
+                Some(&persona),
+                false,
+            )?])
+        }
+        "clear_agent_persona" => {
+            let agent_id = action_string(args.get("agentId"))
+                .ok_or_else(|| "clear_agent_persona requires agentId".to_string())?;
+            Ok(vec![recipe_action_agent_persona_command(
+                &agent_id, None, true,
+            )?])
+        }
+        "bind_agent" => {
+            let agent_id = action_string(args.get("agentId"))
+                .ok_or_else(|| "bind_agent requires agentId".to_string())?;
+            let binding = action_string(args.get("binding"))
+                .ok_or_else(|| "bind_agent requires binding".to_string())?;
+            Ok(vec![(
+                format!("Bind {} -> {}", binding, agent_id),
+                vec![
+                    "openclaw".into(),
+                    "agents".into(),
+                    "bind".into(),
+                    "--agent".into(),
+                    agent_id,
+                    "--bind".into(),
+                    binding,
+                ],
+            )])
+        }
+        "unbind_agent" => {
+            let agent_id = action_string(args.get("agentId"))
+                .ok_or_else(|| "unbind_agent requires agentId".to_string())?;
+            let remove_all = action_bool(args.get("all"));
+            let binding = action_string(args.get("binding"));
+            if !remove_all && binding.is_none() {
+                return Err("unbind_agent requires binding or all=true".to_string());
+            }
+
+            let mut command = vec![
+                "openclaw".into(),
+                "agents".into(),
+                "unbind".into(),
+                "--agent".into(),
+                agent_id.clone(),
+            ];
+            if remove_all {
+                command.push("--all".into());
+            } else if let Some(binding) = binding {
+                command.push("--bind".into());
+                command.push(binding);
+            }
+
+            Ok(vec![(
+                action
+                    .name
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string)
+                    .unwrap_or_else(|| format!("Unbind agent: {}", agent_id)),
+                command,
+            )])
+        }
+        "bind_channel" => {
+            let channel_type = action_string(args.get("channelType"))
+                .ok_or_else(|| "bind_channel requires channelType".to_string())?;
+            let peer_id = action_string(args.get("peerId"))
+                .ok_or_else(|| "bind_channel requires peerId".to_string())?;
+            let agent_id = action_string(args.get("agentId"))
+                .ok_or_else(|| "bind_channel requires agentId".to_string())?;
+            let bindings = list_bindings_for_route(cache, pool, route).await?;
+            let payload = rewrite_binding_entries(bindings, &channel_type, &peer_id, &agent_id);
+            let payload_json =
+                serde_json::to_string(&payload).map_err(|error| error.to_string())?;
+
+            Ok(vec![(
+                format!("Bind {}:{} -> {}", channel_type, peer_id, agent_id),
+                vec![
+                    "openclaw".into(),
+                    "config".into(),
+                    "set".into(),
+                    "bindings".into(),
+                    payload_json,
+                    "--json".into(),
+                ],
+            )])
+        }
+        "unbind_channel" => {
+            let channel_type = action_string(args.get("channelType"))
+                .ok_or_else(|| "unbind_channel requires channelType".to_string())?;
+            let peer_id = action_string(args.get("peerId"))
+                .ok_or_else(|| "unbind_channel requires peerId".to_string())?;
+            let bindings = list_bindings_for_route(cache, pool, route).await?;
+            let payload = remove_binding_entries(bindings, &channel_type, &peer_id);
+            let payload_json =
+                serde_json::to_string(&payload).map_err(|error| error.to_string())?;
+
+            Ok(vec![(
+                format!("Remove binding for {}:{}", channel_type, peer_id),
+                vec![
+                    "openclaw".into(),
+                    "config".into(),
+                    "set".into(),
+                    "bindings".into(),
+                    payload_json,
+                    "--json".into(),
+                ],
+            )])
+        }
+        "set_agent_model" => {
+            let agent_id = action_string(args.get("agentId"))
+                .ok_or_else(|| "set_agent_model requires agentId".to_string())?;
+            let profile_id = action_string(args.get("profileId"))
+                .ok_or_else(|| "set_agent_model requires profileId".to_string())?;
+            let ensure_profile = args
+                .get("ensureProfile")
+                .and_then(Value::as_bool)
+                .unwrap_or(true);
+            let model_value = resolve_model_value_for_route(pool, route, Some(&profile_id)).await?;
+            let mut commands = Vec::new();
+            if ensure_profile {
+                commands.push(recipe_action_internal_command(
+                    format!("Prepare model access: {}", profile_id),
+                    INTERNAL_ENSURE_MODEL_PROFILE_COMMAND,
+                    json!({ "profileId": profile_id }),
+                )?);
+            }
+            commands.push(recipe_action_internal_command(
+                format!("Update model: {}", agent_id),
+                INTERNAL_SET_AGENT_MODEL_COMMAND,
+                json!({
+                    "agentId": agent_id,
+                    "modelValue": model_value,
+                }),
+            )?);
+            Ok(commands)
+        }
+        "set_channel_persona" => {
+            let channel_type = action_string(args.get("channelType"))
+                .ok_or_else(|| "set_channel_persona requires channelType".to_string())?;
+            let peer_id = action_string(args.get("peerId"))
+                .ok_or_else(|| "set_channel_persona requires peerId".to_string())?;
+            let persona = action_content_string(args.get("persona"))
+                .ok_or_else(|| "set_channel_persona requires persona".to_string())?;
+            let guild_id = action_string(args.get("guildId"));
+            let account_id = action_string(args.get("accountId")).or_else(|| {
+                // Only resolve from local config when executing locally —
+                // remote hosts have different configs, so the lookup would
+                // return the wrong account.
+                if route.target_kind == "local" || route.target_kind == "docker_local" {
+                    guild_id
+                        .as_deref()
+                        .and_then(resolve_discord_account_for_guild)
+                } else {
+                    None
+                }
+            });
+            let patch = channel_persona_patch(
+                &channel_type,
+                guild_id.as_deref(),
+                account_id.as_deref(),
+                &peer_id,
+                &persona,
+            )?;
+            let mut commands = Vec::new();
+            append_config_patch_commands(&patch, "", &mut commands)?;
+            Ok(commands)
+        }
+        "clear_channel_persona" => {
+            let channel_type = action_string(args.get("channelType"))
+                .ok_or_else(|| "clear_channel_persona requires channelType".to_string())?;
+            let peer_id = action_string(args.get("peerId"))
+                .ok_or_else(|| "clear_channel_persona requires peerId".to_string())?;
+            let guild_id = action_string(args.get("guildId"));
+            let account_id = action_string(args.get("accountId")).or_else(|| {
+                if route.target_kind == "local" || route.target_kind == "docker_local" {
+                    guild_id
+                        .as_deref()
+                        .and_then(resolve_discord_account_for_guild)
+                } else {
+                    None
+                }
+            });
+            let patch = channel_persona_patch(
+                &channel_type,
+                guild_id.as_deref(),
+                account_id.as_deref(),
+                &peer_id,
+                "",
+            )?;
+            let mut commands = Vec::new();
+            append_config_patch_commands(&patch, "", &mut commands)?;
+            Ok(commands)
+        }
+        "show_config_file" => Ok(vec![(
+            "Show config file".into(),
+            vec!["openclaw".into(), "config".into(), "file".into()],
+        )]),
+        "get_config_value" => {
+            let path = action_string(args.get("path"))
+                .ok_or_else(|| "get_config_value requires path".to_string())?;
+            Ok(vec![(
+                format!("Get config value: {}", path),
+                vec!["openclaw".into(), "config".into(), "get".into(), path],
+            )])
+        }
+        "set_config_value" => {
+            let path = action_string(args.get("path"))
+                .ok_or_else(|| "set_config_value requires path".to_string())?;
+            let value = args
+                .get("value")
+                .ok_or_else(|| "set_config_value requires value".to_string())?;
+            let (serialized, strict_flag) =
+                config_set_value_and_flag(value, action_bool(args.get("strictJson")))?;
+            let mut command = vec![
+                "openclaw".into(),
+                "config".into(),
+                "set".into(),
+                path.clone(),
+                serialized,
+            ];
+            if let Some(flag) = strict_flag {
+                command.push(flag);
+            }
+            Ok(vec![(format!("Set config value: {}", path), command)])
+        }
+        "unset_config_value" => {
+            let path = action_string(args.get("path"))
+                .ok_or_else(|| "unset_config_value requires path".to_string())?;
+            Ok(vec![(
+                format!("Unset config value: {}", path),
+                vec!["openclaw".into(), "config".into(), "unset".into(), path],
+            )])
+        }
+        "validate_config" => {
+            let mut command = vec!["openclaw".into(), "config".into(), "validate".into()];
+            if action_bool(args.get("jsonOutput")) {
+                command.push("--json".into());
+            }
+            Ok(vec![("Validate config".into(), command)])
+        }
+        "config_patch" => {
+            let patch = if let Some(patch) = args.get("patch") {
+                patch.clone()
+            } else if let Some(template) = action_string(args.get("patchTemplate")) {
+                json5::from_str::<Value>(&template).map_err(|error| error.to_string())?
+            } else {
+                return Err("config_patch requires patch or patchTemplate".into());
+            };
+
+            let mut commands = Vec::new();
+            append_config_patch_commands(&patch, "", &mut commands)?;
+            Ok(commands)
+        }
+        "upsert_markdown_document" => Ok(vec![recipe_action_markdown_document_command(
+            action
+                .name
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .unwrap_or("Update document"),
+            INTERNAL_MARKDOWN_DOCUMENT_WRITE_COMMAND,
+            args,
+        )?]),
+        "delete_markdown_document" => Ok(vec![recipe_action_markdown_document_command(
+            action
+                .name
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .unwrap_or("Delete document"),
+            INTERNAL_MARKDOWN_DOCUMENT_DELETE_COMMAND,
+            args,
+        )?]),
+        "models_status" => {
+            let mut command = vec!["openclaw".into(), "models".into(), "status".into()];
+            if action_bool(args.get("jsonOutput")) {
+                command.push("--json".into());
+            }
+            if action_bool(args.get("plain")) {
+                command.push("--plain".into());
+            }
+            if action_bool(args.get("check")) {
+                command.push("--check".into());
+            }
+            if action_bool(args.get("probe")) {
+                command.push("--probe".into());
+            }
+            if let Some(provider) = action_string(args.get("probeProvider")) {
+                command.push("--probe-provider".into());
+                command.push(provider);
+            }
+            for profile_id in action_string_list(args.get("probeProfile")) {
+                command.push("--probe-profile".into());
+                command.push(profile_id);
+            }
+            if let Some(timeout_ms) = action_string(args.get("probeTimeoutMs")) {
+                command.push("--probe-timeout".into());
+                command.push(timeout_ms);
+            }
+            if let Some(concurrency) = action_string(args.get("probeConcurrency")) {
+                command.push("--probe-concurrency".into());
+                command.push(concurrency);
+            }
+            if let Some(max_tokens) = action_string(args.get("probeMaxTokens")) {
+                command.push("--probe-max-tokens".into());
+                command.push(max_tokens);
+            }
+            if let Some(agent_id) = action_string(args.get("agentId")) {
+                command.push("--agent".into());
+                command.push(agent_id);
+            }
+            Ok(vec![("Inspect model status".into(), command)])
+        }
+        "list_models" => Ok(vec![(
+            "List models".into(),
+            vec!["openclaw".into(), "models".into(), "list".into()],
+        )]),
+        "set_default_model" => {
+            let model_or_alias = action_string(args.get("modelOrAlias"))
+                .ok_or_else(|| "set_default_model requires modelOrAlias".to_string())?;
+            Ok(vec![(
+                format!("Set default model: {}", model_or_alias),
+                vec![
+                    "openclaw".into(),
+                    "models".into(),
+                    "set".into(),
+                    model_or_alias,
+                ],
+            )])
+        }
+        "scan_models" => Ok(vec![(
+            "Scan models".into(),
+            vec!["openclaw".into(), "models".into(), "scan".into()],
+        )]),
+        "list_model_aliases" => Ok(vec![(
+            "List model aliases".into(),
+            vec![
+                "openclaw".into(),
+                "models".into(),
+                "aliases".into(),
+                "list".into(),
+            ],
+        )]),
+        "list_model_fallbacks" => Ok(vec![(
+            "List model fallbacks".into(),
+            vec![
+                "openclaw".into(),
+                "models".into(),
+                "fallbacks".into(),
+                "list".into(),
+            ],
+        )]),
+        "ensure_model_profile" => {
+            let profile_id = action_string(args.get("profileId"))
+                .ok_or_else(|| "ensure_model_profile requires profileId".to_string())?;
+            Ok(vec![recipe_action_internal_command(
+                format!("Prepare model access: {}", profile_id),
+                INTERNAL_ENSURE_MODEL_PROFILE_COMMAND,
+                json!({ "profileId": profile_id }),
+            )?])
+        }
+        "delete_model_profile" => {
+            let profile_id = action_string(args.get("profileId"))
+                .ok_or_else(|| "delete_model_profile requires profileId".to_string())?;
+            let delete_auth_ref = action_bool(args.get("deleteAuthRef"));
+            let profiles = match route.runner.as_str() {
+                "remote_ssh" => {
+                    let host_id = route
+                        .host_id
+                        .clone()
+                        .ok_or_else(|| "remote execution target missing hostId".to_string())?;
+                    remote_list_model_profiles_with_pool(pool, host_id).await?
+                }
+                _ => {
+                    let paths = resolve_paths();
+                    load_model_profiles(&paths)
+                }
+            };
+            let profile = profiles
+                .iter()
+                .find(|profile| profile.id == profile_id)
+                .ok_or_else(|| format!("Model profile '{}' was not found", profile_id))?;
+            let cfg = match route.runner.as_str() {
+                "remote_ssh" => {
+                    let host_id = route
+                        .host_id
+                        .clone()
+                        .ok_or_else(|| "remote execution target missing hostId".to_string())?;
+                    remote_read_openclaw_config_text_and_json(pool, &host_id)
+                        .await?
+                        .2
+                }
+                _ => {
+                    let paths = resolve_paths();
+                    read_openclaw_config(&paths)?
+                }
+            };
+            let bindings = collect_model_bindings(&cfg, &profiles);
+            if bindings
+                .iter()
+                .any(|binding| binding.model_profile_id.as_deref() == Some(profile_id.as_str()))
+            {
+                return Err(format!(
+                    "Model profile '{}' is still referenced by at least one model binding",
+                    profile_id
+                ));
+            }
+            Ok(vec![recipe_action_internal_command(
+                format!("Remove model access: {}", profile_id),
+                INTERNAL_DELETE_MODEL_PROFILE_COMMAND,
+                json!({
+                    "profileId": profile_id,
+                    "deleteAuthRef": delete_auth_ref,
+                    "authRef": auth_ref_for_runtime_profile(profile),
+                }),
+            )?])
+        }
+        "ensure_provider_auth" => {
+            let provider = action_string(args.get("provider"))
+                .ok_or_else(|| "ensure_provider_auth requires provider".to_string())?;
+            let auth_ref = action_string(args.get("authRef"))
+                .unwrap_or_else(|| format!("{}:default", provider.trim().to_ascii_lowercase()));
+            Ok(vec![recipe_action_internal_command(
+                format!("Prepare provider auth: {}", provider),
+                INTERNAL_ENSURE_PROVIDER_AUTH_COMMAND,
+                json!({
+                    "provider": provider,
+                    "authRef": auth_ref,
+                }),
+            )?])
+        }
+        "delete_provider_auth" => {
+            let auth_ref = action_string(args.get("authRef"))
+                .ok_or_else(|| "delete_provider_auth requires authRef".to_string())?;
+            let force = action_bool(args.get("force"));
+            let profiles = match route.runner.as_str() {
+                "remote_ssh" => {
+                    let host_id = route
+                        .host_id
+                        .clone()
+                        .ok_or_else(|| "remote execution target missing hostId".to_string())?;
+                    remote_list_model_profiles_with_pool(pool, host_id).await?
+                }
+                _ => {
+                    let paths = resolve_paths();
+                    load_model_profiles(&paths)
+                }
+            };
+            let cfg = match route.runner.as_str() {
+                "remote_ssh" => {
+                    let host_id = route
+                        .host_id
+                        .clone()
+                        .ok_or_else(|| "remote execution target missing hostId".to_string())?;
+                    remote_read_openclaw_config_text_and_json(pool, &host_id)
+                        .await?
+                        .2
+                }
+                _ => {
+                    let paths = resolve_paths();
+                    read_openclaw_config(&paths)?
+                }
+            };
+            let bindings = collect_model_bindings(&cfg, &profiles);
+            if !force && auth_ref_is_in_use_by_bindings(&profiles, &bindings, &auth_ref) {
+                return Err(format!(
+                    "Provider auth '{}' is still referenced by at least one model binding",
+                    auth_ref
+                ));
+            }
+            Ok(vec![recipe_action_internal_command(
+                format!("Remove provider auth: {}", auth_ref),
+                INTERNAL_DELETE_PROVIDER_AUTH_COMMAND,
+                json!({
+                    "authRef": auth_ref,
+                    "force": force,
+                }),
+            )?])
+        }
+        "list_channels" => {
+            let mut command = vec!["openclaw".into(), "channels".into(), "list".into()];
+            if action_bool(args.get("noUsage")) {
+                command.push("--no-usage".into());
+            }
+            Ok(vec![("List channels".into(), command)])
+        }
+        "channels_status" => Ok(vec![(
+            "Inspect channel status".into(),
+            vec!["openclaw".into(), "channels".into(), "status".into()],
+        )]),
+        "inspect_channel_capabilities" => {
+            let mut command = vec!["openclaw".into(), "channels".into(), "capabilities".into()];
+            if let Some(channel) = action_string(args.get("channel")) {
+                command.push("--channel".into());
+                command.push(channel);
+            }
+            if let Some(target) = action_string(args.get("target")) {
+                command.push("--target".into());
+                command.push(target);
+            }
+            Ok(vec![("Inspect channel capabilities".into(), command)])
+        }
+        "resolve_channel_targets" => {
+            let channel = action_string(args.get("channel"))
+                .ok_or_else(|| "resolve_channel_targets requires channel".to_string())?;
+            let terms = action_string_list(args.get("terms"));
+            if terms.is_empty() {
+                return Err("resolve_channel_targets requires at least one term".to_string());
+            }
+            let mut command = vec![
+                "openclaw".into(),
+                "channels".into(),
+                "resolve".into(),
+                "--channel".into(),
+                channel,
+            ];
+            if let Some(kind) = action_string(args.get("kind")) {
+                command.push("--kind".into());
+                command.push(kind);
+            }
+            command.extend(terms);
+            Ok(vec![("Resolve channel targets".into(), command)])
+        }
+        "reload_secrets" => Ok(vec![(
+            "Reload secrets".into(),
+            vec!["openclaw".into(), "secrets".into(), "reload".into()],
+        )]),
+        "audit_secrets" => {
+            let mut command = vec!["openclaw".into(), "secrets".into(), "audit".into()];
+            if action_bool(args.get("check")) {
+                command.push("--check".into());
+            }
+            Ok(vec![("Audit secrets".into(), command)])
+        }
+        "apply_secrets_plan" => {
+            let from_path = action_string(args.get("fromPath"))
+                .ok_or_else(|| "apply_secrets_plan requires fromPath".to_string())?;
+            let mut command = vec![
+                "openclaw".into(),
+                "secrets".into(),
+                "apply".into(),
+                "--from".into(),
+                from_path.clone(),
+            ];
+            if action_bool(args.get("dryRun")) {
+                command.push("--dry-run".into());
+            }
+            if action_bool(args.get("jsonOutput")) {
+                command.push("--json".into());
+            }
+            Ok(vec![(
+                format!("Apply secrets plan: {}", from_path),
+                command,
+            )])
+        }
+        other => Err(format!("unsupported recipe action '{}'", other)),
+    }
+}
+
+async fn materialize_recipe_commands(
+    spec: &crate::execution_spec::ExecutionSpec,
+    cache: &crate::cli_runner::CliCache,
+    pool: &SshConnectionPool,
+    route: &crate::recipe_executor::ExecutionRoute,
+) -> Result<Vec<(String, Vec<String>)>, String> {
+    let mut commands = Vec::new();
+    for action in &spec.actions {
+        commands.extend(materialize_recipe_action_commands(action, cache, pool, route).await?);
+    }
+    Ok(commands)
+}
+
+#[cfg(test)]
+mod recipe_action_materializer_tests {
+    use super::{
+        materialize_recipe_action_commands, recipe_action_agent_persona_command,
+        recipe_action_markdown_document_command, recipe_action_setup_identity_command,
+        remove_binding_entries, resolve_openclaw_default_workspace_from_config,
+        INTERNAL_AGENT_PERSONA_COMMAND, INTERNAL_MARKDOWN_DOCUMENT_WRITE_COMMAND,
+        INTERNAL_SETUP_IDENTITY_COMMAND,
+    };
+    use crate::{
+        cli_runner::CliCache, execution_spec::ExecutionAction, recipe_executor::ExecutionRoute,
+        ssh::SshConnectionPool,
+    };
+    use serde_json::{json, Value};
+
+    #[test]
+    fn setup_identity_materializes_to_internal_command() {
+        let (label, command) =
+            recipe_action_setup_identity_command("lobster", Some("Lobster"), Some("🦞"), None);
+
+        assert_eq!(label, "Setup identity: lobster");
+        assert_eq!(command[0], INTERNAL_SETUP_IDENTITY_COMMAND);
+        let payload: Value = serde_json::from_str(&command[1]).expect("identity payload");
+        assert_eq!(
+            payload.get("agentId").and_then(Value::as_str),
+            Some("lobster")
+        );
+        assert_eq!(payload.get("name").and_then(Value::as_str), Some("Lobster"));
+        assert_eq!(payload.get("emoji").and_then(Value::as_str), Some("🦞"));
+    }
+
+    #[test]
+    fn setup_identity_materializes_to_internal_command_without_name() {
+        let (_label, command) =
+            recipe_action_setup_identity_command("lobster", None, None, Some("New persona"));
+
+        assert_eq!(command[0], INTERNAL_SETUP_IDENTITY_COMMAND);
+        let payload: Value = serde_json::from_str(&command[1]).expect("identity payload");
+        assert_eq!(
+            payload.get("agentId").and_then(Value::as_str),
+            Some("lobster")
+        );
+        assert_eq!(payload.get("name"), None);
+        assert_eq!(
+            payload.get("persona").and_then(Value::as_str),
+            Some("New persona")
+        );
+    }
+
+    #[test]
+    fn set_agent_persona_materializes_to_internal_command() {
+        let (label, command) =
+            recipe_action_agent_persona_command("lobster", Some("Stay calm."), false)
+                .expect("agent persona command");
+
+        assert_eq!(label, "Update persona: lobster");
+        assert_eq!(command[0], INTERNAL_AGENT_PERSONA_COMMAND);
+        let payload: Value = serde_json::from_str(&command[1]).expect("agent persona payload");
+        assert_eq!(
+            payload.get("agentId").and_then(Value::as_str),
+            Some("lobster")
+        );
+        assert_eq!(
+            payload.get("persona").and_then(Value::as_str),
+            Some("Stay calm.")
+        );
+    }
+
+    #[test]
+    fn markdown_document_write_materializes_to_internal_command() {
+        let args = serde_json::from_value(json!({
+            "target": { "scope": "agent", "agentId": "lobster", "path": "PLAYBOOK.md" },
+            "mode": "replace",
+            "content": "# Playbook\n"
+        }))
+        .expect("markdown args");
+
+        let (label, command) = recipe_action_markdown_document_command(
+            "Write playbook",
+            INTERNAL_MARKDOWN_DOCUMENT_WRITE_COMMAND,
+            &args,
         )
-    })
-    .await
-    .map_err(|e| e.to_string())?;
+        .expect("markdown command");
 
-    match &result {
-        Ok(summary) => crate::logging::log_helper(&format!(
-            "[local] repair_primary_via_rescue success target={} rescue={} applied={} failed={} skipped={}",
-            summary.target_profile,
-            summary.rescue_profile,
-            summary.applied_issue_ids.len(),
-            summary.failed_issue_ids.len(),
-            summary.skipped_issue_ids.len()
-        )),
-        Err(error) => crate::logging::log_helper(&format!(
-            "[local] repair_primary_via_rescue failed target={} rescue={} error={}",
-            target_label, rescue_label, error
-        )),
+        assert_eq!(label, "Write playbook");
+        assert_eq!(command[0], INTERNAL_MARKDOWN_DOCUMENT_WRITE_COMMAND);
+        let payload: Value = serde_json::from_str(&command[1]).expect("markdown payload");
+        assert_eq!(
+            payload.pointer("/target/agentId").and_then(Value::as_str),
+            Some("lobster")
+        );
     }
 
-    result
+    #[tokio::test]
+    async fn set_channel_persona_materialization_preserves_trailing_newline() {
+        let action = ExecutionAction {
+            kind: Some("set_channel_persona".into()),
+            name: Some("Apply channel persona preset".into()),
+            args: json!({
+                "channelType": "discord",
+                "guildId": "guild-1",
+                "peerId": "channel-1",
+                "persona": "Line one\n\nLine two\n"
+            }),
+        };
+
+        let cache = CliCache::new();
+        let pool = SshConnectionPool::default();
+        let route = ExecutionRoute {
+            runner: "local".into(),
+            target_kind: "local".into(),
+            host_id: None,
+        };
+
+        let commands = materialize_recipe_action_commands(&action, &cache, &pool, &route)
+            .await
+            .expect("materialize channel persona action");
+
+        let payload = commands
+            .iter()
+            .find(|(_, command)| {
+                command.len() >= 5
+                    && command[0] == "openclaw"
+                    && command[1] == "config"
+                    && command[2] == "set"
+                    && command[3].ends_with(".guilds.guild-1.channels.channel-1.systemPrompt")
+            })
+            .map(|(_, command)| command[4].clone())
+            .expect("systemPrompt config set command");
+
+        assert_eq!(payload, "\"Line one\\n\\nLine two\\n\"");
+    }
+
+    #[tokio::test]
+    async fn set_agent_identity_materializes_to_openclaw_cli_command() {
+        let action = ExecutionAction {
+            kind: Some("set_agent_identity".into()),
+            name: Some("Set identity".into()),
+            args: json!({
+                "agentId": "lobster",
+                "name": "Lobster",
+                "theme": "sea captain",
+                "emoji": "🦞",
+                "avatar": "avatars/lobster.png"
+            }),
+        };
+
+        let cache = CliCache::new();
+        let pool = SshConnectionPool::default();
+        let route = ExecutionRoute {
+            runner: "local".into(),
+            target_kind: "local".into(),
+            host_id: None,
+        };
+
+        let commands = materialize_recipe_action_commands(&action, &cache, &pool, &route)
+            .await
+            .expect("materialize set_agent_identity");
+
+        assert_eq!(
+            commands,
+            vec![(
+                "Set identity".into(),
+                vec![
+                    "openclaw".into(),
+                    "agents".into(),
+                    "set-identity".into(),
+                    "--agent".into(),
+                    "lobster".into(),
+                    "--name".into(),
+                    "Lobster".into(),
+                    "--theme".into(),
+                    "sea captain".into(),
+                    "--emoji".into(),
+                    "🦞".into(),
+                    "--avatar".into(),
+                    "avatars/lobster.png".into(),
+                ],
+            )]
+        );
+    }
+
+    #[test]
+    fn resolve_openclaw_default_workspace_prefers_defaults_before_existing_agents() {
+        let cfg = json!({
+            "agents": {
+                "defaults": {
+                    "workspace": "~/.openclaw/instances/demo/workspace"
+                },
+                "list": [
+                    { "id": "main", "workspace": "/tmp/other" }
+                ]
+            }
+        });
+
+        assert_eq!(
+            resolve_openclaw_default_workspace_from_config(&cfg).as_deref(),
+            Some("~/.openclaw/instances/demo/workspace")
+        );
+    }
+
+    #[tokio::test]
+    async fn bind_agent_materializes_to_openclaw_cli_command() {
+        let action = ExecutionAction {
+            kind: Some("bind_agent".into()),
+            name: Some("Bind support".into()),
+            args: json!({
+                "agentId": "ops",
+                "binding": "discord:channel-1"
+            }),
+        };
+
+        let cache = CliCache::new();
+        let pool = SshConnectionPool::default();
+        let route = ExecutionRoute {
+            runner: "local".into(),
+            target_kind: "local".into(),
+            host_id: None,
+        };
+
+        let commands = materialize_recipe_action_commands(&action, &cache, &pool, &route)
+            .await
+            .expect("materialize bind_agent");
+
+        assert_eq!(
+            commands[0].1,
+            vec![
+                "openclaw",
+                "agents",
+                "bind",
+                "--agent",
+                "ops",
+                "--bind",
+                "discord:channel-1",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_channel_targets_materializes_terms_and_kind() {
+        let action = ExecutionAction {
+            kind: Some("resolve_channel_targets".into()),
+            name: Some("Resolve Slack room".into()),
+            args: json!({
+                "channel": "slack",
+                "kind": "group",
+                "terms": ["#general", "@jane"]
+            }),
+        };
+
+        let cache = CliCache::new();
+        let pool = SshConnectionPool::default();
+        let route = ExecutionRoute {
+            runner: "local".into(),
+            target_kind: "local".into(),
+            host_id: None,
+        };
+
+        let commands = materialize_recipe_action_commands(&action, &cache, &pool, &route)
+            .await
+            .expect("materialize resolve_channel_targets");
+
+        assert_eq!(
+            commands[0].1,
+            vec![
+                "openclaw",
+                "channels",
+                "resolve",
+                "--channel",
+                "slack",
+                "--kind",
+                "group",
+                "#general",
+                "@jane",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn unsupported_catalog_action_fails_fast() {
+        let action = ExecutionAction {
+            kind: Some("configure_secrets".into()),
+            name: Some("Configure secrets".into()),
+            args: json!({}),
+        };
+
+        let cache = CliCache::new();
+        let pool = SshConnectionPool::default();
+        let route = ExecutionRoute {
+            runner: "local".into(),
+            target_kind: "local".into(),
+            host_id: None,
+        };
+
+        let error = materialize_recipe_action_commands(&action, &cache, &pool, &route)
+            .await
+            .expect_err("interactive action should fail");
+
+        assert!(error.contains("documented but not supported"));
+    }
+
+    #[test]
+    fn remove_binding_entries_drops_matching_channel_binding() {
+        let next = remove_binding_entries(
+            vec![
+                json!({
+                    "agentId": "lobster",
+                    "match": {
+                        "channel": "discord",
+                        "peer": { "kind": "channel", "id": "channel-1" }
+                    }
+                }),
+                json!({
+                    "agentId": "ops",
+                    "match": {
+                        "channel": "discord",
+                        "peer": { "kind": "channel", "id": "channel-2" }
+                    }
+                }),
+            ],
+            "discord",
+            "channel-1",
+        );
+
+        assert_eq!(next.len(), 1);
+        assert_eq!(next[0].get("agentId").and_then(Value::as_str), Some("ops"));
+    }
+}
+
+#[cfg(test)]
+mod model_value_resolution_tests {
+    use super::{profile_to_model_value, resolve_model_value_from_profiles, ModelProfile};
+
+    fn profile(id: &str, provider: &str, model: &str) -> ModelProfile {
+        ModelProfile {
+            id: id.to_string(),
+            name: format!("{provider}/{model}"),
+            provider: provider.to_string(),
+            model: model.to_string(),
+            auth_ref: format!("{provider}:default"),
+            api_key: None,
+            base_url: None,
+            description: None,
+            enabled: true,
+        }
+    }
+
+    #[test]
+    fn resolve_model_value_maps_profile_id_to_model_value() {
+        let profiles = vec![profile("remote-openai", "openai", "gpt-4o")];
+
+        let resolved = resolve_model_value_from_profiles(&profiles, "remote-openai")
+            .expect("profile should resolve");
+
+        assert_eq!(resolved, Some(profile_to_model_value(&profiles[0])));
+    }
+
+    #[test]
+    fn resolve_model_value_rejects_unknown_profile_ids() {
+        let profiles = vec![profile("remote-openai", "openai", "gpt-4o")];
+
+        let error =
+            resolve_model_value_from_profiles(&profiles, "b176e1fe-71b7-42ca-b9ad-96d8e15edf77")
+                .expect_err("unknown profile ids should be rejected");
+
+        assert!(error.contains("Model profile is not available on this instance"));
+    }
+}
+
+#[cfg(test)]
+mod runtime_artifact_tests {
+    use crate::execution_spec::{
+        ExecutionAction, ExecutionCapabilities, ExecutionMetadata, ExecutionResourceClaim,
+        ExecutionResources, ExecutionSecrets, ExecutionSpec, ExecutionTarget,
+    };
+    use crate::recipe_executor::{
+        build_runtime_artifacts, execute_recipe as prepare_recipe_execution, ExecuteRecipeRequest,
+    };
+    use serde_json::json;
+
+    fn sample_schedule_spec() -> ExecutionSpec {
+        ExecutionSpec {
+            api_version: "strategy.platform/v1".into(),
+            kind: "ExecutionSpec".into(),
+            metadata: ExecutionMetadata {
+                name: Some("hourly-reconcile".into()),
+                digest: None,
+            },
+            source: serde_json::Value::Null,
+            target: json!({ "kind": "local" }),
+            execution: ExecutionTarget {
+                kind: "schedule".into(),
+            },
+            capabilities: ExecutionCapabilities {
+                used_capabilities: vec!["service.manage".into()],
+            },
+            resources: ExecutionResources {
+                claims: vec![ExecutionResourceClaim {
+                    kind: "service".into(),
+                    id: Some("schedule/hourly".into()),
+                    target: Some("job/hourly-reconcile".into()),
+                    path: None,
+                }],
+            },
+            secrets: ExecutionSecrets::default(),
+            desired_state: json!({
+                "schedule": {
+                    "id": "schedule/hourly",
+                    "onCalendar": "hourly",
+                },
+                "job": {
+                    "command": ["openclaw", "doctor", "run"],
+                }
+            }),
+            actions: vec![ExecutionAction {
+                kind: Some("schedule".into()),
+                name: Some("Run hourly reconcile".into()),
+                args: json!({
+                    "command": ["openclaw", "doctor", "run"],
+                    "onCalendar": "hourly",
+                }),
+            }],
+            outputs: vec![],
+        }
+    }
+
+    #[test]
+    fn build_runtime_artifacts_tracks_schedule_timer_units() {
+        let spec = sample_schedule_spec();
+        let prepared = prepare_recipe_execution(ExecuteRecipeRequest {
+            spec: spec.clone(),
+            source_origin: None,
+            source_text: None,
+            workspace_slug: None,
+        })
+        .expect("prepare recipe execution");
+        let artifacts = build_runtime_artifacts(&spec, &prepared);
+
+        assert!(artifacts
+            .iter()
+            .any(|artifact| artifact.kind == "systemdUnit"));
+        assert!(artifacts
+            .iter()
+            .any(|artifact| artifact.kind == "systemdTimer"));
+    }
+}
+
+async fn execute_recipe_with_services_internal(
+    queue: &crate::cli_runner::CommandQueue,
+    cache: &crate::cli_runner::CliCache,
+    pool: &SshConnectionPool,
+    remote_queues: &crate::cli_runner::RemoteCommandQueues,
+    mut request: ExecuteRecipeRequest,
+    app: Option<&AppHandle>,
+    activity_session_id: Option<String>,
+    planning_audit_trail: Vec<RecipeRuntimeAuditEntry>,
+) -> Result<ExecuteRecipeResult, String> {
+    if let Some(workspace_slug) = request
+        .workspace_slug
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let workspace = RecipeWorkspace::from_resolved_paths();
+        let source_kind = workspace
+            .workspace_source_kind(workspace_slug)?
+            .unwrap_or(crate::recipe_workspace::RecipeWorkspaceSourceKind::LocalImport);
+        let risk_level = workspace.workspace_risk_level(workspace_slug)?;
+        let current_source = request
+            .source_text
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .map(ToOwned::to_owned)
+            .map(Ok)
+            .unwrap_or_else(|| workspace.read_recipe_source(workspace_slug))?;
+        let current_digest = RecipeWorkspace::source_digest(&current_source);
+
+        if approval_required_for(source_kind, risk_level)
+            && !workspace.is_recipe_approved(workspace_slug, &current_digest)?
+        {
+            return Err(
+                "This recipe needs your approval before it can run in this environment."
+                    .to_string(),
+            );
+        }
+    }
+
+    let mut source = request.spec.source.as_object().cloned().unwrap_or_default();
+
+    if let Some(source_origin) = request
+        .source_origin
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        source.insert(
+            "recipeSourceOrigin".into(),
+            Value::String(source_origin.to_string()),
+        );
+    }
+
+    if let Some(source_text) = request
+        .source_text
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        source.insert(
+            "recipeSourceDigest".into(),
+            Value::String(
+                uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, source_text.as_bytes()).to_string(),
+            ),
+        );
+    }
+
+    if let Some(workspace_slug) = request
+        .workspace_slug
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        if let Ok(path) =
+            RecipeWorkspace::from_resolved_paths().resolve_recipe_source_path(workspace_slug)
+        {
+            source.insert("recipeWorkspacePath".into(), Value::String(path));
+        }
+    }
+
+    if !source.is_empty() {
+        request.spec.source = Value::Object(source);
+    }
+    let spec = request.spec.clone();
+    let prepared = prepare_recipe_execution(request)?;
+    let mut warnings = prepared.warnings.clone();
+    let started_at = Utc::now().to_rfc3339();
+    let summary = prepared.summary.clone();
+    let runtime_artifacts = crate::recipe_executor::build_runtime_artifacts(&spec, &prepared);
+    let mut audit_trail = planning_audit_trail;
+
+    match prepared.route.runner.as_str() {
+        "local" => {
+            if !prepared.plan.commands.is_empty() {
+                crate::cli_runner::enqueue_materialized_plan(queue, &prepared.plan);
+            } else {
+                let commands =
+                    materialize_recipe_commands(&spec, cache, pool, &prepared.route).await?;
+                if commands.is_empty() {
+                    return Err("recipe did not materialize executable commands".into());
+                }
+                for (label, command) in commands {
+                    queue.enqueue(label, command);
+                }
+            }
+            let result = crate::cli_runner::apply_queued_commands_with_services(
+                queue,
+                cache,
+                Some(infer_recipe_id(&spec)),
+                Some(prepared.run_id.clone()),
+                Some(runtime_artifacts.clone()),
+                activity_session_id.as_ref().and_then(|session_id| {
+                    app.cloned().map(|handle| {
+                        crate::cli_runner::CookActivityEmitter::new(
+                            handle,
+                            session_id.clone(),
+                            Some(prepared.run_id.clone()),
+                            "local".into(),
+                        )
+                    })
+                }),
+            )
+            .await?;
+            audit_trail.extend(result.steps.iter().map(audit_entry_from_apply_step));
+            let finished_at = Utc::now().to_rfc3339();
+            if !result.ok {
+                let error = result
+                    .error
+                    .unwrap_or_else(|| "recipe execution failed".to_string());
+                warnings.extend(cleanup_local_recipe_artifacts(&runtime_artifacts));
+                let _ = persist_recipe_run(
+                    &spec,
+                    &prepared,
+                    "local",
+                    "failed",
+                    &error,
+                    &started_at,
+                    &finished_at,
+                    &warnings,
+                    &audit_trail,
+                );
+                return Err(error);
+            }
+
+            if let Err(error) = persist_recipe_run(
+                &spec,
+                &prepared,
+                "local",
+                "succeeded",
+                &summary,
+                &started_at,
+                &finished_at,
+                &warnings,
+                &audit_trail,
+            ) {
+                warnings.push(format!("Failed to persist recipe runtime state: {}", error));
+            }
+
+            Ok(ExecuteRecipeResult {
+                run_id: prepared.run_id,
+                instance_id: "local".into(),
+                summary,
+                warnings,
+                audit_trail,
+            })
+        }
+        "remote_ssh" => {
+            let host_id = prepared
+                .route
+                .host_id
+                .clone()
+                .ok_or_else(|| "remote execution target missing hostId".to_string())?;
+            if !prepared.plan.commands.is_empty() {
+                crate::cli_runner::enqueue_materialized_plan_remote(
+                    remote_queues,
+                    &host_id,
+                    &prepared.plan,
+                );
+            } else {
+                let commands =
+                    materialize_recipe_commands(&spec, cache, pool, &prepared.route).await?;
+                if commands.is_empty() {
+                    return Err("recipe did not materialize executable commands".into());
+                }
+                for (label, command) in commands {
+                    remote_queues.enqueue(&host_id, label, command);
+                }
+            }
+            let result = crate::cli_runner::remote_apply_queued_commands_with_services(
+                pool,
+                remote_queues,
+                host_id.clone(),
+                Some(infer_recipe_id(&spec)),
+                Some(prepared.run_id.clone()),
+                Some(runtime_artifacts.clone()),
+                activity_session_id.as_ref().and_then(|session_id| {
+                    app.cloned().map(|handle| {
+                        crate::cli_runner::CookActivityEmitter::new(
+                            handle,
+                            session_id.clone(),
+                            Some(prepared.run_id.clone()),
+                            host_id.clone(),
+                        )
+                    })
+                }),
+            )
+            .await?;
+            audit_trail.extend(result.steps.iter().map(audit_entry_from_apply_step));
+            let finished_at = Utc::now().to_rfc3339();
+            if !result.ok {
+                let error = result
+                    .error
+                    .unwrap_or_else(|| "remote recipe execution failed".to_string());
+                warnings.extend(
+                    cleanup_remote_recipe_artifacts(&pool, &host_id, &runtime_artifacts).await,
+                );
+                let _ = persist_recipe_run(
+                    &spec,
+                    &prepared,
+                    &host_id,
+                    "failed",
+                    &error,
+                    &started_at,
+                    &finished_at,
+                    &warnings,
+                    &audit_trail,
+                );
+                return Err(error);
+            }
+
+            if let Err(error) = persist_recipe_run(
+                &spec,
+                &prepared,
+                &host_id,
+                "succeeded",
+                &summary,
+                &started_at,
+                &finished_at,
+                &warnings,
+                &audit_trail,
+            ) {
+                warnings.push(format!("Failed to persist recipe runtime state: {}", error));
+            }
+
+            Ok(ExecuteRecipeResult {
+                run_id: prepared.run_id,
+                instance_id: host_id,
+                summary,
+                warnings,
+                audit_trail,
+            })
+        }
+        other => {
+            warnings.push(format!("route '{}' is not executable yet", other));
+            Err(format!("unsupported execution runner: {}", other))
+        }
+    }
+}
+
+pub async fn execute_recipe_with_services(
+    queue: &crate::cli_runner::CommandQueue,
+    cache: &crate::cli_runner::CliCache,
+    pool: &SshConnectionPool,
+    remote_queues: &crate::cli_runner::RemoteCommandQueues,
+    request: ExecuteRecipeRequest,
+) -> Result<ExecuteRecipeResult, String> {
+    execute_recipe_with_services_internal(
+        queue,
+        cache,
+        pool,
+        remote_queues,
+        request,
+        None,
+        None,
+        Vec::new(),
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn execute_recipe(
+    app: AppHandle,
+    queue: State<'_, crate::cli_runner::CommandQueue>,
+    cache: State<'_, crate::cli_runner::CliCache>,
+    pool: State<'_, SshConnectionPool>,
+    remote_queues: State<'_, crate::cli_runner::RemoteCommandQueues>,
+    request: ExecuteRecipeRequest,
+    activity_session_id: Option<String>,
+    planning_audit_trail: Option<Vec<RecipeRuntimeAuditEntry>>,
+) -> Result<ExecuteRecipeResult, String> {
+    execute_recipe_with_services_internal(
+        queue.inner(),
+        cache.inner(),
+        pool.inner(),
+        remote_queues.inner(),
+        request,
+        Some(&app),
+        activity_session_id,
+        planning_audit_trail.unwrap_or_default(),
+    )
+    .await
 }
 
 fn collect_model_summary(cfg: &Value) -> ModelSummary {
@@ -3464,208 +5639,6 @@ fn run_openclaw_raw_timeout(
     }
 }
 
-#[tauri::command]
-pub fn set_active_openclaw_home(path: Option<String>) -> Result<bool, String> {
-    crate::cli_runner::set_active_openclaw_home_override(path)?;
-    Ok(true)
-}
-
-#[tauri::command]
-pub fn set_active_clawpal_data_dir(path: Option<String>) -> Result<bool, String> {
-    crate::cli_runner::set_active_clawpal_data_override(path)?;
-    Ok(true)
-}
-
-#[tauri::command]
-pub fn local_openclaw_config_exists(openclaw_home: String) -> Result<bool, String> {
-    let home = openclaw_home.trim();
-    if home.is_empty() {
-        return Ok(false);
-    }
-    let expanded = shellexpand::tilde(home).to_string();
-    let config_path = PathBuf::from(expanded)
-        .join(".openclaw")
-        .join("openclaw.json");
-    Ok(config_path.exists())
-}
-
-#[tauri::command]
-pub fn local_openclaw_cli_available() -> Result<bool, String> {
-    Ok(run_openclaw_raw(&["--version"]).is_ok())
-}
-
-#[tauri::command]
-pub fn delete_local_instance_home(openclaw_home: String) -> Result<bool, String> {
-    let home = openclaw_home.trim();
-    if home.is_empty() {
-        return Err("openclaw_home is required".to_string());
-    }
-    let expanded = shellexpand::tilde(home).to_string();
-    let target = PathBuf::from(expanded);
-    if !target.exists() {
-        return Ok(true);
-    }
-
-    let canonical_target = target
-        .canonicalize()
-        .map_err(|e| format!("failed to resolve target path: {e}"))?;
-    let user_home =
-        dirs::home_dir().ok_or_else(|| "failed to resolve HOME directory".to_string())?;
-    let allowed_root = user_home.join(".clawpal");
-    let canonical_allowed_root = allowed_root
-        .canonicalize()
-        .map_err(|e| format!("failed to resolve ~/.clawpal path: {e}"))?;
-
-    if !canonical_target.starts_with(&canonical_allowed_root) {
-        return Err("refuse to delete path outside ~/.clawpal".to_string());
-    }
-    if canonical_target == canonical_allowed_root {
-        return Err("refuse to delete ~/.clawpal root".to_string());
-    }
-
-    fs::remove_dir_all(&canonical_target).map_err(|e| {
-        format!(
-            "failed to delete '{}': {e}",
-            canonical_target.to_string_lossy()
-        )
-    })?;
-    Ok(true)
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct EnsureAccessResult {
-    pub instance_id: String,
-    pub transport: String,
-    pub working_chain: Vec<String>,
-    pub used_legacy_fallback: bool,
-    pub profile_reused: bool,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RecordInstallExperienceResult {
-    pub saved: bool,
-    pub total_count: usize,
-}
-
-pub async fn ensure_access_profile_impl(
-    instance_id: String,
-    transport: String,
-) -> Result<EnsureAccessResult, String> {
-    let paths = resolve_paths();
-    let store = AccessDiscoveryStore::new(paths.clawpal_dir.join("access-discovery"));
-    if let Some(existing) = store.load_profile(&instance_id)? {
-        if !existing.working_chain.is_empty() {
-            return Ok(EnsureAccessResult {
-                instance_id,
-                transport,
-                working_chain: existing.working_chain,
-                used_legacy_fallback: false,
-                profile_reused: true,
-            });
-        }
-    }
-
-    let probe_plan = build_probe_plan_for_local();
-    let probes = probe_plan
-        .iter()
-        .enumerate()
-        .map(|(idx, cmd)| {
-            run_probe_with_redaction(&format!("probe-{idx}"), cmd, "planned", true, 0)
-        })
-        .collect::<Vec<_>>();
-
-    let mut profile = CapabilityProfile::example_local(&instance_id);
-    profile.transport = transport.clone();
-    profile.probes = probes;
-    profile.verified_at = unix_timestamp_secs();
-
-    let used_legacy_fallback = if store.save_profile(&profile).is_err() {
-        true
-    } else {
-        false
-    };
-
-    Ok(EnsureAccessResult {
-        instance_id,
-        transport,
-        working_chain: profile.working_chain,
-        used_legacy_fallback,
-        profile_reused: false,
-    })
-}
-
-#[tauri::command]
-pub async fn ensure_access_profile(
-    instance_id: String,
-    transport: String,
-) -> Result<EnsureAccessResult, String> {
-    ensure_access_profile_impl(instance_id, transport).await
-}
-
-pub async fn ensure_access_profile_for_test(
-    instance_id: &str,
-) -> Result<EnsureAccessResult, String> {
-    ensure_access_profile_impl(instance_id.to_string(), "local".to_string()).await
-}
-
-fn value_array_as_strings(value: Option<&Value>) -> Vec<String> {
-    value
-        .and_then(Value::as_array)
-        .map(|arr| {
-            arr.iter()
-                .filter_map(Value::as_str)
-                .map(|s| s.to_string())
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default()
-}
-
-#[tauri::command]
-pub async fn record_install_experience(
-    session_id: String,
-    instance_id: String,
-    goal: String,
-    store: State<'_, InstallSessionStore>,
-) -> Result<RecordInstallExperienceResult, String> {
-    let id = session_id.trim();
-    if id.is_empty() {
-        return Err("session_id is required".to_string());
-    }
-    let session = store
-        .get(id)?
-        .ok_or_else(|| format!("install session not found: {id}"))?;
-    if !matches!(session.state, InstallState::Ready) {
-        return Err(format!(
-            "install session is not ready: {}",
-            session.state.as_str()
-        ));
-    }
-
-    let transport = session.method.as_str().to_string();
-    let paths = resolve_paths();
-    let discovery_store = AccessDiscoveryStore::new(paths.clawpal_dir.join("access-discovery"));
-    let profile = discovery_store.load_profile(&instance_id)?;
-    let successful_chain = profile.map(|p| p.working_chain).unwrap_or_default();
-    let commands = value_array_as_strings(session.artifacts.get("executed_commands"));
-
-    let experience = ExecutionExperience {
-        instance_id: instance_id.clone(),
-        goal,
-        transport,
-        method: session.method.as_str().to_string(),
-        commands,
-        successful_chain,
-        recorded_at: unix_timestamp_secs(),
-    };
-    let total_count = discovery_store.save_experience(experience)?;
-    Ok(RecordInstallExperienceResult {
-        saved: true,
-        total_count,
-    })
-}
-
 /// Extract the last JSON array from CLI output that may contain ANSI codes and plugin logs.
 /// Scans from the end to find the last `]`, then finds its matching `[`.
 fn extract_last_json_array(raw: &str) -> Option<&str> {
@@ -3875,6 +5848,9 @@ mod discord_directory_parse_tests {
                 channel_id: "11".into(),
                 channel_name: "chan-1".into(),
                 default_agent_id: None,
+                resolution_warning: None,
+                guild_resolution_warning: None,
+                channel_resolution_warning: None,
             },
             DiscordGuildChannel {
                 guild_id: "1".into(),
@@ -3882,6 +5858,9 @@ mod discord_directory_parse_tests {
                 channel_id: "12".into(),
                 channel_name: "chan-2".into(),
                 default_agent_id: None,
+                resolution_warning: None,
+                guild_resolution_warning: None,
+                channel_resolution_warning: None,
             },
             DiscordGuildChannel {
                 guild_id: "2".into(),
@@ -3889,6 +5868,9 @@ mod discord_directory_parse_tests {
                 channel_id: "21".into(),
                 channel_name: "chan-3".into(),
                 default_agent_id: None,
+                resolution_warning: None,
+                guild_resolution_warning: None,
+                channel_resolution_warning: None,
             },
         ];
         let text = serde_json::to_string(&payload).expect("serialize payload");
@@ -6049,6 +8031,502 @@ fn sync_main_auth_for_active_config(paths: &crate::models::OpenClawPaths) -> Res
     sync_main_auth_for_config(paths, &cfg)
 }
 
+fn local_auth_store_path(paths: &crate::models::OpenClawPaths) -> PathBuf {
+    paths
+        .base_dir
+        .join("agents")
+        .join("main")
+        .join("agent")
+        .join("auth-profiles.json")
+}
+
+fn parse_auth_store_json(raw: &str) -> Result<Value, String> {
+    serde_json::from_str(raw).map_err(|error| format!("Failed to parse auth store: {error}"))
+}
+
+fn read_local_auth_store(paths: &crate::models::OpenClawPaths) -> Result<Value, String> {
+    let path = local_auth_store_path(paths);
+    let raw =
+        std::fs::read_to_string(&path).unwrap_or_else(|_| r#"{"version":1,"profiles":{}}"#.into());
+    parse_auth_store_json(&raw)
+}
+
+fn write_local_auth_store(
+    paths: &crate::models::OpenClawPaths,
+    auth_json: &Value,
+) -> Result<(), String> {
+    let path = local_auth_store_path(paths);
+    let serialized = serde_json::to_string_pretty(auth_json).map_err(|error| error.to_string())?;
+    write_text(&path, &serialized)
+}
+
+async fn remote_auth_store_path(pool: &SshConnectionPool, host_id: &str) -> Result<String, String> {
+    let roots = resolve_remote_openclaw_roots(pool, host_id).await?;
+    let root = roots
+        .first()
+        .map(String::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "Failed to resolve remote openclaw root".to_string())?;
+    Ok(format!(
+        "{}/agents/main/agent/auth-profiles.json",
+        root.trim_end_matches('/')
+    ))
+}
+
+async fn read_remote_auth_store(
+    pool: &SshConnectionPool,
+    host_id: &str,
+) -> Result<(String, Value), String> {
+    let path = remote_auth_store_path(pool, host_id).await?;
+    let raw = match pool.sftp_read(host_id, &path).await {
+        Ok(content) => content,
+        Err(error) if error.contains("No such file") || error.contains("not found") => {
+            r#"{"version":1,"profiles":{}}"#.to_string()
+        }
+        Err(error) => return Err(error),
+    };
+    Ok((path, parse_auth_store_json(&raw)?))
+}
+
+async fn write_remote_auth_store(
+    pool: &SshConnectionPool,
+    host_id: &str,
+    path: &str,
+    auth_json: &Value,
+) -> Result<(), String> {
+    let serialized = serde_json::to_string_pretty(auth_json).map_err(|error| error.to_string())?;
+    if let Some((dir, _)) = path.rsplit_once('/') {
+        let _ = pool
+            .exec(host_id, &format!("mkdir -p {}", shell_escape(dir)))
+            .await;
+    }
+    pool.sftp_write(host_id, path, &serialized).await
+}
+
+fn upsert_auth_store_entry_internal(
+    root: &mut Value,
+    auth_ref: &str,
+    provider: &str,
+    credential: &InternalProviderCredential,
+) -> Result<bool, String> {
+    if provider.trim().is_empty() {
+        return Err("provider is required".into());
+    }
+    if !root.is_object() {
+        *root = json!({ "version": 1 });
+    }
+    let root_obj = root
+        .as_object_mut()
+        .ok_or_else(|| "failed to prepare auth store".to_string())?;
+    if !root_obj.contains_key("version") {
+        root_obj.insert("version".into(), Value::from(1_u64));
+    }
+    let profiles_value = root_obj
+        .entry("profiles".to_string())
+        .or_insert_with(|| Value::Object(serde_json::Map::new()));
+    if !profiles_value.is_object() {
+        *profiles_value = Value::Object(serde_json::Map::new());
+    }
+    let profiles = profiles_value
+        .as_object_mut()
+        .ok_or_else(|| "failed to prepare auth profiles".to_string())?;
+    let payload = match credential.kind {
+        InternalAuthKind::Authorization => json!({
+            "type": "token",
+            "provider": provider,
+            "token": credential.secret,
+        }),
+        InternalAuthKind::ApiKey => json!({
+            "type": "api_key",
+            "provider": provider,
+            "key": credential.secret,
+        }),
+    };
+    let replace = profiles
+        .get(auth_ref)
+        .map(|existing| existing != &payload)
+        .unwrap_or(true);
+    if replace {
+        profiles.insert(auth_ref.to_string(), payload);
+    }
+
+    let last_good_value = root_obj
+        .entry("lastGood".to_string())
+        .or_insert_with(|| Value::Object(serde_json::Map::new()));
+    if !last_good_value.is_object() {
+        *last_good_value = Value::Object(serde_json::Map::new());
+    }
+    let last_good = last_good_value
+        .as_object_mut()
+        .ok_or_else(|| "failed to prepare lastGood auth mapping".to_string())?;
+    let provider_key = provider.trim().to_ascii_lowercase();
+    let last_good_changed = last_good
+        .get(&provider_key)
+        .and_then(Value::as_str)
+        .map(|value| value != auth_ref)
+        .unwrap_or(true);
+    if last_good_changed {
+        last_good.insert(provider_key, Value::String(auth_ref.to_string()));
+    }
+    Ok(replace || last_good_changed)
+}
+
+fn remove_auth_store_entry_internal(root: &mut Value, auth_ref: &str) -> bool {
+    let mut changed = false;
+    if let Some(profiles) = root.get_mut("profiles").and_then(Value::as_object_mut) {
+        changed |= profiles.remove(auth_ref).is_some();
+    }
+    if let Some(last_good) = root.get_mut("lastGood").and_then(Value::as_object_mut) {
+        let providers_to_clear = last_good
+            .iter()
+            .filter_map(|(provider, value)| {
+                (value.as_str() == Some(auth_ref)).then_some(provider.clone())
+            })
+            .collect::<Vec<_>>();
+        for provider in providers_to_clear {
+            last_good.remove(&provider);
+            changed = true;
+        }
+    }
+    changed
+}
+
+fn auth_ref_for_runtime_profile(profile: &ModelProfile) -> String {
+    profile_target_auth_ref(profile)
+}
+
+fn auth_ref_is_in_use_by_bindings(
+    profiles: &[ModelProfile],
+    bindings: &[ModelBinding],
+    auth_ref: &str,
+) -> bool {
+    bindings.iter().any(|binding| {
+        let Some(profile_id) = binding.model_profile_id.as_deref() else {
+            return false;
+        };
+        profiles
+            .iter()
+            .find(|profile| profile.id == profile_id)
+            .map(|profile| auth_ref_for_runtime_profile(profile) == auth_ref)
+            .unwrap_or(false)
+    })
+}
+
+pub(crate) fn set_local_agent_model_for_recipe(
+    paths: &crate::models::OpenClawPaths,
+    agent_id: &str,
+    model_value: Option<String>,
+) -> Result<(), String> {
+    let mut cfg = read_openclaw_config(paths)?;
+    let current = serde_json::to_string_pretty(&cfg).map_err(|error| error.to_string())?;
+    set_agent_model_value(&mut cfg, agent_id, model_value)?;
+    write_config_with_snapshot(paths, &current, &cfg, "recipe-set-agent-model")
+}
+
+pub(crate) async fn set_remote_agent_model_for_recipe(
+    pool: &SshConnectionPool,
+    host_id: &str,
+    agent_id: &str,
+    model_value: Option<String>,
+) -> Result<(), String> {
+    let (config_path, current_text, mut cfg) =
+        remote_read_openclaw_config_text_and_json(pool, host_id).await?;
+    set_agent_model_value(&mut cfg, agent_id, model_value)?;
+    remote_write_config_with_snapshot(
+        pool,
+        host_id,
+        &config_path,
+        &current_text,
+        &cfg,
+        "recipe-set-agent-model",
+    )
+    .await
+}
+
+pub(crate) fn ensure_local_provider_auth_for_recipe(
+    paths: &crate::models::OpenClawPaths,
+    provider: &str,
+    auth_ref: Option<&str>,
+) -> Result<(), String> {
+    let provider_key = provider.trim().to_ascii_lowercase();
+    if provider_key.is_empty() {
+        return Err("provider is required".into());
+    }
+    let credentials = collect_provider_credentials_from_paths(paths);
+    let credential = credentials.get(&provider_key).ok_or_else(|| {
+        format!(
+            "No local credential is available for provider '{}'",
+            provider_key
+        )
+    })?;
+    let auth_ref = auth_ref
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("{provider_key}:default"));
+    let mut auth_json = read_local_auth_store(paths)?;
+    if upsert_auth_store_entry_internal(&mut auth_json, &auth_ref, &provider_key, credential)? {
+        write_local_auth_store(paths, &auth_json)?;
+    }
+    Ok(())
+}
+
+pub(crate) async fn ensure_remote_provider_auth_for_recipe(
+    pool: &SshConnectionPool,
+    host_id: &str,
+    provider: &str,
+    auth_ref: Option<&str>,
+) -> Result<(), String> {
+    let provider_key = provider.trim().to_ascii_lowercase();
+    if provider_key.is_empty() {
+        return Err("provider is required".into());
+    }
+    let paths = resolve_paths();
+    let credentials = collect_provider_credentials_from_paths(&paths);
+    let credential = credentials.get(&provider_key).ok_or_else(|| {
+        format!(
+            "No local credential is available for provider '{}'",
+            provider_key
+        )
+    })?;
+    let auth_ref = auth_ref
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("{provider_key}:default"));
+    let (auth_path, mut auth_json) = read_remote_auth_store(pool, host_id).await?;
+    if upsert_auth_store_entry_internal(&mut auth_json, &auth_ref, &provider_key, credential)? {
+        write_remote_auth_store(pool, host_id, &auth_path, &auth_json).await?;
+    }
+    Ok(())
+}
+
+pub(crate) fn delete_local_provider_auth_for_recipe(
+    paths: &crate::models::OpenClawPaths,
+    auth_ref: &str,
+    force: bool,
+) -> Result<(), String> {
+    let auth_ref = auth_ref.trim();
+    if auth_ref.is_empty() {
+        return Err("authRef is required".into());
+    }
+    let cfg = read_openclaw_config(paths)?;
+    let profiles = load_model_profiles(paths);
+    let bindings = collect_model_bindings(&cfg, &profiles);
+    if !force && auth_ref_is_in_use_by_bindings(&profiles, &bindings, auth_ref) {
+        return Err(format!(
+            "Provider auth '{}' is still referenced by at least one model binding",
+            auth_ref
+        ));
+    }
+    let mut auth_json = read_local_auth_store(paths)?;
+    if remove_auth_store_entry_internal(&mut auth_json, auth_ref) {
+        write_local_auth_store(paths, &auth_json)?;
+    }
+    Ok(())
+}
+
+pub(crate) async fn delete_remote_provider_auth_for_recipe(
+    pool: &SshConnectionPool,
+    host_id: &str,
+    auth_ref: &str,
+    force: bool,
+) -> Result<(), String> {
+    let auth_ref = auth_ref.trim();
+    if auth_ref.is_empty() {
+        return Err("authRef is required".into());
+    }
+    let (_, _, cfg) = remote_read_openclaw_config_text_and_json(pool, host_id).await?;
+    let profiles = remote_list_model_profiles_with_pool(pool, host_id.to_string()).await?;
+    let bindings = collect_model_bindings(&cfg, &profiles);
+    if !force && auth_ref_is_in_use_by_bindings(&profiles, &bindings, auth_ref) {
+        return Err(format!(
+            "Provider auth '{}' is still referenced by at least one model binding",
+            auth_ref
+        ));
+    }
+    let (auth_path, mut auth_json) = read_remote_auth_store(pool, host_id).await?;
+    if remove_auth_store_entry_internal(&mut auth_json, auth_ref) {
+        write_remote_auth_store(pool, host_id, &auth_path, &auth_json).await?;
+    }
+    Ok(())
+}
+
+pub(crate) fn delete_local_model_profile_for_recipe(
+    paths: &crate::models::OpenClawPaths,
+    profile_id: &str,
+    delete_auth_ref: bool,
+) -> Result<(), String> {
+    let cfg = read_openclaw_config(paths)?;
+    let profiles = load_model_profiles(paths);
+    let profile = profiles
+        .iter()
+        .find(|profile| profile.id == profile_id)
+        .cloned()
+        .ok_or_else(|| format!("Model profile '{}' was not found", profile_id))?;
+    let bindings = collect_model_bindings(&cfg, &profiles);
+    if bindings
+        .iter()
+        .any(|binding| binding.model_profile_id.as_deref() == Some(profile_id))
+    {
+        return Err(format!(
+            "Model profile '{}' is still referenced by at least one model binding",
+            profile_id
+        ));
+    }
+    let mut next = cfg.clone();
+    if let Some(models) = next.get_mut("models").and_then(Value::as_object_mut) {
+        models.remove(&profile_to_model_value(&profile));
+    }
+    let current = serde_json::to_string_pretty(&cfg).map_err(|error| error.to_string())?;
+    write_config_with_snapshot(paths, &current, &next, "recipe-delete-model-profile")?;
+    if delete_auth_ref {
+        delete_local_provider_auth_for_recipe(
+            paths,
+            &auth_ref_for_runtime_profile(&profile),
+            false,
+        )?;
+    }
+    Ok(())
+}
+
+pub(crate) async fn delete_remote_model_profile_for_recipe(
+    pool: &SshConnectionPool,
+    host_id: &str,
+    profile_id: &str,
+    delete_auth_ref: bool,
+) -> Result<(), String> {
+    let (config_path, current_text, cfg) =
+        remote_read_openclaw_config_text_and_json(pool, host_id).await?;
+    let profiles = remote_list_model_profiles_with_pool(pool, host_id.to_string()).await?;
+    let profile = profiles
+        .iter()
+        .find(|profile| profile.id == profile_id)
+        .cloned()
+        .ok_or_else(|| format!("Model profile '{}' was not found", profile_id))?;
+    let bindings = collect_model_bindings(&cfg, &profiles);
+    if bindings
+        .iter()
+        .any(|binding| binding.model_profile_id.as_deref() == Some(profile_id))
+    {
+        return Err(format!(
+            "Model profile '{}' is still referenced by at least one model binding",
+            profile_id
+        ));
+    }
+    let mut next = cfg.clone();
+    if let Some(models) = next.get_mut("models").and_then(Value::as_object_mut) {
+        models.remove(&profile_to_model_value(&profile));
+    }
+    remote_write_config_with_snapshot(
+        pool,
+        host_id,
+        &config_path,
+        &current_text,
+        &next,
+        "recipe-delete-model-profile",
+    )
+    .await?;
+    if delete_auth_ref {
+        delete_remote_provider_auth_for_recipe(
+            pool,
+            host_id,
+            &auth_ref_for_runtime_profile(&profile),
+            false,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+pub(crate) fn delete_local_agent_for_recipe(
+    paths: &crate::models::OpenClawPaths,
+    agent_id: &str,
+    force: bool,
+    rebind_channels_to: Option<&str>,
+) -> Result<(), String> {
+    if agent_id.trim().is_empty() {
+        return Err("agentId is required".into());
+    }
+    let mut cfg = read_openclaw_config(paths)?;
+    let current = serde_json::to_string_pretty(&cfg).map_err(|error| error.to_string())?;
+    let bindings = cfg
+        .get("bindings")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if !force && rebind_channels_to.is_none() && bindings_reference_agent(&bindings, agent_id) {
+        return Err(format!(
+            "Agent '{}' is still referenced by at least one channel binding",
+            agent_id
+        ));
+    }
+    if let Some(list) = cfg
+        .pointer_mut("/agents/list")
+        .and_then(Value::as_array_mut)
+    {
+        let before = list.len();
+        list.retain(|agent| agent.get("id").and_then(Value::as_str) != Some(agent_id));
+        if before == list.len() {
+            return Err(format!("Agent '{}' not found", agent_id));
+        }
+    } else {
+        return Err("agents.list not found".into());
+    }
+    let next_bindings = rewrite_agent_bindings_for_delete(bindings, agent_id, rebind_channels_to);
+    set_nested_value(&mut cfg, "bindings", Some(Value::Array(next_bindings)))?;
+    write_config_with_snapshot(paths, &current, &cfg, "recipe-delete-agent")
+}
+
+pub(crate) async fn delete_remote_agent_for_recipe(
+    pool: &SshConnectionPool,
+    host_id: &str,
+    agent_id: &str,
+    force: bool,
+    rebind_channels_to: Option<&str>,
+) -> Result<(), String> {
+    if agent_id.trim().is_empty() {
+        return Err("agentId is required".into());
+    }
+    let (config_path, current_text, mut cfg) =
+        remote_read_openclaw_config_text_and_json(pool, host_id).await?;
+    let bindings = cfg
+        .get("bindings")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if !force && rebind_channels_to.is_none() && bindings_reference_agent(&bindings, agent_id) {
+        return Err(format!(
+            "Agent '{}' is still referenced by at least one channel binding",
+            agent_id
+        ));
+    }
+    if let Some(list) = cfg
+        .pointer_mut("/agents/list")
+        .and_then(Value::as_array_mut)
+    {
+        let before = list.len();
+        list.retain(|agent| agent.get("id").and_then(Value::as_str) != Some(agent_id));
+        if before == list.len() {
+            return Err(format!("Agent '{}' not found", agent_id));
+        }
+    } else {
+        return Err("agents.list not found".into());
+    }
+    let next_bindings = rewrite_agent_bindings_for_delete(bindings, agent_id, rebind_channels_to);
+    set_nested_value(&mut cfg, "bindings", Some(Value::Array(next_bindings)))?;
+    remote_write_config_with_snapshot(
+        pool,
+        host_id,
+        &config_path,
+        &current_text,
+        &cfg,
+        "recipe-delete-agent",
+    )
+    .await
+}
+
 fn write_config_with_snapshot(
     paths: &crate::models::OpenClawPaths,
     current_text: &str,
@@ -6063,6 +8541,8 @@ fn write_config_with_snapshot(
         true,
         current_text,
         None,
+        None,
+        Vec::new(),
     )?;
     write_json(&paths.config_path, next)
 }
@@ -7393,6 +9873,7 @@ mod model_profile_upsert_tests {
             base_dir,
             history_dir: clawpal_dir.join("history"),
             metadata_path: clawpal_dir.join("metadata.json"),
+            recipe_runtime_dir: clawpal_dir.join("recipe-runtime"),
             clawpal_dir,
         }
     }
@@ -8628,50 +11109,9 @@ fn resolve_full_api_key(profile_id: String) -> Result<String, String> {
     Ok(key)
 }
 
-#[tauri::command]
-pub fn open_url(url: String) -> Result<(), String> {
-    let trimmed = url.trim();
-    if trimmed.is_empty() {
-        return Err("URL is required".into());
-    }
-    // Allow http(s) URLs and local paths within user home directory
-    if !trimmed.starts_with("http://") && !trimmed.starts_with("https://") {
-        // For local paths, ensure they don't execute apps
-        let path = std::path::Path::new(trimmed);
-        if path
-            .extension()
-            .map_or(false, |ext| ext == "app" || ext == "exe")
-        {
-            return Err("Cannot open application files".into());
-        }
-    }
-    #[cfg(target_os = "macos")]
-    {
-        Command::new("open")
-            .arg(&url)
-            .spawn()
-            .map_err(|e| e.to_string())?;
-    }
-    #[cfg(target_os = "linux")]
-    {
-        Command::new("xdg-open")
-            .arg(&url)
-            .spawn()
-            .map_err(|e| e.to_string())?;
-    }
-    #[cfg(target_os = "windows")]
-    {
-        Command::new("cmd")
-            .args(["/c", "start", &url])
-            .spawn()
-            .map_err(|e| e.to_string())?;
-    }
-    Ok(())
-}
-
 // ---- Backup / Restore ----
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BackupInfo {
     pub name: String,
@@ -8786,889 +11226,9 @@ fn resolve_model_provider_base_url(cfg: &Value, provider: &str) -> Option<String
         })
 }
 
-#[tauri::command]
-pub fn list_registered_instances() -> Result<Vec<clawpal_core::instance::Instance>, String> {
-    let registry = clawpal_core::instance::InstanceRegistry::load().map_err(|e| e.to_string())?;
-    // Best-effort self-heal: persist normalized instance ids (e.g., legacy empty SSH ids).
-    let _ = registry.save();
-    Ok(registry.list())
-}
-
-#[tauri::command]
-pub fn delete_registered_instance(instance_id: String) -> Result<bool, String> {
-    let id = instance_id.trim();
-    if id.is_empty() || id == "local" {
-        return Ok(false);
-    }
-    let mut registry =
-        clawpal_core::instance::InstanceRegistry::load().map_err(|e| e.to_string())?;
-    let removed = registry.remove(id).is_some();
-    if removed {
-        registry.save().map_err(|e| e.to_string())?;
-    }
-    Ok(removed)
-}
-
-#[tauri::command]
-pub async fn connect_docker_instance(
-    home: String,
-    label: Option<String>,
-    instance_id: Option<String>,
-) -> Result<clawpal_core::instance::Instance, String> {
-    clawpal_core::connect::connect_docker(&home, label.as_deref(), instance_id.as_deref())
-        .await
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub async fn connect_local_instance(
-    home: String,
-    label: Option<String>,
-    instance_id: Option<String>,
-) -> Result<clawpal_core::instance::Instance, String> {
-    clawpal_core::connect::connect_local(&home, label.as_deref(), instance_id.as_deref())
-        .await
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub async fn connect_ssh_instance(
-    host_id: String,
-) -> Result<clawpal_core::instance::Instance, String> {
-    let hosts = read_hosts_from_registry()?;
-    let host = hosts
-        .into_iter()
-        .find(|h| h.id == host_id)
-        .ok_or_else(|| format!("No SSH host config with id: {host_id}"))?;
-    // Register the SSH host as an instance in the instance registry
-    // (skip the actual SSH connectivity probe — the caller already connected)
-    let instance = clawpal_core::instance::Instance {
-        id: host.id.clone(),
-        instance_type: clawpal_core::instance::InstanceType::RemoteSsh,
-        label: host.label.clone(),
-        openclaw_home: None,
-        clawpal_data_dir: None,
-        ssh_host_config: Some(host),
-    };
-    let mut registry =
-        clawpal_core::instance::InstanceRegistry::load().map_err(|e| e.to_string())?;
-    let _ = registry.remove(&instance.id);
-    registry.add(instance.clone()).map_err(|e| e.to_string())?;
-    registry.save().map_err(|e| e.to_string())?;
-    Ok(instance)
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct LegacyDockerInstance {
-    pub id: String,
-    pub label: String,
-    pub openclaw_home: Option<String>,
-    pub clawpal_data_dir: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct LegacyMigrationResult {
-    pub imported_ssh_hosts: usize,
-    pub imported_docker_instances: usize,
-    pub imported_open_tab_instances: usize,
-    pub total_instances: usize,
-}
-
-fn fallback_label_from_instance_id(instance_id: &str) -> String {
-    if instance_id == "local" {
-        return "Local".to_string();
-    }
-    if let Some(suffix) = instance_id.strip_prefix("docker:") {
-        if suffix.is_empty() {
-            return "docker-local".to_string();
-        }
-        if suffix.starts_with("docker-") {
-            return suffix.to_string();
-        }
-        return format!("docker-{suffix}");
-    }
-    if let Some(suffix) = instance_id.strip_prefix("ssh:") {
-        return if suffix.is_empty() {
-            "SSH".to_string()
-        } else {
-            suffix.to_string()
-        };
-    }
-    instance_id.to_string()
-}
-
-fn upsert_registry_instance(
-    registry: &mut clawpal_core::instance::InstanceRegistry,
-    instance: clawpal_core::instance::Instance,
-) -> Result<(), String> {
-    let _ = registry.remove(&instance.id);
-    registry.add(instance).map_err(|e| e.to_string())
-}
-
-fn migrate_legacy_ssh_file(
-    paths: &crate::models::OpenClawPaths,
-    registry: &mut clawpal_core::instance::InstanceRegistry,
-) -> Result<usize, String> {
-    let legacy_path = paths.clawpal_dir.join("remote-instances.json");
-    if !legacy_path.exists() {
-        return Ok(0);
-    }
-    let text = fs::read_to_string(&legacy_path).map_err(|e| e.to_string())?;
-    let hosts: Vec<SshHostConfig> = serde_json::from_str(&text).unwrap_or_default();
-    let mut count = 0usize;
-    for host in hosts {
-        let instance = clawpal_core::instance::Instance {
-            id: host.id.clone(),
-            instance_type: clawpal_core::instance::InstanceType::RemoteSsh,
-            label: if host.label.trim().is_empty() {
-                host.host.clone()
-            } else {
-                host.label.clone()
-            },
-            openclaw_home: None,
-            clawpal_data_dir: None,
-            ssh_host_config: Some(host),
-        };
-        upsert_registry_instance(registry, instance)?;
-        count += 1;
-    }
-    // Remove legacy file after successful migration so it doesn't
-    // re-add deleted hosts on subsequent page loads.
-    if count > 0 {
-        let _ = fs::remove_file(&legacy_path);
-    }
-    Ok(count)
-}
-
-#[tauri::command]
-pub fn migrate_legacy_instances(
-    legacy_docker_instances: Vec<LegacyDockerInstance>,
-    legacy_open_tab_ids: Vec<String>,
-) -> Result<LegacyMigrationResult, String> {
-    let paths = resolve_paths();
-    let mut registry =
-        clawpal_core::instance::InstanceRegistry::load().map_err(|e| e.to_string())?;
-
-    // Ensure local instance exists for old users.
-    if registry.get("local").is_none() {
-        upsert_registry_instance(
-            &mut registry,
-            clawpal_core::instance::Instance {
-                id: "local".to_string(),
-                instance_type: clawpal_core::instance::InstanceType::Local,
-                label: "Local".to_string(),
-                openclaw_home: None,
-                clawpal_data_dir: None,
-                ssh_host_config: None,
-            },
-        )?;
-    }
-
-    let imported_ssh_hosts = migrate_legacy_ssh_file(&paths, &mut registry)?;
-
-    let mut imported_docker_instances = 0usize;
-    for docker in legacy_docker_instances {
-        let id = docker.id.trim();
-        if id.is_empty() {
-            continue;
-        }
-        let label = if docker.label.trim().is_empty() {
-            fallback_label_from_instance_id(id)
-        } else {
-            docker.label.clone()
-        };
-        upsert_registry_instance(
-            &mut registry,
-            clawpal_core::instance::Instance {
-                id: id.to_string(),
-                instance_type: clawpal_core::instance::InstanceType::Docker,
-                label,
-                openclaw_home: docker.openclaw_home.clone(),
-                clawpal_data_dir: docker.clawpal_data_dir.clone(),
-                ssh_host_config: None,
-            },
-        )?;
-        imported_docker_instances += 1;
-    }
-
-    let mut imported_open_tab_instances = 0usize;
-    for tab_id in legacy_open_tab_ids {
-        let id = tab_id.trim();
-        if id.is_empty() {
-            continue;
-        }
-        if registry.get(id).is_some() {
-            continue;
-        }
-        if id == "local" {
-            continue;
-        }
-        if id.starts_with("docker:") {
-            upsert_registry_instance(
-                &mut registry,
-                clawpal_core::instance::Instance {
-                    id: id.to_string(),
-                    instance_type: clawpal_core::instance::InstanceType::Docker,
-                    label: fallback_label_from_instance_id(id),
-                    openclaw_home: None,
-                    clawpal_data_dir: None,
-                    ssh_host_config: None,
-                },
-            )?;
-            imported_open_tab_instances += 1;
-            continue;
-        }
-        if id.starts_with("ssh:") {
-            let host_alias = id.strip_prefix("ssh:").unwrap_or("").to_string();
-            upsert_registry_instance(
-                &mut registry,
-                clawpal_core::instance::Instance {
-                    id: id.to_string(),
-                    instance_type: clawpal_core::instance::InstanceType::RemoteSsh,
-                    label: fallback_label_from_instance_id(id),
-                    openclaw_home: None,
-                    clawpal_data_dir: None,
-                    ssh_host_config: Some(clawpal_core::instance::SshHostConfig {
-                        id: id.to_string(),
-                        label: fallback_label_from_instance_id(id),
-                        host: host_alias,
-                        port: 22,
-                        username: String::new(),
-                        auth_method: "ssh_config".to_string(),
-                        key_path: None,
-                        password: None,
-                        passphrase: None,
-                    }),
-                },
-            )?;
-            imported_open_tab_instances += 1;
-        }
-    }
-
-    registry.save().map_err(|e| e.to_string())?;
-    let total_instances = registry.list().len();
-    Ok(LegacyMigrationResult {
-        imported_ssh_hosts,
-        imported_docker_instances,
-        imported_open_tab_instances,
-        total_instances,
-    })
-}
-
-// ---------------------------------------------------------------------------
-// Task 3: Remote instance config CRUD
-// ---------------------------------------------------------------------------
-
-pub type SshConfigHostSuggestion = clawpal_core::ssh::config::SshConfigHostSuggestion;
-
-fn ssh_config_path() -> Option<PathBuf> {
-    dirs::home_dir().map(|home| home.join(".ssh").join("config"))
-}
-
-fn read_hosts_from_registry() -> Result<Vec<SshHostConfig>, String> {
-    clawpal_core::ssh::registry::list_ssh_hosts()
-}
-
-#[tauri::command]
-pub fn list_ssh_hosts() -> Result<Vec<SshHostConfig>, String> {
-    read_hosts_from_registry()
-}
-
-#[tauri::command]
-pub fn list_ssh_config_hosts() -> Result<Vec<SshConfigHostSuggestion>, String> {
-    let Some(path) = ssh_config_path() else {
-        return Ok(Vec::new());
-    };
-    if !path.exists() {
-        return Ok(Vec::new());
-    }
-    let data =
-        fs::read_to_string(&path).map_err(|e| format!("Failed to read {}: {e}", path.display()))?;
-    Ok(clawpal_core::ssh::config::parse_ssh_config_hosts(&data))
-}
-
-#[tauri::command]
-pub fn upsert_ssh_host(host: SshHostConfig) -> Result<SshHostConfig, String> {
-    clawpal_core::ssh::registry::upsert_ssh_host(host)
-}
-
-#[tauri::command]
-pub fn delete_ssh_host(host_id: String) -> Result<bool, String> {
-    clawpal_core::ssh::registry::delete_ssh_host(&host_id)
-}
-
-// ---------------------------------------------------------------------------
-// Task 4: SSH connect / disconnect / status
-// ---------------------------------------------------------------------------
-
-fn emit_ssh_diagnostic(app: &AppHandle, report: &SshDiagnosticReport) {
-    let code = report.error_code.map(|value| value.as_str().to_string());
-    let payload = json!({
-        "stage": report.stage,
-        "intent": report.intent,
-        "status": report.status,
-        "errorCode": code,
-        "summary": report.summary,
-        "repairPlan": report.repair_plan,
-        "confidence": report.confidence,
-    });
-    let _ = app.emit("ssh:diagnostic", payload.clone());
-    if !report.repair_plan.is_empty() {
-        let _ = app.emit("ssh:repair-suggested", payload.clone());
-    }
-    crate::logging::log_info(&format!("[ssh:diagnostic] {payload}"));
-}
-
-fn make_ssh_command_error(
-    app: &AppHandle,
-    stage: SshStage,
-    intent: SshIntent,
-    raw: impl Into<String>,
-) -> String {
-    let message = raw.into();
-    let diagnostic = from_any_error(stage, intent, message.clone());
-    emit_ssh_diagnostic(app, &diagnostic);
-    message
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SshDiagnosticSuccessTrigger {
-    ConnectEstablished,
-    ConnectReuse,
-    ExplicitProbe,
-    RoutineOperation,
-}
-
-fn should_emit_success_ssh_diagnostic(trigger: SshDiagnosticSuccessTrigger) -> bool {
-    matches!(
-        trigger,
-        SshDiagnosticSuccessTrigger::ConnectEstablished
-            | SshDiagnosticSuccessTrigger::ExplicitProbe
-    )
-}
-
-fn success_ssh_diagnostic(
-    app: &AppHandle,
-    stage: SshStage,
-    intent: SshIntent,
-    summary: impl Into<String>,
-    trigger: SshDiagnosticSuccessTrigger,
-) -> SshDiagnosticReport {
-    let report = SshDiagnosticReport::success(stage, intent, summary);
-    if should_emit_success_ssh_diagnostic(trigger) {
-        emit_ssh_diagnostic(app, &report);
-    }
-    report
-}
-
-fn skipped_probe_diagnostic(
-    stage: SshStage,
-    intent: SshIntent,
-    summary: impl Into<String>,
-) -> SshDiagnosticReport {
-    SshDiagnosticReport {
-        stage,
-        intent,
-        status: SshDiagnosticStatus::Degraded,
-        error_code: None,
-        summary: summary.into(),
-        evidence: Vec::new(),
-        repair_plan: Vec::new(),
-        confidence: 0.5,
-    }
-}
-
-fn ssh_stage_for_error_code(code: SshErrorCode) -> SshStage {
-    match code {
-        SshErrorCode::HostUnreachable | SshErrorCode::ConnectionRefused | SshErrorCode::Timeout => {
-            SshStage::TcpReachability
-        }
-        SshErrorCode::HostKeyFailed => SshStage::HostKeyVerification,
-        SshErrorCode::KeyfileMissing
-        | SshErrorCode::PassphraseRequired
-        | SshErrorCode::AuthFailed
-        | SshErrorCode::SftpPermissionDenied => SshStage::AuthNegotiation,
-        SshErrorCode::SessionStale => SshStage::SessionOpen,
-        SshErrorCode::RemoteCommandFailed => SshStage::RemoteExec,
-        SshErrorCode::Unknown => SshStage::TcpReachability,
-    }
-}
-
-fn ssh_stage_for_intent(intent: SshIntent) -> SshStage {
-    match intent {
-        SshIntent::Connect => SshStage::SessionOpen,
-        SshIntent::Exec
-        | SshIntent::InstallStep
-        | SshIntent::DoctorRemote
-        | SshIntent::HealthCheck => SshStage::RemoteExec,
-        SshIntent::SftpRead => SshStage::SftpRead,
-        SshIntent::SftpWrite => SshStage::SftpWrite,
-        SshIntent::SftpRemove => SshStage::SftpRemove,
-    }
-}
-
-#[cfg(test)]
-mod ssh_diagnostic_policy_tests {
-    use super::{
-        should_emit_success_ssh_diagnostic, skipped_probe_diagnostic, SshDiagnosticSuccessTrigger,
-    };
-    use clawpal_core::ssh::diagnostic::{SshDiagnosticStatus, SshIntent, SshStage};
-
-    #[test]
-    fn suppresses_routine_success_diagnostics() {
-        assert!(!should_emit_success_ssh_diagnostic(
-            SshDiagnosticSuccessTrigger::RoutineOperation
-        ));
-        assert!(!should_emit_success_ssh_diagnostic(
-            SshDiagnosticSuccessTrigger::ConnectReuse
-        ));
-    }
-
-    #[test]
-    fn keeps_meaningful_success_diagnostics() {
-        assert!(should_emit_success_ssh_diagnostic(
-            SshDiagnosticSuccessTrigger::ConnectEstablished
-        ));
-        assert!(should_emit_success_ssh_diagnostic(
-            SshDiagnosticSuccessTrigger::ExplicitProbe
-        ));
-    }
-
-    #[test]
-    fn skipped_probes_report_degraded_status() {
-        let report = skipped_probe_diagnostic(
-            SshStage::SftpWrite,
-            SshIntent::SftpWrite,
-            "SFTP write probe skipped (no-op)",
-        );
-
-        assert_eq!(report.status, SshDiagnosticStatus::Degraded);
-        assert_eq!(report.error_code, None);
-    }
-}
-
-#[tauri::command]
-pub async fn ssh_connect(
-    pool: State<'_, SshConnectionPool>,
-    host_id: String,
-    app: AppHandle,
-) -> Result<bool, String> {
-    crate::commands::logs::log_dev(format!("[dev][ssh_connect] begin host_id={host_id}"));
-    // If already connected and handle is alive, reuse
-    if pool.is_connected(&host_id).await {
-        crate::commands::logs::log_dev(format!(
-            "[dev][ssh_connect] reuse existing connection host_id={host_id}"
-        ));
-        let _ = success_ssh_diagnostic(
-            &app,
-            SshStage::SessionOpen,
-            SshIntent::Connect,
-            "SSH session already connected",
-            SshDiagnosticSuccessTrigger::ConnectReuse,
-        );
-        return Ok(true);
-    }
-    let hosts = read_hosts_from_registry().map_err(|error| {
-        make_ssh_command_error(&app, SshStage::ResolveHostConfig, SshIntent::Connect, error)
-    })?;
-    if hosts.is_empty() {
-        crate::commands::logs::log_dev("[dev][ssh_connect] host registry is empty");
-    }
-    let host = hosts.into_iter().find(|h| h.id == host_id).ok_or_else(|| {
-        let mut ids = Vec::new();
-        for h in read_hosts_from_registry().unwrap_or_default() {
-            ids.push(h.id);
-        }
-        crate::commands::logs::log_dev(format!(
-            "[dev][ssh_connect] no host found host_id={host_id} known={ids:?}"
-        ));
-        make_ssh_command_error(
-            &app,
-            SshStage::ResolveHostConfig,
-            SshIntent::Connect,
-            format!("No SSH host config with id: {host_id}"),
-        )
-    })?;
-    // If the host has a stored passphrase, use it directly
-    let connect_result = if let Some(ref pp) = host.passphrase {
-        if !pp.is_empty() {
-            crate::commands::logs::log_dev(format!(
-                "[dev][ssh_connect] using stored passphrase for host_id={host_id}"
-            ));
-            pool.connect_with_passphrase(&host, Some(pp.as_str())).await
-        } else {
-            pool.connect(&host).await
-        }
-    } else {
-        pool.connect(&host).await
-    };
-    if let Err(error) = connect_result {
-        crate::commands::logs::log_dev(format!(
-            "[dev][ssh_connect] failed host_id={} host={} user={} port={} auth_method={} error={}",
-            host_id, host.host, host.username, host.port, host.auth_method, error
-        ));
-        let message = format!("ssh connect failed: {error}");
-        let mut diagnostic = from_any_error(
-            SshStage::TcpReachability,
-            SshIntent::Connect,
-            message.clone(),
-        );
-        if let Some(code) = diagnostic.error_code {
-            diagnostic.stage = ssh_stage_for_error_code(code);
-        }
-        emit_ssh_diagnostic(&app, &diagnostic);
-        return Err(message);
-    }
-    crate::commands::logs::log_dev(format!("[dev][ssh_connect] success host_id={host_id}"));
-    let _ = success_ssh_diagnostic(
-        &app,
-        SshStage::SessionOpen,
-        SshIntent::Connect,
-        "SSH connection established",
-        SshDiagnosticSuccessTrigger::ConnectEstablished,
-    );
-    Ok(true)
-}
-
-#[tauri::command]
-pub async fn ssh_connect_with_passphrase(
-    pool: State<'_, SshConnectionPool>,
-    host_id: String,
-    passphrase: String,
-    app: AppHandle,
-) -> Result<bool, String> {
-    crate::commands::logs::log_dev(format!(
-        "[dev][ssh_connect_with_passphrase] begin host_id={host_id}"
-    ));
-    if pool.is_connected(&host_id).await {
-        crate::commands::logs::log_dev(format!(
-            "[dev][ssh_connect_with_passphrase] reuse existing connection host_id={host_id}"
-        ));
-        let _ = success_ssh_diagnostic(
-            &app,
-            SshStage::SessionOpen,
-            SshIntent::Connect,
-            "SSH session already connected",
-            SshDiagnosticSuccessTrigger::ConnectReuse,
-        );
-        return Ok(true);
-    }
-    let hosts = read_hosts_from_registry().map_err(|error| {
-        make_ssh_command_error(&app, SshStage::ResolveHostConfig, SshIntent::Connect, error)
-    })?;
-    if hosts.is_empty() {
-        crate::commands::logs::log_dev("[dev][ssh_connect_with_passphrase] host registry is empty");
-    }
-    let host = hosts.into_iter().find(|h| h.id == host_id).ok_or_else(|| {
-        let mut ids = Vec::new();
-        for h in read_hosts_from_registry().unwrap_or_default() {
-            ids.push(h.id);
-        }
-        crate::commands::logs::log_dev(format!(
-            "[dev][ssh_connect_with_passphrase] no host found host_id={host_id} known={ids:?}"
-        ));
-        make_ssh_command_error(
-            &app,
-            SshStage::ResolveHostConfig,
-            SshIntent::Connect,
-            format!("No SSH host config with id: {host_id}"),
-        )
-    })?;
-    if let Err(error) = pool
-        .connect_with_passphrase(&host, Some(passphrase.as_str()))
-        .await
-    {
-        crate::commands::logs::log_dev(format!(
-            "[dev][ssh_connect_with_passphrase] failed host_id={} host={} user={} port={} auth_method={} error={}",
-            host_id,
-            host.host,
-            host.username,
-            host.port,
-            host.auth_method,
-            error
-        ));
-        return Err(make_ssh_command_error(
-            &app,
-            SshStage::AuthNegotiation,
-            SshIntent::Connect,
-            format!("ssh connect failed: {error}"),
-        ));
-    }
-    crate::commands::logs::log_dev(format!(
-        "[dev][ssh_connect_with_passphrase] success host_id={host_id}"
-    ));
-    let _ = success_ssh_diagnostic(
-        &app,
-        SshStage::SessionOpen,
-        SshIntent::Connect,
-        "SSH connection established",
-        SshDiagnosticSuccessTrigger::ConnectEstablished,
-    );
-    Ok(true)
-}
-
-#[tauri::command]
-pub async fn ssh_disconnect(
-    pool: State<'_, SshConnectionPool>,
-    host_id: String,
-) -> Result<bool, String> {
-    pool.disconnect(&host_id).await?;
-    Ok(true)
-}
-
-#[tauri::command]
-pub async fn ssh_status(
-    pool: State<'_, SshConnectionPool>,
-    host_id: String,
-) -> Result<String, String> {
-    if pool.is_connected(&host_id).await {
-        Ok("connected".to_string())
-    } else {
-        Ok("disconnected".to_string())
-    }
-}
-
-#[tauri::command]
-pub async fn get_ssh_transfer_stats(
-    pool: State<'_, SshConnectionPool>,
-    host_id: String,
-) -> Result<SshTransferStats, String> {
-    Ok(pool.get_transfer_stats(&host_id).await)
-}
-
-// ---------------------------------------------------------------------------
-// Task 5: SSH exec and SFTP Tauri commands
-// ---------------------------------------------------------------------------
-
-#[tauri::command]
-pub async fn ssh_exec(
-    pool: State<'_, SshConnectionPool>,
-    host_id: String,
-    command: String,
-    app: AppHandle,
-) -> Result<SshExecResult, String> {
-    pool.exec(&host_id, &command)
-        .await
-        .map(|result| {
-            let _ = success_ssh_diagnostic(
-                &app,
-                SshStage::RemoteExec,
-                SshIntent::Exec,
-                "Remote SSH command executed",
-                SshDiagnosticSuccessTrigger::RoutineOperation,
-            );
-            result
-        })
-        .map_err(|error| make_ssh_command_error(&app, SshStage::RemoteExec, SshIntent::Exec, error))
-}
-
-#[tauri::command]
-pub async fn sftp_read_file(
-    pool: State<'_, SshConnectionPool>,
-    host_id: String,
-    path: String,
-    app: AppHandle,
-) -> Result<String, String> {
-    pool.sftp_read(&host_id, &path)
-        .await
-        .map(|result| {
-            let _ = success_ssh_diagnostic(
-                &app,
-                SshStage::SftpRead,
-                SshIntent::SftpRead,
-                "SFTP read succeeded",
-                SshDiagnosticSuccessTrigger::RoutineOperation,
-            );
-            result
-        })
-        .map_err(|error| {
-            make_ssh_command_error(&app, SshStage::SftpRead, SshIntent::SftpRead, error)
-        })
-}
-
-#[tauri::command]
-pub async fn sftp_write_file(
-    pool: State<'_, SshConnectionPool>,
-    host_id: String,
-    path: String,
-    content: String,
-    app: AppHandle,
-) -> Result<bool, String> {
-    pool.sftp_write(&host_id, &path, &content)
-        .await
-        .map_err(|error| {
-            make_ssh_command_error(&app, SshStage::SftpWrite, SshIntent::SftpWrite, error)
-        })?;
-    let _ = success_ssh_diagnostic(
-        &app,
-        SshStage::SftpWrite,
-        SshIntent::SftpWrite,
-        "SFTP write succeeded",
-        SshDiagnosticSuccessTrigger::RoutineOperation,
-    );
-    Ok(true)
-}
-
-#[tauri::command]
-pub async fn sftp_list_dir(
-    pool: State<'_, SshConnectionPool>,
-    host_id: String,
-    path: String,
-    app: AppHandle,
-) -> Result<Vec<SftpEntry>, String> {
-    pool.sftp_list(&host_id, &path)
-        .await
-        .map(|result| {
-            let _ = success_ssh_diagnostic(
-                &app,
-                SshStage::SftpRead,
-                SshIntent::SftpRead,
-                "SFTP list succeeded",
-                SshDiagnosticSuccessTrigger::RoutineOperation,
-            );
-            result
-        })
-        .map_err(|error| {
-            make_ssh_command_error(&app, SshStage::SftpRead, SshIntent::SftpRead, error)
-        })
-}
-
-#[tauri::command]
-pub async fn sftp_remove_file(
-    pool: State<'_, SshConnectionPool>,
-    host_id: String,
-    path: String,
-    app: AppHandle,
-) -> Result<bool, String> {
-    pool.sftp_remove(&host_id, &path).await.map_err(|error| {
-        make_ssh_command_error(&app, SshStage::SftpRemove, SshIntent::SftpRemove, error)
-    })?;
-    let _ = success_ssh_diagnostic(
-        &app,
-        SshStage::SftpRemove,
-        SshIntent::SftpRemove,
-        "SFTP remove succeeded",
-        SshDiagnosticSuccessTrigger::RoutineOperation,
-    );
-    Ok(true)
-}
-
-#[tauri::command]
-pub async fn diagnose_ssh(
-    pool: State<'_, SshConnectionPool>,
-    host_id: String,
-    intent: String,
-    app: AppHandle,
-) -> Result<SshDiagnosticReport, String> {
-    let intent = intent.parse::<SshIntent>().map_err(|_| {
-        make_ssh_command_error(
-            &app,
-            SshStage::ResolveHostConfig,
-            SshIntent::Connect,
-            format!("Invalid SSH diagnostic intent: {intent}"),
-        )
-    })?;
-
-    let stage = ssh_stage_for_intent(intent);
-    if matches!(intent, SshIntent::Connect) {
-        if pool.is_connected(&host_id).await {
-            return Ok(success_ssh_diagnostic(
-                &app,
-                stage,
-                intent,
-                "SSH connection is healthy",
-                SshDiagnosticSuccessTrigger::ExplicitProbe,
-            ));
-        }
-        let hosts = read_hosts_from_registry().map_err(|error| {
-            make_ssh_command_error(&app, SshStage::ResolveHostConfig, SshIntent::Connect, error)
-        })?;
-        let host = hosts.into_iter().find(|h| h.id == host_id).ok_or_else(|| {
-            make_ssh_command_error(
-                &app,
-                SshStage::ResolveHostConfig,
-                SshIntent::Connect,
-                format!("No SSH host config with id: {host_id}"),
-            )
-        })?;
-        return Ok(match pool.connect(&host).await {
-            Ok(_) => success_ssh_diagnostic(
-                &app,
-                SshStage::SessionOpen,
-                SshIntent::Connect,
-                "SSH connect probe succeeded",
-                SshDiagnosticSuccessTrigger::ExplicitProbe,
-            ),
-            Err(error) => {
-                let mut report =
-                    from_any_error(SshStage::TcpReachability, SshIntent::Connect, error);
-                if let Some(code) = report.error_code {
-                    report.stage = ssh_stage_for_error_code(code);
-                }
-                emit_ssh_diagnostic(&app, &report);
-                report
-            }
-        });
-    }
-
-    if !pool.is_connected(&host_id).await {
-        let report = from_any_error(stage, intent, format!("No connection for id: {host_id}"));
-        emit_ssh_diagnostic(&app, &report);
-        return Ok(report);
-    }
-
-    let report = match intent {
-        SshIntent::Exec
-        | SshIntent::InstallStep
-        | SshIntent::DoctorRemote
-        | SshIntent::HealthCheck => {
-            match pool.exec(&host_id, "echo clawpal_ssh_diagnostic").await {
-                Ok(_) => SshDiagnosticReport::success(stage, intent, "SSH exec probe succeeded"),
-                Err(error) => from_any_error(stage, intent, error),
-            }
-        }
-        SshIntent::SftpRead => match pool.sftp_list(&host_id, "~").await {
-            Ok(_) => SshDiagnosticReport::success(stage, intent, "SFTP read probe succeeded"),
-            Err(error) => from_any_error(stage, intent, error),
-        },
-        SshIntent::SftpWrite => {
-            skipped_probe_diagnostic(stage, intent, "SFTP write probe skipped (no-op)")
-        }
-        SshIntent::SftpRemove => {
-            skipped_probe_diagnostic(stage, intent, "SFTP remove probe skipped (no-op)")
-        }
-        SshIntent::Connect => unreachable!(),
-    };
-    emit_ssh_diagnostic(&app, &report);
-    Ok(report)
-}
-
 // ---------------------------------------------------------------------------
 // Task 6: Remote business commands
 // ---------------------------------------------------------------------------
-
-fn is_owner_display_parse_error(text: &str) -> bool {
-    clawpal_core::doctor::owner_display_parse_error(text)
-}
-
-async fn run_openclaw_remote_with_autofix(
-    pool: &SshConnectionPool,
-    host_id: &str,
-    args: &[&str],
-) -> Result<crate::cli_runner::CliOutput, String> {
-    let first = crate::cli_runner::run_openclaw_remote(pool, host_id, args).await?;
-    if first.exit_code == 0 {
-        return Ok(first);
-    }
-    let combined = format!("{}\n{}", first.stderr, first.stdout);
-    if !is_owner_display_parse_error(&combined) {
-        return Ok(first);
-    }
-    let _ = crate::cli_runner::run_openclaw_remote(pool, host_id, &["doctor", "--fix"]).await;
-    crate::cli_runner::run_openclaw_remote(pool, host_id, args).await
-}
 
 /// Tier 2: slow, optional — openclaw version + duplicate detection (2 SSH calls in parallel).
 /// Called once on mount and on-demand (e.g., after upgrade), not in poll loop.
@@ -9688,6 +11248,13 @@ async fn remote_write_config_with_snapshot(
     // Use core function to prepare config write
     let (new_text, snapshot_text) =
         clawpal_core::config::prepare_config_write(current_text, next, source)?;
+    crate::commands::logs::log_remote_config_write(
+        "snapshot_write",
+        host_id,
+        Some(source),
+        config_path,
+        &new_text,
+    );
 
     // Create snapshot dir
     pool.exec(host_id, "mkdir -p ~/.clawpal/snapshots").await?;
@@ -9742,7 +11309,7 @@ async fn remote_resolve_openclaw_config_path(
     Ok(path.to_string())
 }
 
-async fn remote_read_openclaw_config_text_and_json(
+pub(crate) async fn remote_read_openclaw_config_text_and_json(
     pool: &SshConnectionPool,
     host_id: &str,
 ) -> Result<(String, String, Value), String> {
@@ -10282,27 +11849,6 @@ impl RemoteAuthCache {
     }
 }
 
-#[tauri::command]
-pub async fn run_openclaw_upgrade() -> Result<String, String> {
-    let output = Command::new("bash")
-        .args(["-c", "curl -fsSL https://openclaw.ai/install.sh | bash"])
-        .output()
-        .map_err(|e| format!("Failed to run upgrade: {e}"))?;
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-    let combined = if stderr.is_empty() {
-        stdout
-    } else {
-        format!("{stdout}\n{stderr}")
-    };
-    if output.status.success() {
-        clear_openclaw_version_cache();
-        Ok(combined)
-    } else {
-        Err(combined)
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Cron jobs
 // ---------------------------------------------------------------------------
@@ -10314,233 +11860,4 @@ fn parse_cron_jobs(text: &str) -> Value {
 
 // ---------------------------------------------------------------------------
 // Remote cron jobs
-// ---------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------
-// Watchdog management
-// ---------------------------------------------------------------------------
-
-#[tauri::command]
-pub async fn get_watchdog_status() -> Result<Value, String> {
-    tauri::async_runtime::spawn_blocking(|| {
-        let paths = resolve_paths();
-        let wd_dir = paths.clawpal_dir.join("watchdog");
-        let status_path = wd_dir.join("status.json");
-        let pid_path = wd_dir.join("watchdog.pid");
-
-        let mut status = if status_path.exists() {
-            let text = std::fs::read_to_string(&status_path).map_err(|e| e.to_string())?;
-            serde_json::from_str::<Value>(&text).unwrap_or(Value::Null)
-        } else {
-            Value::Null
-        };
-
-        let alive = if pid_path.exists() {
-            let pid_str = std::fs::read_to_string(&pid_path).unwrap_or_default();
-            if let Ok(pid) = pid_str.trim().parse::<u32>() {
-                std::process::Command::new("kill")
-                    .args(["-0", &pid.to_string()])
-                    .output()
-                    .map(|o| o.status.success())
-                    .unwrap_or(false)
-            } else {
-                false
-            }
-        } else {
-            false
-        };
-
-        if let Value::Object(ref mut map) = status {
-            map.insert("alive".into(), Value::Bool(alive));
-            map.insert(
-                "deployed".into(),
-                Value::Bool(wd_dir.join("watchdog.js").exists()),
-            );
-        } else {
-            let mut map = serde_json::Map::new();
-            map.insert("alive".into(), Value::Bool(alive));
-            map.insert(
-                "deployed".into(),
-                Value::Bool(wd_dir.join("watchdog.js").exists()),
-            );
-            status = Value::Object(map);
-        }
-
-        Ok(status)
-    })
-    .await
-    .map_err(|e| e.to_string())?
-}
-
-#[tauri::command]
-pub fn deploy_watchdog(app_handle: tauri::AppHandle) -> Result<bool, String> {
-    let paths = resolve_paths();
-    let wd_dir = paths.clawpal_dir.join("watchdog");
-    std::fs::create_dir_all(&wd_dir).map_err(|e| e.to_string())?;
-
-    let resource_path = app_handle
-        .path()
-        .resolve(
-            "resources/watchdog.js",
-            tauri::path::BaseDirectory::Resource,
-        )
-        .map_err(|e| format!("Failed to resolve watchdog resource: {e}"))?;
-
-    let content = std::fs::read_to_string(&resource_path)
-        .map_err(|e| format!("Failed to read watchdog resource: {e}"))?;
-
-    std::fs::write(wd_dir.join("watchdog.js"), content).map_err(|e| e.to_string())?;
-    crate::logging::log_info("Watchdog deployed");
-    Ok(true)
-}
-
-#[tauri::command]
-pub fn start_watchdog() -> Result<bool, String> {
-    let paths = resolve_paths();
-    let wd_dir = paths.clawpal_dir.join("watchdog");
-    let script = wd_dir.join("watchdog.js");
-    let pid_path = wd_dir.join("watchdog.pid");
-    let log_path = wd_dir.join("watchdog.log");
-
-    if !script.exists() {
-        return Err("Watchdog not deployed. Deploy first.".into());
-    }
-
-    if pid_path.exists() {
-        let pid_str = std::fs::read_to_string(&pid_path).unwrap_or_default();
-        if let Ok(pid) = pid_str.trim().parse::<u32>() {
-            let alive = std::process::Command::new("kill")
-                .args(["-0", &pid.to_string()])
-                .output()
-                .map(|o| o.status.success())
-                .unwrap_or(false);
-            if alive {
-                return Ok(true);
-            }
-        }
-    }
-
-    let log_file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log_path)
-        .map_err(|e| e.to_string())?;
-    let log_err = log_file.try_clone().map_err(|e| e.to_string())?;
-
-    let _child = std::process::Command::new("node")
-        .arg(&script)
-        .current_dir(&wd_dir)
-        .env("CLAWPAL_WATCHDOG_DIR", &wd_dir)
-        .stdout(log_file)
-        .stderr(log_err)
-        .stdin(std::process::Stdio::null())
-        .spawn()
-        .map_err(|e| format!("Failed to start watchdog: {e}"))?;
-
-    // PID file is written by watchdog.js itself via acquirePidFile()
-    crate::logging::log_info("Watchdog started");
-    Ok(true)
-}
-
-#[tauri::command]
-pub fn stop_watchdog() -> Result<bool, String> {
-    let paths = resolve_paths();
-    let pid_path = paths.clawpal_dir.join("watchdog").join("watchdog.pid");
-
-    if !pid_path.exists() {
-        return Ok(true);
-    }
-
-    let pid_str = std::fs::read_to_string(&pid_path).unwrap_or_default();
-    if let Ok(pid) = pid_str.trim().parse::<u32>() {
-        let _ = std::process::Command::new("kill")
-            .arg(pid.to_string())
-            .output();
-    }
-
-    let _ = std::fs::remove_file(&pid_path);
-    crate::logging::log_info("Watchdog stopped");
-    Ok(true)
-}
-
-#[tauri::command]
-pub fn uninstall_watchdog() -> Result<bool, String> {
-    let paths = resolve_paths();
-    let wd_dir = paths.clawpal_dir.join("watchdog");
-
-    // Stop first if running
-    let pid_path = wd_dir.join("watchdog.pid");
-    if pid_path.exists() {
-        let pid_str = std::fs::read_to_string(&pid_path).unwrap_or_default();
-        if let Ok(pid) = pid_str.trim().parse::<u32>() {
-            let _ = std::process::Command::new("kill")
-                .arg(pid.to_string())
-                .output();
-        }
-    }
-
-    // Remove entire watchdog directory
-    if wd_dir.exists() {
-        std::fs::remove_dir_all(&wd_dir).map_err(|e| e.to_string())?;
-    }
-    crate::logging::log_info("Watchdog uninstalled");
-    Ok(true)
-}
-
-// ---------------------------------------------------------------------------
-// Log reading commands
-// ---------------------------------------------------------------------------
-const MAX_LOG_TAIL_LINES: usize = 400;
-
-fn clamp_log_lines(lines: Option<usize>) -> usize {
-    let requested = lines.unwrap_or(200);
-    requested.clamp(1, MAX_LOG_TAIL_LINES)
-}
-
-#[tauri::command]
-pub fn read_app_log(lines: Option<usize>) -> Result<String, String> {
-    crate::logging::read_log_tail("app.log", clamp_log_lines(lines))
-}
-
-#[tauri::command]
-pub fn read_error_log(lines: Option<usize>) -> Result<String, String> {
-    crate::logging::read_log_tail("error.log", clamp_log_lines(lines))
-}
-
-#[tauri::command]
-pub fn read_helper_log(lines: Option<usize>) -> Result<String, String> {
-    crate::logging::read_log_tail("helper.log", clamp_log_lines(lines))
-}
-
-#[tauri::command]
-pub fn log_app_event(message: String) -> Result<bool, String> {
-    let trimmed = message.trim();
-    if !trimmed.is_empty() {
-        crate::logging::log_info(trimmed);
-    }
-    Ok(true)
-}
-
-#[tauri::command]
-pub fn read_gateway_log(lines: Option<usize>) -> Result<String, String> {
-    let paths = crate::models::resolve_paths();
-    let path = paths.openclaw_dir.join("logs/gateway.log");
-    if !path.exists() {
-        return Ok(String::new());
-    }
-    crate::logging::read_path_tail(&path, clamp_log_lines(lines))
-}
-
-#[tauri::command]
-pub fn read_gateway_error_log(lines: Option<usize>) -> Result<String, String> {
-    let paths = crate::models::resolve_paths();
-    let path = paths.openclaw_dir.join("logs/gateway.err.log");
-    if !path.exists() {
-        return Ok(String::new());
-    }
-    crate::logging::read_path_tail(&path, clamp_log_lines(lines))
-}
-
-// ---------------------------------------------------------------------------
-// Remote watchdog management
 // ---------------------------------------------------------------------------

@@ -186,7 +186,8 @@ fn probe_model(case: &ModelCase, api_key: &str) -> Result<(), String> {
 
     let resp = req.send().map_err(|e| format!("request failed: {e}"))?;
     let status = resp.status().as_u16();
-    if (200..300).contains(&status) {
+    if (200..300).contains(&status) || status == 429 {
+        // 429 means the API key is valid but rate-limited — treat as success.
         return Ok(());
     }
     let body = resp.text().unwrap_or_default();
@@ -234,6 +235,9 @@ fn run_case(case: &ModelCase) -> CaseResult {
         api_key: Some(api_key.clone()),
         base_url: None,
         description: Some(format!("E2E — {}/{}", case.provider, case.model)),
+        sync_source_device_name: None,
+        sync_source_host_id: None,
+        sync_synced_at: None,
         enabled: true,
     };
 
