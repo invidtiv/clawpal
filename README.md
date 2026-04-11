@@ -102,4 +102,4 @@ docs/plans/    Design and implementation plans
 
 ## License
 
-Proprietary. All rights reserved.
+[MIT](LICENSE) © 2024-2025 zhixian
